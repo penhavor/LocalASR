@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import QByteArray, QUrl, QTimer
-from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,7 +46,6 @@ from ..constants import (
     AUDIO_EXTENSIONS,
     LANGUAGES,
     MEDIA_EXTENSIONS,
-    OUTPUT_FORMATS,
     VIDEO_EXTENSIONS,
 )
 from ..core.ffmpeg import ffmpeg_version, find_ffmpeg
@@ -63,7 +62,7 @@ from .dialogs import (
     SettingsDialog,
 )
 from .models_panel import ModelListPanel
-from .widgets import FileListWidget, make_label, open_in_file_manager
+from .widgets import FileListWidget, FlowLayout, make_label, open_in_file_manager
 from .workers import CatalogRefreshWorker, ModelDownloadWorker, PackageInstaller, TranscribeWorker
 
 log = get_logger("ui")
@@ -92,14 +91,41 @@ _ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" wid
 
 
 def app_icon() -> QIcon:
-    """Иконка из встроенного SVG (не зависит от внешних файлов и сети)."""
+    """Иконка из встроенного SVG (не зависит от внешних файлов и сети).
+
+    Рендерим сразу в несколько размеров, чтобы и в заголовке окна, и в панели
+    задач Windows иконка была чёткой, а не мыльным квадратом.
+    """
+    icon = QIcon()
+    data = QByteArray(_ICON_SVG.encode("utf-8"))
+    try:  # векторный рендер в каждый размер — максимально чётко
+        from PySide6.QtSvg import QSvgRenderer
+
+        renderer = QSvgRenderer(data)
+        if renderer.isValid():
+            for size in (16, 20, 24, 32, 48, 64, 96, 128, 256):
+                pixmap = QPixmap(size, size)
+                pixmap.fill(compat.COLOR_TRANSPARENT)
+                painter = QPainter(pixmap)
+                renderer.render(painter)
+                painter.end()
+                icon.addPixmap(pixmap)
+            if not icon.isNull():
+                return icon
+    except Exception as exc:  # noqa: BLE001
+        log.debug("QSvgRenderer недоступен, рисуем растром: %s", exc)
     try:
-        image = QImage.fromData(QByteArray(_ICON_SVG.encode("utf-8")))
+        image = QImage.fromData(data)
         if not image.isNull():
-            return QIcon(QPixmap.fromImage(image))
+            for size in (16, 24, 32, 48, 64, 128, 256):
+                icon.addPixmap(
+                    QPixmap.fromImage(image).scaled(
+                        size, size, compat.KEEP_ASPECT_SMOOTH, compat.SMOOTH_TRANSFORM
+                    )
+                )
     except Exception as exc:  # noqa: BLE001
         log.debug("Не удалось собрать иконку из SVG: %s", exc)
-    return QIcon()
+    return icon
 
 
 # --------------------------------------------------------------------------- #
@@ -129,7 +155,9 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} — локальное распознавание речи")
         self.setWindowIcon(app_icon())
-        self.setMinimumSize(1180, 760)
+        # Компактный минимум: интерфейс построен так, что в узком окне всё
+        # переносится по строкам, а остальное можно доскроллить.
+        self.setMinimumSize(940, 620)
         self.setAcceptDrops(True)
 
         self._build_ui()
@@ -166,7 +194,8 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(compat.frame_no_frame())
-        scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_ALWAYS_OFF)
+        # в очень узком окне лучше дать горизонтальную прокрутку, чем обрезать кнопки
+        scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -186,17 +215,20 @@ class MainWindow(QMainWindow):
         # --- баннер-рекомендация (появится, если моделей нет)
         self.banner = QFrame()
         self.banner.setObjectName("Banner")
-        banner_layout = QHBoxLayout(self.banner)
+        banner_layout = QVBoxLayout(self.banner)
         banner_layout.setContentsMargins(14, 12, 12, 12)
-        banner_layout.setSpacing(12)
+        banner_layout.setSpacing(10)
         self.banner_text = make_label("", "Dim", word_wrap=True)
-        banner_layout.addWidget(self.banner_text, stretch=1)
+        banner_layout.addWidget(self.banner_text)
         self.banner_button = QPushButton("Открыть каталог")
         self.banner_button.setObjectName("Primary")
         self.banner_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.banner_button.clicked.connect(self._focus_models)
         self._banner_target: Optional[ModelEntry] = None
-        banner_layout.addWidget(self.banner_button)
+        banner_buttons = QHBoxLayout()
+        banner_buttons.addStretch(1)
+        banner_buttons.addWidget(self.banner_button)
+        banner_layout.addLayout(banner_buttons)
         self.banner.setVisible(False)
         layout.addWidget(self.banner)
 
@@ -214,8 +246,7 @@ class MainWindow(QMainWindow):
         files_header.addWidget(self.files_count_label)
         files_layout.addLayout(files_header)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
+        buttons = FlowLayout(spacing=8)
 
         self.add_files_button = QPushButton("📂 Выбрать файлы…")
         self.add_files_button.setObjectName("Primary")
@@ -228,23 +259,24 @@ class MainWindow(QMainWindow):
         self.add_folder_button = QPushButton("🗀 Папку…")
         self.add_folder_button.setObjectName("Ghost")
         self.add_folder_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.add_folder_button.setToolTip("Добавить все аудио/видео из папки (рекурсивно)")
+        self.add_folder_button.setToolTip("Добавить все аудио/видео из папки (рекурсивно, включая подпапки)")
         self.add_folder_button.clicked.connect(self.on_add_folder)
         buttons.addWidget(self.add_folder_button)
 
         self.clear_files_button = QPushButton("Очистить")
         self.clear_files_button.setObjectName("Ghost")
         self.clear_files_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.clear_files_button.setToolTip("Убрать из списка ВСЕ файлы (сами файлы на диске не удаляются)")
         self.clear_files_button.clicked.connect(lambda: self.file_list.clear_all())
         buttons.addWidget(self.clear_files_button)
 
         self.remove_selected_button = QPushButton("Убрать выбранные")
         self.remove_selected_button.setObjectName("Ghost")
         self.remove_selected_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.remove_selected_button.setToolTip("Убрать выделенные строки (Del). Выделение — мышью с Ctrl/Shift, как в проводнике")
         self.remove_selected_button.setShortcut(QKeySequence("Delete"))
         self.remove_selected_button.clicked.connect(lambda: self.file_list.remove_selected())
         buttons.addWidget(self.remove_selected_button)
-        buttons.addStretch(1)
         files_layout.addLayout(buttons)
 
         self.file_list = FileListWidget()
@@ -273,34 +305,39 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(10)
 
-        grid.addWidget(make_label("Язык речи", "Dim"), 0, 0)
+        language_label = make_label("Язык речи", "Dim")
+        language_label.setToolTip(
+            "Язык, на котором говорят в записи.\n"
+            "«Определить автоматически» — модель сама поймёт язык (чуть медленнее и на\n"
+            "коротких/шумных записях менее надёжно, чем явное указание)."
+        )
+        grid.addWidget(language_label, 0, 0)
         self.language_combo = QComboBox()
         for code, title in LANGUAGES:
             self.language_combo.addItem(title, code)
+        self.language_combo.setToolTip(language_label.toolTip())
         language_index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(language_index if language_index >= 0 else 1)
         self.language_combo.currentIndexChanged.connect(self._on_settings_changed)
-        grid.addWidget(self.language_combo, 0, 1)
+        grid.addWidget(self.language_combo, 0, 1, 1, 3)
 
-        grid.addWidget(make_label("Формат результата", "Dim"), 0, 2)
-        self.format_combo = QComboBox()
-        for key, title in OUTPUT_FORMATS.items():
-            self.format_combo.addItem(title, key)
-        format_index = self.format_combo.findData(self.settings.output_format)
-        self.format_combo.setCurrentIndex(format_index if format_index >= 0 else 0)
-        self.format_combo.currentIndexChanged.connect(self._on_settings_changed)
-        grid.addWidget(self.format_combo, 0, 3)
-
-        grid.addWidget(make_label("Куда сохранять", "Dim"), 1, 0)
+        save_label = make_label("Куда сохранять", "Dim")
+        save_label.setToolTip(
+            "Папка, куда лягут готовые .txt-файлы (имя файла = имени оригинала).\n"
+            "По умолчанию — outputs/ внутри папки проекта."
+        )
+        grid.addWidget(save_label, 1, 0)
         save_row = QHBoxLayout()
         self.output_edit = QLineEdit()
         self.output_edit.setText(self.settings.output_dir or str(paths.outputs_dir()))
         self.output_edit.setPlaceholderText(str(paths.outputs_dir()))
+        self.output_edit.setToolTip(save_label.toolTip())
         self.output_edit.editingFinished.connect(self._on_settings_changed)
         save_row.addWidget(self.output_edit, stretch=1)
         browse_output = QPushButton("Обзор…")
         browse_output.setObjectName("Ghost")
         browse_output.setCursor(compat.CURSOR_POINTING_HAND)
+        browse_output.setToolTip("Выбрать папку для результатов в проводнике")
         browse_output.clicked.connect(self.on_browse_output)
         save_row.addWidget(browse_output)
         reset_output = QToolButton()
@@ -316,38 +353,54 @@ class MainWindow(QMainWindow):
         self.output_hint = make_label("", "Muted", word_wrap=True)
         options_layout.addWidget(self.output_hint)
 
-        toggles = QHBoxLayout()
-        toggles.setSpacing(16)
+        # галочки переносятся по строкам (FlowLayout), а не обрезаются краем
+        toggles = FlowLayout(spacing=14)
         self.vad_check = QCheckBox("VAD (резать тишину)")
         self.vad_check.setChecked(self.settings.use_vad)
-        self.vad_check.setToolTip("Silero VAD: убирает тишину и шум — быстрее и меньше галлюцинаций")
-        self.vad_check.toggled.connect(self._on_settings_changed)
+        self.vad_check.setToolTip(
+            "Silero VAD: вырезает паузы, шум и музыку до распознавания.\n"
+            "Плюсы: быстрее и меньше галлюцинаций («Спасибо за просмотр» на тишине).\n"
+            "Выключи только если в записи важна сама пауза (например, речь с долгими остановками)."
+        )
         toggles.addWidget(self.vad_check)
+        self.vad_check.toggled.connect(self._on_settings_changed)
 
         self.clean_check = QCheckBox("Анти-галлюцинации")
         self.clean_check.setChecked(self.settings.suppress_hallucinations)
         self.clean_check.setToolTip(
             "Вычищает «[музыка]», «[аплодисменты]», «Спасибо за просмотр», "
-            "субтитрные вставки и зацикленные повторы фраз."
+            "субтитрные вставки и зацикленные повторы фраз.\n"
+            "Держи включённым: на лекциях с тишиной и музыкой без этого в тексте появляется мусор."
         )
         self.clean_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.clean_check)
 
         self.paragraph_check = QCheckBox("Абзацы")
         self.paragraph_check.setChecked(self.settings.paragraphs)
+        self.paragraph_check.setToolTip(
+            "Склеивает короткие сегменты распознавания в абзацы по смысловым паузам.\n"
+            "Выключи, если нужен «телеграфный» формат: каждая фраза с новой строки."
+        )
         self.paragraph_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.paragraph_check)
 
         self.timestamps_check = QCheckBox("Таймкоды в .txt")
         self.timestamps_check.setChecked(self.settings.add_timestamps_to_txt)
+        self.timestamps_check.setToolTip(
+            "Добавляет в .txt метки времени вида [00:12:34] перед фразами — удобно искать\n"
+            "место в записи. Результат всё равно остаётся обычным .txt-файлом."
+        )
         self.timestamps_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.timestamps_check)
-        toggles.addStretch(1)
 
         self.advanced_toggle = QPushButton("▸ Расширенные настройки")
         self.advanced_toggle.setObjectName("Link")
         self.advanced_toggle.setCursor(compat.CURSOR_POINTING_HAND)
         self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setToolTip(
+            "Тонкие настройки: слова-подсказки, подсказка стилю, beam, batched-режим,\n"
+            "таймкоды слов, перевод, автооткрытие папки."
+        )
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         toggles.addWidget(self.advanced_toggle)
         options_layout.addLayout(toggles)
@@ -359,57 +412,95 @@ class MainWindow(QMainWindow):
         self.advanced_frame.setVisible(False)
 
         hot_row = QHBoxLayout()
-        hot_row.addWidget(make_label("Слова-подсказки (термины лекции)", "Dim"))
+        hot_label = make_label("Слова-подсказки (термины лекции)", "Dim")
+        hot_label.setToolTip(
+            "Слова, которые модель будет «держать в голове» при распознавании.\n"
+            "Помогает с редкими терминами и фамилиями: без подсказки Whisper часто пишет их на слух.\n"
+            "Поддерживается движком faster-whisper; остальные движки подсказку игнорируют."
+        )
+        hot_row.addWidget(hot_label)
         self.hotwords_edit = QLineEdit()
         self.hotwords_edit.setPlaceholderText("трансформер, градиентный спуск, Kubernetes — через запятую")
         self.hotwords_edit.setText(self.settings.hotwords)
+        self.hotwords_edit.setToolTip(hot_label.toolTip())
         self.hotwords_edit.editingFinished.connect(self._on_settings_changed)
         hot_row.addWidget(self.hotwords_edit, stretch=1)
         advanced_layout.addLayout(hot_row)
 
         prompt_row = QHBoxLayout()
-        prompt_row.addWidget(make_label("Подсказка стилю", "Dim"))
+        prompt_label = make_label("Подсказка стилю", "Dim")
+        prompt_label.setToolTip(
+            "initial_prompt: короткий текст-пример стиля и тематики. Модель продолжает его,\n"
+            "поэтому держит стиль (научный, разговорный) и верно пишет термины из подсказки.\n"
+            "Не дублируй сюда весь словарь — для слов есть поле «Слова-подсказки»."
+        )
+        prompt_row.addWidget(prompt_label)
         self.prompt_edit = QLineEdit()
         self.prompt_edit.setPlaceholderText("Например: Лекция по машинному обучению, русский язык, научный стиль.")
         self.prompt_edit.setText(self.settings.initial_prompt)
+        self.prompt_edit.setToolTip(prompt_label.toolTip())
         self.prompt_edit.editingFinished.connect(self._on_settings_changed)
         prompt_row.addWidget(self.prompt_edit, stretch=1)
         advanced_layout.addLayout(prompt_row)
 
-        extra_row = QHBoxLayout()
-        extra_row.addWidget(make_label("Формат", "Dim"))
+        extra_row = FlowLayout(spacing=12)
         self.beam_combo = QComboBox()
         for value, title in ((1, "beam 1 (быстро)"), (3, "beam 3"), (5, "beam 5 (баланс)"), (8, "beam 8 (точность)")):
             self.beam_combo.addItem(title, value)
         beam_index = self.beam_combo.findData(int(self.settings.beam_size or 5))
         self.beam_combo.setCurrentIndex(beam_index if beam_index >= 0 else 2)
         self.beam_combo.currentIndexChanged.connect(self._on_settings_changed)
+        self.beam_combo.setToolTip(
+            "Beam size — сколько вариантов продолжения фразы держит декодер.\n"
+            "1 — быстрее всего; 5 — оптимально для речи; 8 — чуть точнее, но заметно медленнее.\n"
+            "Для обычных лекций оставляй 5."
+        )
         extra_row.addWidget(self.beam_combo)
 
         self.batched_check = QCheckBox("Batched (до 4× быстрее на GPU)")
         self.batched_check.setChecked(bool(self.settings.batched))
+        self.batched_check.setToolTip(
+            "Пакетный декодинг (BatchedInferencePipeline) у faster-whisper: несколько кусков\n"
+            "аудио считаются одним батчем. Выигрыш до 4× на GPU; на CPU почти не помогает.\n"
+            "Требует больше памяти — при нехватке RAM выключи."
+        )
         self.batched_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.batched_check)
 
         self.wordts_check = QCheckBox("Таймкоды слов")
         self.wordts_check.setChecked(bool(self.settings.word_timestamps))
+        self.wordts_check.setToolTip(
+            "Считать таймкоды каждого слова (нужно только для точных субтитров srt/vtt).\n"
+            "Замедляет распознавание; для обычного .txt-результата выключи."
+        )
         self.wordts_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.wordts_check)
 
         self.translate_check = QCheckBox("Перевод в EN")
         self.translate_check.setChecked(bool(self.settings.translate_to_english))
+        self.translate_check.setToolTip(
+            "task=translate: модель сразу выдаёт английский перевод услышанного.\n"
+            "Для конспекта русской лекции выключи; полезно для иноязычных докладов."
+        )
         self.translate_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.translate_check)
 
         self.open_folder_check = QCheckBox("Открыть папку после завершения")
         self.open_folder_check.setChecked(bool(self.settings.open_output_folder_when_done))
+        self.open_folder_check.setToolTip(
+            "Когда очередь догорит, открыть папку с результатами в проводнике.\n"
+            "Удобно при разовых прогонах; мешает, если запускаешь папками на ночь."
+        )
         self.open_folder_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.open_folder_check)
-        extra_row.addStretch(1)
 
         settings_button = QPushButton("Все настройки…")
         settings_button.setObjectName("Ghost")
         settings_button.setCursor(compat.CURSOR_POINTING_HAND)
+        settings_button.setToolTip(
+            "Полный диалог настроек: устройство (CPU/GPU), точность вычислений, потоки,\n"
+            "параллельные файлы, движки и CUDA, справка о программе."
+        )
         settings_button.clicked.connect(self.on_open_settings)
         extra_row.addWidget(settings_button)
         advanced_layout.addLayout(extra_row)
@@ -475,7 +566,7 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.cancel_button, stretch=1)
         work_layout.addLayout(action_row)
 
-        results_row = QHBoxLayout()
+        results_row = FlowLayout(spacing=8)
         self.results_button = QPushButton("Показать результаты")
         self.results_button.setObjectName("Ghost")
         self.results_button.setCursor(compat.CURSOR_POINTING_HAND)
@@ -487,7 +578,6 @@ class MainWindow(QMainWindow):
         self.open_output_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.open_output_button.clicked.connect(lambda: open_in_file_manager(self.current_output_dir()))
         results_row.addWidget(self.open_output_button)
-        results_row.addStretch(1)
         work_layout.addLayout(results_row)
 
         layout.addWidget(work_box, stretch=2)
@@ -744,6 +834,7 @@ class MainWindow(QMainWindow):
             self.settings.last_used_model_id = entry.id
             self.settings.save()
             self._log(f"Выбрана модель: {entry.name}")
+            self._toast(f"Модель для работы: {entry.name}")
         self._update_banner()
         self._update_work_button()
 
@@ -773,7 +864,9 @@ class MainWindow(QMainWindow):
 
         worker.progress.connect(dialog.set_fraction)
         worker.progress.connect(lambda fraction, status: card.update_progress(fraction, status) if card else None)
-        worker.progress.connect(dialog.set_status)
+        # ВАЖНО: сигнал несёт (доля, текст); слоту статуса нужен именно текст,
+        # иначе QLabel.setText(float) ронял приложение на каждом тике прогресса
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
         worker.outputLine.connect(dialog.append_log)
         dialog.cancelRequested.connect(worker.cancel)
         worker.finishedWith.connect(lambda ok, message, result: self._on_download_finished(ok, message, result, dialog, card))
@@ -815,7 +908,7 @@ class MainWindow(QMainWindow):
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_no(),
             )
-            return answer == QMessageBox.Yes
+            return answer == compat.message_box_yes()
         return True
 
     def on_delete_model(self, entry: ModelEntry) -> None:
@@ -824,7 +917,7 @@ class MainWindow(QMainWindow):
             f"Удалить «{entry.name}» с диска?\n\nПапка: {entry.install_dir}\n"
             f"Освободится: {paths.human_size(entry.installed_size_bytes or entry.size_bytes)}",
             compat.message_box_yes() | compat.message_box_no(),
-            QMessageBox.No,
+            compat.message_box_no(),
         )
         if answer != compat.message_box_yes():
             return
@@ -1090,7 +1183,7 @@ class MainWindow(QMainWindow):
             self, "Нужен движок",
             f"Для этой модели нужен движок «{engine}».\nУстановить {', '.join(packages)} в .venv?",
             compat.message_box_yes() | compat.message_box_no(),
-            QMessageBox.Yes,
+            compat.message_box_yes(),
         )
         if answer == compat.message_box_yes():
             self._pending_job = True
@@ -1121,16 +1214,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Уже идёт установка", "Дождись завершения предыдущей установки.")
             return
 
+        size_note = ""
+        if any(pkg.lower().startswith("torch") for pkg in packages):
+            size_note = (
+                "\nОбъём большой из-за PyTorch: ~120–200 МБ (CPU-сборка) — это разовая "
+                "загрузка, при следующих запусках ничего не качается."
+            )
         dialog = ProgressDialog(
             title or "Установка компонентов",
             "Устанавливаем строго в .venv проекта — системный Python не трогаем.\n"
-            "Пакеты: " + ", ".join(packages),
+            "Пакеты: " + ", ".join(packages) + size_note,
             parent=self,
         )
         worker = PackageInstaller(packages, title, self)
         worker.outputLine.connect(dialog.append_log)
         worker.progress.connect(lambda fraction, status: dialog.set_fraction(fraction))
-        worker.progress.connect(dialog.set_status)
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
         dialog.cancelRequested.connect(worker.cancel)
         worker.finishedWith.connect(lambda ok, message: self._on_packages_installed(ok, message, dialog))
 
@@ -1146,7 +1245,7 @@ class MainWindow(QMainWindow):
         self.hardware = registry.hardware()
         self.models_panel.set_hardware(self.hardware)
         if not ok:
-            QMessageBox.warning(self, "Установка не завершилась", message)
+            QMessageBox.warning(self, "Установка не завершилась", message + self._install_hint(message))
         elif getattr(self, "_pending_job", False):
             self._pending_job = False
             QTimer.singleShot(250, self.on_work)
@@ -1154,13 +1253,38 @@ class MainWindow(QMainWindow):
         self.package_worker = None
         self.package_dialog = None
 
+    @staticmethod
+    def _install_hint(message: str) -> str:
+        """Человеческая подсказка к типичным причинам падения pip."""
+        low = (message or "").lower()
+        if any(marker in low for marker in (
+            "failed to build", "build wheel", "cmake", "winerror 2",
+            "microsoft visual c++", "no compiler",
+        )):
+            return (
+                "\n\nПохоже, pip не нашёл готовое колесо одного из пакетов под твой Python "
+                "и попытался собрать его из исходников (для этого нужны компилятор и CMake, "
+                "которых обычно нет).\n"
+                "Что делать:\n"
+                "  1) обнови LocalASR до последней версии — пины зависимостей ослаблены, "
+                "ставятся готовые колёса;\n"
+                "  2) если не помогло — поставь Python 3.11–3.13 и запусти программу им "
+                "(под экзотически новый Python колёса выходят не сразу)."
+            )
+        if "could not find a version" in low or "no matching distribution" in low:
+            return (
+                "\n\nОдин из пакетов не находится в PyPI под твою версию Python. "
+                "Попробуй Python 3.11–3.13 или проверь, что есть доступ в интернет без прокси."
+            )
+        return ""
+
     def on_repair_env(self) -> None:
         answer = QMessageBox.question(
             self, "Проверка окружения",
             "Перепроверить все базовые зависимости в .venv и доустановить недостающее?\n\n"
             "Это безопасно: системный Python не затрагивается.",
             compat.message_box_yes() | compat.message_box_no(),
-            QMessageBox.Yes,
+            compat.message_box_yes(),
         )
         if answer != compat.message_box_yes():
             return
@@ -1225,9 +1349,11 @@ class MainWindow(QMainWindow):
             "• Язык заранее неизвестен или запись многоязычная →\n"
             "   «Whisper Large v3 Turbo (multilingual)».\n"
             "• Нужен максимум качества и время не важно →\n"
-            "   «Whisper Large v3» (3.1 ГБ).\n"
-            "• Совсем слабое железо / надо просто быстро →\n"
-            "   Vosk Russian (45 МБ) — но без пунктуации и с ошибками.\n\n"
+            "   «Whisper Large v3» (3.1 ГБ) или Qwen3-ASR 1.7B (4.7 ГБ, torch).\n"
+            "• Русский с пунктуацией на слабом железе →\n"
+            "   «GigaAM v3 E2E RNNT» (Sber, 449 МБ, torch).\n"
+            "• Записи на языках СНГ (kk, ky, uz) →\n"
+            "   «GigaAM Multilingual» (Sber).\n\n"
             "В карточках указаны размер файла, потребление памяти, языки,\n"
             "оценки точности и скорости — сравнивай и выбирай.",
         )
@@ -1246,7 +1372,8 @@ class MainWindow(QMainWindow):
     # ---------------- служебное ---------------------------------------- #
     def _collect_settings(self) -> None:
         self.settings.language = self.language_combo.currentData() or ""
-        self.settings.output_format = self.format_combo.currentData() or "txt"
+        # результат всегда в txt: отдельной настройки формата больше нет
+        self.settings.output_format = "txt"
         self.settings.output_dir = self.output_edit.text().strip()
         self.settings.use_vad = self.vad_check.isChecked()
         self.settings.suppress_hallucinations = self.clean_check.isChecked()
@@ -1264,8 +1391,6 @@ class MainWindow(QMainWindow):
     def _apply_settings_to_ui(self) -> None:
         index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(index if index >= 0 else 1)
-        index = self.format_combo.findData(self.settings.output_format)
-        self.format_combo.setCurrentIndex(index if index >= 0 else 0)
         self.output_edit.setText(self.settings.output_dir or str(paths.outputs_dir()))
         self.vad_check.setChecked(self.settings.use_vad)
         self.clean_check.setChecked(self.settings.suppress_hallucinations)
@@ -1291,7 +1416,7 @@ class MainWindow(QMainWindow):
 
     def _update_output_hint(self) -> None:
         output_dir = self.current_output_dir()
-        fmt = self.format_combo.currentData() or "txt"
+        fmt = "txt-time" if self.timestamps_check.isChecked() else "txt"
         sample = paths.sanitize_stem("лекция 1.mp4")
         suffix = paths.output_suffix(fmt)
         self.output_hint.setText(

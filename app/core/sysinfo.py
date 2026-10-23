@@ -276,7 +276,10 @@ def collect() -> HardwareInfo:
         info.notes.append("Apple Silicon: ускорение идёт через CPU-оптимизации (Accelerate/AMX).")
 
     if info.ram_total_mb and info.ram_total_mb < 6000:
-        info.notes.append("Меньше 6 ГБ RAM — выбирай модели до 500 МБ (turbo-q5_0, small int8, Vosk).")
+        info.notes.append(
+            "Меньше 6 ГБ RAM — выбирай модели до 500 МБ: "
+            "GigaAM v3 (Sber, 449 МБ) или Whisper turbo q5_0 (whisper.cpp, 574 МБ)."
+        )
     return info
 
 

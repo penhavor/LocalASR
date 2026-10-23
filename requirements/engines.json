@@ -8,19 +8,50 @@
   },
   "whispercpp": {
     "title": "whisper.cpp (pywhispercpp)",
-    "pip": ["pywhispercpp>=1.4.0"],
+    "pip": [
+      "pywhispercpp>=1.4.0"
+    ],
     "import": "pywhispercpp",
     "note": "Ставится один раз при первом выборе GGML-модели."
   },
   "vosk": {
     "title": "Vosk (Kaldi)",
-    "pip": ["vosk>=0.3.45"],
+    "pip": [
+      "vosk>=0.3.45"
+    ],
     "import": "vosk",
     "note": "Ставится один раз при первом выборе Vosk-модели."
   },
+  "qwen-asr": {
+    "title": "Qwen3-ASR (transformers + PyTorch)",
+    "pip": [
+      "torch>=2.6",
+      "transformers>=5.0",
+      "accelerate>=1.0",
+      "soundfile>=0.12"
+    ],
+    "import": "transformers",
+    "note": "Нужен для моделей Qwen3-ASR (Alibaba). Ставится по требованию, ОДИН РАЗ: PyTorch ~120–200 МБ (CPU) + transformers; модели Qwen — одни из самых точных среди открытых. Повторные запуски ничего не качают."
+  },
+  "gigaam": {
+    "title": "GigaAM (Sber, transformers + PyTorch)",
+    "pip": [
+      "torch>=2.6",
+      "torchaudio>=2.6",
+      "transformers>=4.52",
+      "hydra-core>=1.3,<2",
+      "omegaconf>=2.3,<3",
+      "sentencepiece>=0.2.2"
+    ],
+    "import": "transformers",
+    "note": "Нужен для русских моделей GigaAM (Sber). Ставится по требованию, ОДИН РАЗ: самое тяжёлое — PyTorch (~120–200 МБ в CPU-варианте), остальное мелко. Повторные запуски ничего не качают."
+  },
   "cuda": {
     "title": "NVIDIA CUDA 12 (cuBLAS + cuDNN 9)",
-    "pip": ["nvidia-cublas-cu12>=12.4", "nvidia-cudnn-cu12>=9.1,<10"],
+    "pip": [
+      "nvidia-cublas-cu12>=12.4",
+      "nvidia-cudnn-cu12>=9.1,<10"
+    ],
     "import": null,
     "requirements_file": "gpu.txt",
     "note": "На Windows дополнительно нужны системные DLL cuDNN9/cuBLAS (см. requirements/gpu.txt)."

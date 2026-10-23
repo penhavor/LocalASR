@@ -14,8 +14,6 @@ TypeError'ом прямо посреди создания окна.
   3. комбинации флагов собираются оператором | над самими enum'ами, чтобы тип
      результата совпадал с ожидаемым сигнатурой Qt.
 
-Проверка актуальности этого файла лежит в `app/ui/qt_pyi_check.py`
-(сравнивает с .pyi-стабами установленного PySide6) и в tests/test_qt_compat_stubs.py.
 """
 
 from __future__ import annotations
@@ -125,6 +123,13 @@ TEXT_SELECTABLE_BY_MOUSE = _flag("QtCore.Qt", "TextInteractionFlag", "TextSelect
 TEXT_FORMAT_RICH = _flag("QtCore.Qt", "TextFormat", "RichText", 1)
 
 SCROLLBAR_ALWAYS_OFF = _flag("QtCore.Qt", "ScrollBarPolicy", "ScrollBarAlwaysOff", 1)
+SCROLLBAR_AS_NEEDED = _flag("QtCore.Qt", "ScrollBarPolicy", "ScrollBarAsNeeded", 0)
+SCROLLBAR_ALWAYS_ON = _flag("QtCore.Qt", "ScrollBarPolicy", "ScrollBarAlwaysOn", 2)
+
+KEEP_ASPECT_SMOOTH = _enum(Qt, "AspectRatioMode.KeepAspectRatio", "KeepAspectRatio", default=0x1)
+SMOOTH_TRANSFORM = _enum(
+    Qt, "TransformationMode.SmoothTransformation", "SmoothTransformation", default=0x1
+)
 
 # --------------------------------------------------------------------------- #
 #  Цвета

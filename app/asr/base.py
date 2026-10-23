@@ -12,7 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..constants import ENGINE_FASTER_WHISPER, ENGINE_VOSK, ENGINE_WHISPERCPP
+from ..constants import (
+    ENGINE_FASTER_WHISPER,
+    ENGINE_GIGAAM,
+    ENGINE_QWEN_ASR,
+    ENGINE_VOSK,
+    ENGINE_WHISPERCPP,
+)
 from ..core.postprocess import Segment
 
 CancelToken = Callable[[], bool]
@@ -178,7 +184,32 @@ def engine_packages(engine: str) -> List[str]:
         ENGINE_FASTER_WHISPER: [],
         ENGINE_WHISPERCPP: ["pywhispercpp>=1.4.0"],
         ENGINE_VOSK: ["vosk>=0.3.45"],
+        ENGINE_QWEN_ASR: ["torch>=2.6", "transformers>=5.0", "accelerate>=1.0", "soundfile"],
+        ENGINE_GIGAAM: [
+            "torch>=2.6", "torchaudio>=2.6", "transformers>=4.52",
+            "hydra-core>=1.3,<2", "omegaconf>=2.3,<3", "sentencepiece>=0.2.2",
+        ],
     }.get(engine, [])
+
+
+def engine_note(engine: str) -> str:
+    """Человеческое пояснение про движок из requirements/engines.json."""
+    import json
+
+    from .. import paths
+
+    config_path = paths.resource_path("engines.json")
+    if config_path is None:
+        candidate = paths.ROOT_DIR / "requirements" / "engines.json"
+        config_path = candidate if candidate.is_file() else None
+    if config_path is not None:
+        try:
+            with open(config_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return str((data.get(engine) or {}).get("note") or "")
+        except (OSError, ValueError):
+            pass
+    return ""
 
 
 def engine_import_name(engine: str) -> str:
@@ -186,4 +217,6 @@ def engine_import_name(engine: str) -> str:
         ENGINE_FASTER_WHISPER: "faster_whisper",
         ENGINE_WHISPERCPP: "pywhispercpp",
         ENGINE_VOSK: "vosk",
+        ENGINE_QWEN_ASR: "transformers",
+        ENGINE_GIGAAM: "transformers",
     }.get(engine, "")

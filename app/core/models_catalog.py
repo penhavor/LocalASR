@@ -19,7 +19,9 @@ from ..constants import (
     CATALOG_FILENAME,
     CATALOG_REMOTE_URL,
     ENGINE_FASTER_WHISPER,
+    ENGINE_GIGAAM,
     ENGINE_LABELS,
+    ENGINE_QWEN_ASR,
     ENGINE_VOSK,
     ENGINE_WHISPERCPP,
     ENGINES,
@@ -56,6 +58,7 @@ class ModelEntry:
     tags: List[str] = field(default_factory=list)
     license: str = ""
     description: str = ""
+    vendor: str = ""                          # кто сделал модель (OpenAI, Qwen, Sber…)
     recommended: bool = False
     recommended_for: str = ""
     defaults: Dict[str, Any] = field(default_factory=dict)
@@ -145,6 +148,19 @@ def detect_engine(folder: Path) -> str:
         names = [p.name.lower() for p in folder.iterdir()]
     except OSError:
         return ""
+
+    # transformers-модели (Qwen3-ASR, GigaAM и т.п.) опознаём по config.json
+    config = folder / "config.json"
+    if config.is_file():
+        try:
+            with open(config, "r", encoding="utf-8") as fh:
+                model_type = str(json.load(fh).get("model_type") or "").lower()
+        except (OSError, ValueError):
+            model_type = ""
+        if model_type == "qwen3_asr":
+            return ENGINE_QWEN_ASR
+        if model_type == "gigaam":
+            return ENGINE_GIGAAM
 
     if "am" in names or any(n == "final.mdl" or n.endswith(".mdl") for n in names):
         return ENGINE_VOSK

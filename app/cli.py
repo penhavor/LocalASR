@@ -112,6 +112,18 @@ def _pyside_import_hint(exc: BaseException) -> str:
 
 def run_gui(argv: Sequence[str]) -> int:
     """Запускает Qt-приложение. Все импорты PySide6 — внутри функции."""
+    # Windows: без явного AppUserModelID система группирует окно под
+    # «python.exe» и рисует в панели задач питоновский значок вместо нашего.
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "LocalASR.App.1.0"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         from PySide6.QtCore import qInstallMessageHandler
         from PySide6.QtGui import QSurfaceFormat
@@ -122,6 +134,10 @@ def run_gui(argv: Sequence[str]) -> int:
 
     # Qt-сообщения -> наш лог (иначе в pythonw они теряются)
     def _qt_message_handler(mode, context, message):
+        # известное безвредное предупреждение Qt о px->pt конвертации шрифтов
+        # в stylesheet'ах (QTBUG-102278): пользователю оно только мешает
+        if "point size <= 0" in message.lower():
+            return
         level = {0: 10, 1: 20, 2: 30, 3: 40}.get(int(mode), 20)
         location = f"{context.file}:{context.line}" if context and context.file else ""
         log.log(level, "Qt: %s %s", message, location)
@@ -182,7 +198,12 @@ def run_gui(argv: Sequence[str]) -> int:
         )
         return 1
 
-    window.show()
+    # По умолчанию открываемся на весь экран: интерфейс плотный, и в maximized
+    # видно всё сразу. Если геометрия сохранялась в прошлый раз — уважаем её.
+    if settings.window_geometry:
+        window.show()
+    else:
+        window.showMaximized()
 
     def _global_exception(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):

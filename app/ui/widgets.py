@@ -5,16 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -73,6 +75,97 @@ def hline() -> QFrame:
     line.setFrameShape(QFrame.HLine)
     line.setStyleSheet("color: #2a3244; background-color: #2a3244; max-height: 1px;")
     return line
+
+
+class FlowLayout(QLayout):
+    """Компоновка с переносом строк (как flex-wrap в CSS).
+
+    Нужна, чтобы чипсы/галочки/кнопки не обрезались краем панели в узком окне,
+    а аккуратно переносились на следующую строку.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, margin: int = 0, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self.setContentsMargins(margin, margin, margin, margin)
+        self._spacing = spacing
+        self._items: list = []
+
+    # -- обязательные переопределения QLayout ----------------------------- #
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:  # noqa: D102
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    # -- собственная логика ------------------------------------------------ #
+    def spacing_for(self) -> int:
+        if self._spacing >= 0:
+            return self._spacing
+        return 6
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective = rect.adjusted(left, top, -right, -bottom)
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        space = self.spacing_for()
+
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            hint = item.sizeHint()
+            width = min(hint.width(), max(0, effective.width()))
+            if item.hasHeightForWidth():
+                height = item.heightForWidth(width)
+            else:
+                height = hint.height()
+            next_x = x + width + space
+            if next_x - space > effective.right() and line_height > 0:
+                x = effective.x()
+                y = y + line_height + space
+                next_x = x + width + space
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), QSize(width, height)))
+            x = next_x
+            line_height = max(line_height, height)
+        return y + line_height - rect.y() + bottom
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +247,39 @@ class FileListWidget(QListWidget):
         item.setSizeHint(widget.sizeHint())
         self.addItem(item)
         self.setItemWidget(item, widget)
+        # Qt иногда оставляет item-виджету старую высоту (текст строк наезжает
+        # друг на друга) — принудительно синхронизируем размеры после_layout
+        widget.setMinimumHeight(widget.sizeHint().height())
+        QTimer.singleShot(0, lambda: self._sync_row(item, widget))
+
+    def _sync_row(self, item: QListWidgetItem, widget: QWidget) -> None:
+        if item is None or widget is None:
+            return
+        try:
+            if self.row(item) < 0:
+                return
+            widget.setMinimumHeight(widget.sizeHint().height())
+            item.setSizeHint(widget.sizeHint())
+            rect = self.visualItemRect(item)
+            if widget.geometry() != rect:
+                widget.setGeometry(rect)
+        except RuntimeError:
+            pass
+
+    def _sync_all_rows(self) -> None:
+        for index in range(self.count()):
+            item = self.item(index)
+            widget = self.itemWidget(item)
+            if widget is not None:
+                self._sync_row(item, widget)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._sync_all_rows)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_all_rows)
 
     def _remove_one(self, path: Path) -> None:
         key = str(path.resolve()).lower()
@@ -280,6 +406,27 @@ class ModelCard(QFrame):
         self.setProperty("selected", False)
         self.setCursor(compat.CURSOR_POINTING_HAND)
         self._build()
+        self._update_card_tooltip()
+
+    def _update_card_tooltip(self) -> None:
+        if self.entry.installed:
+            self.setToolTip(
+                "Клик по карточке (или кнопка «Выбрать для работы») — использовать эту "
+                "модель для кнопки «РАБОТАТЬ». Выбранная модель видна в статус-баре внизу."
+            )
+        else:
+            self.setToolTip(
+                "Клик по карточке — подробности о модели. "
+                "Кнопка «Скачать» — скачать модель в папку models/."
+            )
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """Клик по карточке = выбрать установленную модель (или открыть инфо)."""
+        if self.entry.installed:
+            self.selectRequested.emit(self.entry)
+        else:
+            self.infoRequested.emit(self.entry)
+        super().mousePressEvent(event)
 
     # ------------------------------------------------------------------ #
     def _build(self) -> None:
@@ -301,9 +448,8 @@ class ModelCard(QFrame):
             top.addWidget(chip("✓ установлена", "BadgeInstalled"))
         root.addLayout(top)
 
-        # --- строка 2: чипы характеристик
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
+        # --- строка 2: чипы характеристик (переносятся, а не обрезаются)
+        chips = FlowLayout(spacing=6)
         chips.addWidget(chip(self.entry.engine_label))
         chips.addWidget(chip(f"⬇ {self.entry.size_text}", "BadgeEngine"))
         memory = self.entry.memory_text
@@ -311,16 +457,14 @@ class ModelCard(QFrame):
             chips.addWidget(chip(f"🧠 {memory}", "BadgeEngine"))
         for tag in self.entry.tags[:3]:
             chips.addWidget(chip(tag, "BadgeEngine"))
-        chips.addStretch(1)
         root.addLayout(chips)
 
         # --- строка 3: языки + качество/скорость
-        meta = QHBoxLayout()
-        meta.setSpacing(12)
+        meta = FlowLayout(spacing=12)
         languages = QLabel(f"🌐 {self.entry.languages_text}")
         languages.setObjectName("Dim")
         languages.setWordWrap(True)
-        meta.addWidget(languages, stretch=1)
+        meta.addWidget(languages)
 
         quality = QLabel(f"<span style='color:#98a2b3'>точность</span> <span style='color:#f2b544'>{stars(self.entry.quality)}</span>")
         speed = QLabel(f"<span style='color:#98a2b3'>скорость</span> <span style='color:#3ecf8e'>{stars(self.entry.speed)}</span>")
@@ -342,12 +486,6 @@ class ModelCard(QFrame):
         self.description.setTextFormat(compat.TEXT_FORMAT_RICH)
         root.addWidget(self.description)
 
-        self.full_description = QLabel(self.entry.description)
-        self.full_description.setObjectName("Dim")
-        self.full_description.setWordWrap(True)
-        self.full_description.setVisible(False)
-        root.addWidget(self.full_description)
-
         # --- строка 6: прогресс загрузки
         self.progress = QProgressBar()
         self.progress.setObjectName("Subtle")
@@ -366,26 +504,14 @@ class ModelCard(QFrame):
         # --- строка 7: кнопки
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-
-        self.more_button = QPushButton("Подробнее")
-        self.more_button.setObjectName("Ghost")
-        self.more_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.more_button.clicked.connect(self._toggle_more)
-        buttons.addWidget(self.more_button)
-
-        if self.entry.url:
-            page = QPushButton("Страница модели ↗")
-            page.setObjectName("Link")
-            page.setCursor(compat.CURSOR_POINTING_HAND)
-            page.clicked.connect(lambda: open_url(self.entry.url))
-            buttons.addWidget(page)
-
         buttons.addStretch(1)
 
         self.info_button = QPushButton("ℹ")
-        self.info_button.setObjectName("Ghost")
-        self.info_button.setFixedWidth(34)
-        self.info_button.setToolTip("Техническая информация")
+        self.info_button.setObjectName("InfoButton")
+        self.info_button.setFixedSize(30, 30)
+        self.info_button.setToolTip(
+            "Подробности о модели: полное описание, источник, лицензия, языки, параметры"
+        )
         self.info_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.info_button.clicked.connect(lambda: self.infoRequested.emit(self.entry))
         buttons.addWidget(self.info_button)
@@ -393,15 +519,22 @@ class ModelCard(QFrame):
         self.delete_button = QPushButton("Удалить")
         self.delete_button.setObjectName("Danger")
         self.delete_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.delete_button.setToolTip("Удалить модель с диска (освободить место)")
         self.delete_button.clicked.connect(lambda: self.deleteRequested.emit(self.entry))
         self.delete_button.setVisible(self.entry.installed)
         buttons.addWidget(self.delete_button)
 
-        self.action_button = QPushButton("Выбрать" if self.entry.installed else "Скачать")
+        self.action_button = QPushButton("Выбрать для работы" if self.entry.installed else "Скачать")
         self.action_button.setObjectName("Primary" if not self.entry.installed else "")
         self.action_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.action_button.setToolTip(
+            "Скачать модель в папку models/" if not self.entry.installed
+            else "Использовать именно эту модель для распознавания "
+                 "(она появится в статус-баре внизу окна)"
+        )
         self.action_button.clicked.connect(self._on_action)
         buttons.addWidget(self.action_button)
+        buttons.addStretch(1)
 
         root.addLayout(buttons)
 
@@ -451,7 +584,7 @@ class ModelCard(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         if self.entry.installed:
-            self.action_button.setText("✓ Выбрана" if selected else "Выбрать")
+            self.action_button.setText("✓ Выбрана" if selected else "Выбрать для работы")
             self.action_button.setObjectName("Primary" if selected else "")
             self.action_button.style().unpolish(self.action_button)
             self.action_button.style().polish(self.action_button)
@@ -467,7 +600,9 @@ class ModelCard(QFrame):
         else:
             self.progress.setRange(0, 1000)
             self.progress.setValue(0)
-            self.action_button.setText("Скачать" if not self.entry.installed else "Выбрать")
+            self.action_button.setText(
+                "Скачать" if not self.entry.installed else "Выбрать для работы"
+            )
             self.action_button.setEnabled(True)
             self.delete_button.setEnabled(True)
 
@@ -485,7 +620,8 @@ class ModelCard(QFrame):
     def refresh_state(self, entry: ModelEntry) -> None:
         self.entry = entry
         self.delete_button.setVisible(entry.installed)
-        self.action_button.setText("Выбрать" if entry.installed else "Скачать")
+        self.action_button.setText("Выбрать для работы" if entry.installed else "Скачать")
+        self._update_card_tooltip()
         self.action_button.setObjectName("Primary" if not entry.installed else "")
         self.action_button.style().unpolish(self.action_button)
         self.action_button.style().polish(self.action_button)

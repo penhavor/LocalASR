@@ -9,11 +9,18 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Optional
 
-from ..constants import ENGINE_FASTER_WHISPER, ENGINE_VOSK, ENGINE_WHISPERCPP
+from ..constants import (
+    ENGINE_FASTER_WHISPER,
+    ENGINE_GIGAAM,
+    ENGINE_QWEN_ASR,
+    ENGINE_VOSK,
+    ENGINE_WHISPERCPP,
+)
 from ..core.models_catalog import ModelEntry
 from ..logutils import get_logger
 from .base import ASREngine, EngineError, EngineNotInstalled, ModelRef, engine_packages
 from .faster_whisper_engine import FasterWhisperEngine
+from .torch_engines import GigaAMEngine, QwenASREngine
 from .vosk_engine import VoskEngine
 from .whispercpp_engine import WhisperCppEngine
 
@@ -23,6 +30,8 @@ ENGINE_CLASSES: Dict[str, type] = {
     ENGINE_FASTER_WHISPER: FasterWhisperEngine,
     ENGINE_WHISPERCPP: WhisperCppEngine,
     ENGINE_VOSK: VoskEngine,
+    ENGINE_QWEN_ASR: QwenASREngine,
+    ENGINE_GIGAAM: GigaAMEngine,
 }
 
 

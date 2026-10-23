@@ -4,7 +4,7 @@
 
 **Локальное распознавание речи: аудио и видео → текст. Без облака, без регистрации, без отправки данных.**
 
-PySide6 · faster-whisper (CTranslate2) · whisper.cpp · Vosk · Python 3.10–3.14+
+PySide6 · faster-whisper (CTranslate2) · whisper.cpp · Vosk · Qwen3-ASR · GigaAM · Python 3.10–3.14+
 
 Запускаешь `main.py` → программа сама создаёт `.venv`, сама ставит зависимости,
 сама перезапускается **без консоли** → ты выбираешь файлы и модель → получаешь
@@ -29,7 +29,9 @@ PySide6 · faster-whisper (CTranslate2) · whisper.cpp · Vosk · Python 3.10–
 | 🇷🇺 **Приоритет русского** | В каталоге и универсальные мультиязычные модели, и специализированные русские fine-tune'ы |
 | 🧹 **Анти-галлюцинации** | Вычищаются `[музыка]`, `[аплодисменты]`, «Спасибо за просмотр», субтитрные вставки, зацикленные повторы фраз и мусор на тишине |
 | ⚡ **Скорость** | Batched-декодинг, int8-квантование, Silero VAD (режет тишину), prefetched-декодирование следующего файла, модель грузится один раз на всю очередь |
-| 📝 **Форматы результата** | `.txt`, `.txt` с таймкодами, `.srt`, `.vtt`, `.json` (сегменты + слова), `.md` |
+| 📝 **Результат — простой .txt** | Всегда обычный `.txt` (имя файла = имени оригинала); по желанию — таймкоды и абзацы. Продвинутые форматы (srt/vtt/json/md) остались в CLI |
+| 🧭 **Мощные фильтры каталога** | Поиск + фильтры по движку, производителю, весовой категории, памяти, точности и языку; сортировка и сброс одним кликом |
+| 🆕 **Модели нового поколения** | Помимо Whisper: **Qwen3-ASR** (Alibaba, SOTA-2026) и **GigaAM** (Sber, best-in-class на русском) через PyTorch — ставятся по требованию |
 | 🖥 **GUI без консоли** | PySide6 (не Tkinter), тёмная тема, живой журнал, прогресс с оценкой остатка времени, отмена в любой момент |
 | 🔒 **Чистое окружение** | Всё ставится строго в `.venv` внутри папки проекта — системный Python не трогается |
 
@@ -110,10 +112,12 @@ python3 main.py                      # подготовка окружения +
    программа сама покажет баннер с рекомендацией под твоё железо. Жми «Скачать»,
    дождись окончания — модель появится в списке с пометкой «✓ установлена»,
    выбери её.
-3. **Параметры** — язык (по умолчанию русский), формат результата, папка
-   сохранения (по умолчанию `outputs/` в проекте), VAD, анти-галлюцинации,
-   абзацы; в «Расширенных» — hotwords, initial_prompt, beam size, batched,
-   устройство (CPU/CUDA), потоки, параллельная обработка.
+3. **Параметры** — язык (по умолчанию русский) и папка сохранения
+   (по умолчанию `outputs/` в проекте); результат всегда `.txt`. Галочки:
+   VAD, анти-галлюцинации, абзацы, таймкоды в `.txt` — у каждой есть подсказка
+   «зачем и как настраивать» (наведи курсор). В «Расширенных» — hotwords,
+   initial_prompt, beam size, batched, перевод; устройство (CPU/CUDA), потоки
+   и параллельность — в «Сервис → Настройки».
 4. **РАБОТАТЬ** — кнопка активна, только когда есть и файлы, и установленная
    модель. Прогресс виден по каждому файлу, распознанный текст печатается
    «вживую».
@@ -132,23 +136,30 @@ python3 main.py                      # подготовка окружения +
 | Модель | Движок | Файл | RAM | Языки | Точн. | Скор. | Кому |
 |---|---|---|---|---|---|---|---|
 | **★ Whisper L-v3 Turbo · Russian (int8, CT2)** | faster-whisper | 819 МБ | ~2 ГБ | **RU** + 99 | ★★★★★ | ★★★★ | **основной выбор для русских лекций** |
+| **★ GigaAM v3 E2E RNNT (Sber)** | gigaam (torch) | 449 МБ | ~1.6 ГБ | **RU** | ★★★★★ | ★★★ | русский с пунктуацией на слабом железе |
+| GigaAM v3 E2E CTC (Sber) | gigaam (torch) | 442 МБ | ~1.6 ГБ | **RU** | ★★★★ | ★★★★ | то же, но быстрее |
+| GigaAM Multilingual / Large (Sber) | gigaam (torch) | 0.9 / 2.3 ГБ | ~1.6 / 3.2 ГБ | 70+ (ru, kk, ky, uz…) | ★★★★/★★★★★ | ★★★★/★★★ | языки СНГ |
+| **★ Qwen3-ASR 1.7B (Alibaba)** | qwen-asr (torch) | 4.7 ГБ | ~9.6 ГБ | 30 | ★★★★★ | ★★★ | флагман открытого ASR-2026, любой язык |
+| Qwen3-ASR 0.6B (Alibaba) | qwen-asr (torch) | 1.9 ГБ | ~4 ГБ | 30 | ★★★★ | ★★★★ | новое поколение при умеренной памяти |
 | ★ Whisper L-v3 Turbo q5_0 | whisper.cpp | 574 МБ | ~1.2 ГБ | **RU** + 99 | ★★★★ | ★★★★ | точность при 4–8 ГБ RAM без GPU |
 | ★ Whisper L-v3 Turbo (multilingual, CT2) | faster-whisper | 1.5 ГБ | ~2.6 ГБ | 99 | ★★★★ | ★★★★★ | язык неизвестен / запись многоязычная |
-| ★ Vosk Russian Small 0.22 | Vosk | 45 МБ | ~0.4 ГБ | **RU** | ★ | ★★★★★ | совсем слабое железо, черновик |
 | Whisper L-v3 Turbo · Russian (float16) | faster-whisper | 1.5 ГБ | ~2.6 ГБ | **RU** + 99 | ★★★★★ | ★★★★ | максимум точности на русском |
 | Whisper L-v3 Turbo · Russian **Code-Switch** | faster-whisper | 782 МБ | ~2 ГБ | **RU+EN** | ★★★★★ | ★★★★ | IT-лекции с английскими терминами |
 | Whisper L-v3 Turbo · Russian (dvislobokov) | faster-whisper | 1.5 ГБ | ~2.6 ГБ | **RU**, EN | ★★★★ | ★★★★ | альтернатива для сравнения |
 | Whisper Large v3 | faster-whisper | 2.9 ГБ | ~4.7 ГБ | 99 | ★★★★★ | ★★ | максимум качества, время не важно |
 | Whisper Large v3 q5_0 | whisper.cpp | 1.1 ГБ | ~2 ГБ | 99 | ★★★★ | ★★ | редкие языки при малом RAM |
-| Whisper Medium / Small / Base | faster-whisper | 1.5 / 484 / 145 МБ | 2.6 / 1.5 / 0.7 ГБ | 99 | ★★★/★★/★ | ★★★/★★★★/★★★★★ | компромиссы по скорости |
+| Whisper Medium | faster-whisper / whisper.cpp | 1.5 ГБ | ~2.6 ГБ | 99 | ★★★ | ★★★/★★ | компромисс по скорости |
 | Whisper L-v3 Turbo (whisper.cpp full) | whisper.cpp | 1.5 ГБ | ~2.6 ГБ | 99 | ★★★★★ | ★★★ | GGML без квантования |
 | Vosk Russian 0.42 | Vosk | 1.8 ГБ | ~2.5 ГБ | **RU** | ★★★ | ★★★★★ | быстрый CPU-прогон русской речи |
-| Vosk Multilingual 0.27 | Vosk | 1.2 ГБ | ~1.8 ГБ | ~20 | ★★ | ★★★★ | автоопределение языка на слабом ПК |
 | Distil Whisper Large v3 | faster-whisper | 1.4 ГБ | ~2.6 ГБ | **EN** | ★★★★ | ★★★★★ | английские доклады |
 
+Слабые микро-модели (Vosk Small 45 МБ, Whisper base/small) из каталога убраны:
+толку от них мало, а место в списке занимают.
+
 **Коротко:** русские лекции → `Whisper Large v3 Turbo · Russian (int8)`.
-Мало памяти → `Whisper L-v3 Turbo q5_0 (whisper.cpp)`.
-Совсем слабый ПК → `Vosk Russian Small`.
+Мало памяти, но нужна пунктуация → `GigaAM v3 E2E RNNT` (449 МБ).
+Мало памяти без torch → `Whisper L-v3 Turbo q5_0 (whisper.cpp)`.
+Максимум точности на любом языке → `Qwen3-ASR 1.7B` (нужны torch и 10+ ГБ RAM).
 
 ### Своя модель
 
@@ -161,7 +172,8 @@ python3 main.py                      # подготовка окружения +
 * `D:\models\my-whisper` — папка на диске.
 
 Движок определяется автоматически по содержимому: `model.bin` + `config.json`
-→ faster-whisper, `ggml-*.bin` → whisper.cpp, `am/` + `graph/` → Vosk.
+→ faster-whisper, `ggml-*.bin` → whisper.cpp, `am/` + `graph/` → Vosk,
+`config.json` с `model_type: qwen3_asr` / `gigaam` → torch-движки.
 
 ---
 
@@ -214,8 +226,10 @@ faster-whisper через CTranslate2 поддерживает CUDA 12 + cuDNN 9
    WAV на диске.
 7. **Декодирование видео в отдельном потоке** (`ThreadPoolExecutor`), GIL при
    этом освобождается (subprocess/C-код).
-8. **Никакого PyTorch.** Только CTranslate2 + numpy: установка в разы меньше и
-   быстрее, старт модели — доли секунды.
+8. **PyTorch — только по желанию.** Базовые движки (CTranslate2, whisper.cpp,
+   Vosk) обходятся без torch: установка в разы меньше и быстрее, старт модели —
+   доли секунды. Torch-движки (Qwen3-ASR, GigaAM) ставятся отдельно, только если
+   ты выбрал соответствующую модель.
 
 Ориентиры (Whisper L-v3 Turbo, beam 5, 1 час лекции):
 
@@ -240,6 +254,8 @@ faster-whisper через CTranslate2 поддерживает CUDA 12 + cuDNN 9
 | faster-whisper | в базе | CT2-модели (все Whisper/Turbo/Russian) |
 | whisper.cpp | `pywhispercpp>=1.4.0` | GGML-модели, слабый CPU, квантование |
 | Vosk | `vosk>=0.3.45` | Kaldi-модели, мгновенный старт |
+| qwen-asr | `torch`, `transformers>=5.0`, `accelerate`, `soundfile` | модели Qwen3-ASR |
+| gigaam | `torch`, `torchaudio`, `transformers`, `hydra-core`, `omegaconf`, `sentencepiece` | модели GigaAM (Sber) |
 
 Вручную: «Сервис → Установить движок whisper.cpp / Vosk / CUDA-библиотеки».
 
@@ -333,6 +349,7 @@ LocalASR/
 │   │   ├── faster_whisper_engine.py
 │   │   ├── whispercpp_engine.py
 │   │   ├── vosk_engine.py
+│   │   ├── torch_engines.py    ← Qwen3-ASR и GigaAM (transformers + torch)
 │   │   ├── registry.py         ← кэш модели, железо, потоковые экземпляры
 │   │   └── transcriber.py      ← пайплайн: файл → звук → движок → текст
 │   └── ui/
@@ -345,14 +362,31 @@ LocalASR/
 │       └── compat.py           ← совместимость enum'ов PySide6 6.7–6.12
 ├── models/                     ← сюда ставятся модели (в git не попадает)
 ├── outputs/                    ← результаты по умолчанию
-├── logs/                       ← localasr.log, bootstrap.log, whispercpp.log
-├── scripts/                    ← dev-скрипты: doctor, e2e-проверки
-└── tests/                      ← 200+ тестов (включая GUI-смоки на стабе Qt)
+└── logs/                       ← localasr.log, bootstrap.log, whispercpp.log
 ```
 
 ---
 
 ## 🔧 Устранение проблем
+
+<details>
+<summary><b>Почему два лога: bootstrap.log и localasr.log?</b></summary>
+
+Это два разных этапа жизни программы, и пишут их разные компоненты:
+
+* `logs/bootstrap.log` — дневник **подготовки окружения**. Его ведёт `bootstrap.py`,
+  который работает ещё «голым» системным Python (в этот момент `.venv` может не
+  существовать): создание venv, установка пакетов, перезапуск GUI. Он есть даже
+  тогда, когда само приложение не смогло стартовать (например, не поставился
+  PySide6) — поэтому он и отдельный.
+* `logs/localasr.log` — дневник **самого приложения**: всё, что происходит после
+  «GUI запущен» — выбор и скачивание моделей, распознавание, ошибки движков и
+  воркеров.
+
+Плюс `logs/bootstrap_error.log` — создаётся только если bootstrap упал совсем.
+Ориентир простой: проблема на старте/установке → смотри `bootstrap.log`;
+запустилось, но ломается в работе → смотри `localasr.log`.
+</details>
 
 <details>
 <summary><b>Мелькнуло окно консоли и пропало / «вылетает при запуске»</b></summary>
@@ -426,7 +460,7 @@ bootstrap сам попробует план Б (`--without-pip` + `get-pip.py`)
 <details>
 <summary><b>Не хватает памяти (MemoryError)</b></summary>
 
-* Выбери модель поменьше (`q5_0`, `small`, Vosk);
+* Выбери модель поменьше (GigaAM v3 449 МБ, `q5_0` 574 МБ);
 * Настройки → Точность вычислений → `int8`;
 * Настройки → «Файлов одновременно» = 1;
 * Закрой браузер — свободная RAM важнее общей.
@@ -463,34 +497,6 @@ QT_OPENGL=software python3 main.py
 
 ---
 
-## 🧪 Тесты
-
-```bash
-.venv/bin/pip install pytest
-.venv/bin/python -m pytest tests -q          # 200+ тестов
-```
-
-Тесты покрывают: каталог моделей и рекомендации под железо, чистку
-галлюцинаций, имена файлов и кириллицу, все форматы экспорта, разбор ссылок на
-модели, bootstrap (создание venv, проверка импортов, локи, поведение без Python),
-CLI, весь пайплайн целиком (на подменённом движке) и **GUI-смоки** — окно,
-карточки моделей, диалоги, drag&drop, воркеры.
-
-Если настоящий PySide6 недоступен (CI без системных библиотек Qt), тесты GUI
-исполняются на стабе из `tests/stubs/` — он ловит опечатки, неверные сигнатуры
-и сломанные связи сигнал/слот.
-
-Dev-скрипты для проверки «вживую» (нужны сеть и установленные движки):
-
-```bash
-python scripts/dev_venv_check.py /tmp/venv-check    # создание venv + pip
-python scripts/dev_gui_smoke.py                     # GUI на настоящем PySide6
-python scripts/dev_e2e_transcribe.py vosk-ru-small-0.22
-python scripts/dev_e2e_custom_model.py              # whisper.cpp + модель по ссылке
-```
-
----
-
 ## 🤝 Вклад в проект
 
 Приветствуются PR с новыми моделями в `resources/models_catalog.json`
@@ -499,9 +505,7 @@ python scripts/dev_e2e_custom_model.py              # whisper.cpp + модель
 
 ```bash
 git clone https://github.com/local-asr/LocalASR && cd LocalASR
-python3 main.py                     # поднимет .venv
-.venv/bin/pip install pytest ruff
-.venv/bin/python -m pytest -q
+python3 main.py                     # поднимет .venv и запустит GUI
 ```
 
 Стиль: русский язык в интерфейсе и комментариях, type hints, без тяжёлых
@@ -514,14 +518,15 @@ python3 main.py                     # поднимет .venv
 MIT — см. [LICENSE](LICENSE).
 
 Код LocalASR распространяется свободно; **модели** имеют собственные лицензии
-(Whisper — MIT, Vosk — Apache-2.0), скачиваются с Hugging Face и
-alphacephei.com и остаются на твоём диске.
+(Whisper — MIT, Vosk — Apache-2.0, Qwen3-ASR — Apache-2.0, GigaAM — MIT),
+скачиваются с Hugging Face и alphacephei.com и остаются на твоём диске.
 
 Спасибо проектам: [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
 [CTranslate2](https://github.com/OpenNMT/CTranslate2),
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp),
 [pywhispercpp](https://github.com/absadiki/pywhispercpp),
 [Vosk](https://alphacephei.com/vosk/), [Silero VAD](https://github.com/snakers4/silero-vad),
+[Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR), [GigaAM](https://github.com/salute-developers/GigaAM),
 [PySide6](https://wiki.qt.io/Qt_for_Python), [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg).
 
 <div align="center">

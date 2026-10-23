@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 APP_NAME = "LocalASR"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 ORG_NAME = "LocalASR"
 
 # --- папки внутри проекта -------------------------------------------------- #
@@ -59,12 +59,16 @@ DEFAULT_OUTPUT_FORMAT = "txt"
 ENGINE_FASTER_WHISPER = "faster-whisper"
 ENGINE_WHISPERCPP = "whispercpp"
 ENGINE_VOSK = "vosk"
-ENGINES = (ENGINE_FASTER_WHISPER, ENGINE_WHISPERCPP, ENGINE_VOSK)
+ENGINE_QWEN_ASR = "qwen-asr"          # Qwen3-ASR (Alibaba) через transformers + torch
+ENGINE_GIGAAM = "gigaam"              # GigaAM (Sber) через transformers + torch
+ENGINES = (ENGINE_FASTER_WHISPER, ENGINE_WHISPERCPP, ENGINE_VOSK, ENGINE_QWEN_ASR, ENGINE_GIGAAM)
 
 ENGINE_LABELS = {
     ENGINE_FASTER_WHISPER: "faster-whisper · CTranslate2",
     ENGINE_WHISPERCPP: "whisper.cpp · GGML",
     ENGINE_VOSK: "Vosk · Kaldi",
+    ENGINE_QWEN_ASR: "Qwen3-ASR · transformers",
+    ENGINE_GIGAAM: "GigaAM (Sber) · transformers",
 }
 
 # --- язык ------------------------------------------------------------------ #

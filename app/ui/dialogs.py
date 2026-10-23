@@ -35,7 +35,7 @@ from ..constants import ENGINE_LABELS, ENGINES, LANGUAGES
 from ..core.models_catalog import ModelEntry
 from ..settings import Settings
 from . import compat
-from .widgets import make_label, open_url, stars
+from .widgets import FlowLayout, make_label, open_url, stars
 
 
 # --------------------------------------------------------------------------- #
@@ -110,15 +110,21 @@ class ProgressDialog(QDialog):
     def cancelled(self) -> bool:
         return self._cancelled
 
-    def set_status(self, text: str) -> None:
-        self.status_label.setText(text)
+    def set_status(self, text: object) -> None:
+        # Защита от «плавания» типов: сигналы воркеров могут принести что угодно,
+        # а QLabel.setText(float) ронял приложение TypeError'ом на каждом тике.
+        self.status_label.setText("" if text is None else str(text))
 
-    def set_fraction(self, fraction: Optional[float]) -> None:
-        if fraction is None or fraction < 0:
+    def set_fraction(self, fraction: object) -> None:
+        try:
+            value = float(fraction)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            value = -1.0
+        if value < 0:
             self.progress.setRange(0, 0)
         else:
             self.progress.setRange(0, 1000)
-            self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
+            self.progress.setValue(int(max(0.0, min(1.0, value)) * 1000))
 
     def append_log(self, line: str) -> None:
         if line:
@@ -130,6 +136,8 @@ class ProgressDialog(QDialog):
         self.status_label.setText(message)
         self.cancel_button.setText("Закрыть")
         self.cancel_button.setObjectName("Primary")
+        self.cancel_button.style().unpolish(self.cancel_button)
+        self.cancel_button.style().polish(self.cancel_button)
         self.cancel_button.setEnabled(True)
         self.cancel_button.setCursor(compat.CURSOR_POINTING_HAND)
         try:
@@ -396,8 +404,7 @@ class FirstRunDialog(QDialog):
                 top.addWidget(make_label("★ рекомендуем", "BadgeRecommended"))
             layout.addLayout(top)
 
-            chips = QHBoxLayout()
-            chips.setSpacing(6)
+            chips = FlowLayout(spacing=6)
             for text in (
                 entry.engine_label,
                 f"⬇ {entry.size_text}",
@@ -406,7 +413,6 @@ class FirstRunDialog(QDialog):
                 f"скорость {stars(entry.speed)}",
             ):
                 chips.addWidget(make_label(text, "BadgeEngine"))
-            chips.addStretch(1)
             layout.addLayout(chips)
 
             layout.addWidget(make_label(entry.languages_text, "Dim"))
@@ -434,7 +440,7 @@ class FirstRunDialog(QDialog):
 
         bottom = QHBoxLayout()
         bottom.addWidget(
-            make_label("Полный список моделей (17+) — в правой панели окна.", "Muted", word_wrap=True)
+            make_label("Полный список моделей с фильтрами — в правой панели окна.", "Muted", word_wrap=True)
         )
         bottom.addStretch(1)
         close = QPushButton("Выбрать позже")
@@ -489,13 +495,13 @@ class SettingsDialog(QDialog):
         self.hardware = hardware or {}
         self.setWindowTitle("Настройки")
         self.setModal(True)
-        self.setMinimumSize(680, 620)
+        self.setMinimumSize(700, 640)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_quality(), "Качество текста")
-        self.tabs.addTab(self._tab_speed(), "Скорость и железо")
-        self.tabs.addTab(self._tab_engines(), "Движки и CUDA")
-        self.tabs.addTab(self._tab_about(), "О программе")
+        self.tabs.addTab(self._scroll_wrap(self._tab_quality()), "Качество текста")
+        self.tabs.addTab(self._scroll_wrap(self._tab_speed()), "Скорость и железо")
+        self.tabs.addTab(self._scroll_wrap(self._tab_engines()), "Движки и CUDA")
+        self.tabs.addTab(self._scroll_wrap(self._tab_about()), "О программе")
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Save", "Cancel"))
         buttons.button(compat.dialog_buttons("Save")).setText("Сохранить")
@@ -509,45 +515,90 @@ class SettingsDialog(QDialog):
         root.addWidget(self.tabs, stretch=1)
         root.addWidget(buttons)
 
+    # -- помощники --------------------------------------------------------- #
+    @staticmethod
+    def _scroll_wrap(page: QWidget) -> QScrollArea:
+        """Вкладка со своей прокруткой: пояснения не обрезаются в маленьком окне."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(compat.frame_no_frame())
+        scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
+        scroll.setWidget(page)
+        return scroll
+
+    @staticmethod
+    def _hinted(form: QFormLayout, title: str, widget: QWidget, hint: str) -> None:
+        """Строка настройки + пояснение «зачем это и как настраивать»."""
+        widget.setToolTip(hint)
+        form.addRow(title, widget)
+        form.addRow(make_label(hint, "Muted", word_wrap=True))
+
     # -- вкладки ---------------------------------------------------------- #
     def _tab_quality(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
         form.setContentsMargins(16, 16, 16, 16)
-        form.setSpacing(12)
+        form.setSpacing(8)
 
         self.language_combo = QComboBox()
         for code, title in LANGUAGES:
             self.language_combo.addItem(title, code)
         index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(index if index >= 0 else 1)
-        form.addRow("Язык речи", self.language_combo)
+        self._hinted(
+            form, "Язык речи", self.language_combo,
+            "Язык записи. «Определить автоматически» удобно для разноязычных папок, "
+            "но явный выбор быстрее и надёжнее на коротких/шумных файлах.",
+        )
 
         self.translate_check = QCheckBox("Переводить результат в английский (task=translate)")
         self.translate_check.setChecked(self.settings.translate_to_english)
-        form.addRow("", self.translate_check)
+        self._hinted(
+            form, "", self.translate_check,
+            "Модель сразу выдаёт перевод услышанного на английский вместо исходного текста. "
+            "Для конспекта русской лекции держи выключенным.",
+        )
 
-        self.vad_check = QCheckBox("Отрезать тишину и шум (Silero VAD) — быстрее и меньше галлюцинаций")
+        self.vad_check = QCheckBox("Отрезать тишину и шум (Silero VAD)")
         self.vad_check.setChecked(self.settings.use_vad)
-        form.addRow("", self.vad_check)
+        self._hinted(
+            form, "", self.vad_check,
+            "До распознавания вырезает паузы/музыку/шум: быстрее и меньше галлюцинаций. "
+            "Выключай только если тишина в записи содержательна.",
+        )
 
         self.anti_hallucination = QCheckBox("Чистить «[музыка]», «Спасибо за просмотр», повторы и петли")
         self.anti_hallucination.setChecked(self.settings.suppress_hallucinations)
-        form.addRow("", self.anti_hallucination)
+        self._hinted(
+            form, "", self.anti_hallucination,
+            "Постобработка: убирает мусорные сегменты, которые Whisper придумывает на тишине "
+            "и музыке, и склеенные повторы одной фразы. Рекомендуется всегда включённым.",
+        )
 
-        self.paragraphs_check = QCheckBox("Склеивать фразы в абзацы (для .txt и .md)")
+        self.paragraphs_check = QCheckBox("Склеивать фразы в абзацы")
         self.paragraphs_check.setChecked(self.settings.paragraphs)
-        form.addRow("", self.paragraphs_check)
+        self._hinted(
+            form, "", self.paragraphs_check,
+            "В .txt текст будет абзацами по смысловым паузам, а не «простынёй» из фраз. "
+            "Выключи, если нужна каждая фраза с новой строки.",
+        )
 
-        self.word_ts_check = QCheckBox("Считать таймкоды каждого слова (нужно для точных субтитров, медленнее)")
+        self.word_ts_check = QCheckBox("Считать таймкоды каждого слова")
         self.word_ts_check.setChecked(self.settings.word_timestamps)
-        form.addRow("", self.word_ts_check)
+        self._hinted(
+            form, "", self.word_ts_check,
+            "Нужно только для покадрово точных субтитров; замедляет распознавание. "
+            "Для .txt-конспекта выключи.",
+        )
 
         self.beam_spin = QSpinBox()
         self.beam_spin.setRange(1, 12)
         self.beam_spin.setValue(int(self.settings.beam_size or 5))
-        self.beam_spin.setToolTip("1 — быстрее всего, 5 — оптимально, 8+ — максимум точности и времени")
-        form.addRow("Beam size (качество декодинга)", self.beam_spin)
+        self._hinted(
+            form, "Beam size (качество декодинга)", self.beam_spin,
+            "Сколько вариантов продолжения фразы держит декодер: 1 — быстрее всего, "
+            "5 — оптимально, 8+ — максимум точности и времени. Для лекций хватает 5.",
+        )
 
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlainText(self.settings.initial_prompt)
@@ -556,13 +607,21 @@ class SettingsDialog(QDialog):
             "Подсказка модели: стиль и термины. Например:\n"
             "Лекция по машинному обучению. Термины: градиентный спуск, трансформер, attention, токенизация."
         )
-        form.addRow("initial_prompt (стиль/термины)", self.prompt_edit)
+        self._hinted(
+            form, "initial_prompt (стиль/термины)", self.prompt_edit,
+            "Короткий пример стиля/тематики, который модель «продолжает». Помогает с терминологией "
+            "и оформлением (например, «пиши научным стилем, имена собственные с заглавной»).",
+        )
 
         self.hotwords_edit = QPlainTextEdit()
         self.hotwords_edit.setPlainText(self.settings.hotwords)
         self.hotwords_edit.setFixedHeight(60)
         self.hotwords_edit.setPlaceholderText("Слова-подсказки через запятую: Хаффман, RAG, Kubernetes…")
-        form.addRow("hotwords", self.hotwords_edit)
+        self._hinted(
+            form, "hotwords (слова-подсказки)", self.hotwords_edit,
+            "Список редких слов и терминов конкретной лекции — модель будет писать их верно. "
+            "Работает в faster-whisper; остальные движки подсказку игнорируют.",
+        )
 
         return page
 
@@ -570,7 +629,7 @@ class SettingsDialog(QDialog):
         page = QWidget()
         form = QFormLayout(page)
         form.setContentsMargins(16, 16, 16, 16)
-        form.setSpacing(12)
+        form.setSpacing(8)
 
         self.device_combo = QComboBox()
         self.device_combo.addItem("Авто (рекомендуется)", "auto")
@@ -578,7 +637,11 @@ class SettingsDialog(QDialog):
         self.device_combo.addItem("NVIDIA GPU (CUDA)", "cuda")
         index = self.device_combo.findData(self.settings.device)
         self.device_combo.setCurrentIndex(index if index >= 0 else 0)
-        form.addRow("Устройство", self.device_combo)
+        self._hinted(
+            form, "Устройство", self.device_combo,
+            "Где считаем: «Авто» выберет GPU, если CUDA видна, иначе CPU. "
+            "Принудительный CPU полезен, когда GPU занят играми/рендером.",
+        )
 
         self.compute_combo = QComboBox()
         for value, title in (
@@ -591,33 +654,50 @@ class SettingsDialog(QDialog):
             self.compute_combo.addItem(title, value)
         index = self.compute_combo.findData(self.settings.compute_type)
         self.compute_combo.setCurrentIndex(index if index >= 0 else 0)
-        form.addRow("Точность вычислений", self.compute_combo)
+        self._hinted(
+            form, "Точность вычислений", self.compute_combo,
+            "Формат чисел модели в памяти: int8 экономит RAM/VRAM ценой ~0.1–0.3% точности, "
+            "float16 быстрее на GPU. «Авто» подберёт по устройству.",
+        )
 
-        self.batched_check = QCheckBox("Пакетный декодинг (BatchedInferencePipeline) — до 4× быстрее на GPU")
+        self.batched_check = QCheckBox("Пакетный декодинг (BatchedInferencePipeline)")
         self.batched_check.setChecked(bool(self.settings.batched))
-        form.addRow("", self.batched_check)
+        self._hinted(
+            form, "", self.batched_check,
+            "До 4× быстрее на GPU: куски аудио считаются батчем. На CPU выигрыша почти нет, "
+            "а памяти нужно больше — при нехватке RAM выключи.",
+        )
 
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 32)
         self.batch_spin.setValue(int(self.settings.batch_size or 8))
-        form.addRow("Размер батча", self.batch_spin)
+        self._hinted(
+            form, "Размер батча", self.batch_spin,
+            "Сколько кусков аудио уходит в батч за раз. Больше — быстрее на GPU, но растёт VRAM. "
+            "При ошибках «out of memory» уменьшай до 4/2.",
+        )
 
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(0, 64)
         self.threads_spin.setSpecialValueText(f"авто ({self.hardware.get('recommended_threads', '?')})")
         self.threads_spin.setValue(int(self.settings.cpu_threads or 0))
-        form.addRow("Потоки CPU", self.threads_spin)
+        self._hinted(
+            form, "Потоки CPU", self.threads_spin,
+            "Сколько потоков CPU отдаём инференсу. 0 (авто) — обычно лучше всего; "
+            "ограничь, если параллельно работаешь за машиной и она «тормозит».",
+        )
 
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 8)
         self.parallel_spin.setValue(int(self.settings.parallel_files or 1))
-        self.parallel_spin.setToolTip(
-            "1 — предсказуемо и экономно по памяти.\n"
-            "2–4 — быстрее на многоядерном CPU/GPU с большим запасом RAM (каждая копия модели ест память)."
+        self._hinted(
+            form, "Файлов одновременно", self.parallel_spin,
+            "1 — предсказуемо и экономно по памяти. 2–4 — быстрее на многоядерном CPU/GPU "
+            "с большим запасом RAM: каждая копия модели ест память целиком.",
         )
-        form.addRow("Файлов одновременно", self.parallel_spin)
 
         note = make_label(
+            "Результат всегда сохраняется в .txt (имя файла = имени оригинала). "
             "Узкое место должно быть железо, а не Python: декодирование звука идёт в отдельном потоке "
             "заранее (prefetch), модель грузится один раз на всю очередь, а сам инференс работает в "
             "C++/CTranslate2 без GIL.",
@@ -634,6 +714,7 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
 
         from ..asr.registry import engine_available, missing_engine_packages
+        from ..asr.base import engine_note
 
         for engine in ENGINES:
             box = QGroupBox(ENGINE_LABELS[engine])
@@ -643,8 +724,12 @@ class SettingsDialog(QDialog):
                 "✓ установлен" if installed else "✗ не установлен",
                 "BadgeInstalled" if installed else "BadgeWarn",
             )
-            packages = missing_engine_packages(engine)
+            status.setToolTip("Проверяется по наличию pip-пакетов движка в .venv проекта")
             box_layout.addWidget(status)
+            note = engine_note(engine)
+            if note:
+                box_layout.addWidget(make_label(note, "Muted", word_wrap=True))
+            packages = missing_engine_packages(engine)
             if packages:
                 box_layout.addWidget(make_label("Пакеты: " + ", ".join(packages), "Muted", word_wrap=True))
             if not installed:
@@ -760,20 +845,34 @@ class SettingsDialog(QDialog):
 
 
 class ModelInfoDialog(QDialog):
+    """Вся техническая информация о модели по кнопке «ℹ» в карточке."""
+
     def __init__(self, entry: ModelEntry, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(entry.name)
         self.setModal(True)
-        self.setMinimumWidth(620)
+        self.setMinimumSize(640, 520)
+        self.resize(720, 620)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(compat.frame_no_frame())
+        scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(10)
+
         root.addWidget(make_label(entry.name, "H1"))
 
         rows = [
             ("ID (папка в models/)", entry.id),
             ("Движок", entry.engine_label),
+            ("Производитель", entry.vendor or "—"),
             ("Источник", entry.source or "—"),
             ("Подпапка", entry.subfolder or "—"),
             ("Размер скачивания", entry.size_text),
@@ -781,6 +880,7 @@ class ModelInfoDialog(QDialog):
             ("Память в работе", entry.memory_text),
             ("Языки", entry.languages_text),
             ("Точность / скорость", f"{stars(entry.quality)} / {stars(entry.speed)}"),
+            ("Теги", ", ".join(entry.tags) if entry.tags else "—"),
             ("Лицензия", entry.license or "—"),
             ("Релиз", entry.released or "—"),
             ("Установлена", "да: " + str(entry.install_dir) if entry.installed else "нет"),
@@ -793,6 +893,9 @@ class ModelInfoDialog(QDialog):
             table.addRow(make_label(key, "Muted"), label)
         root.addLayout(table)
 
+        if entry.recommended_for:
+            root.addWidget(make_label("Кому подходит: " + entry.recommended_for, "BadgeRecommended", word_wrap=True))
+
         description = make_label(entry.description or "", "Dim", word_wrap=True)
         description.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
         root.addWidget(description)
@@ -800,11 +903,16 @@ class ModelInfoDialog(QDialog):
         if entry.defaults:
             root.addWidget(make_label("Параметры по умолчанию: " + str(entry.defaults), "Muted", word_wrap=True))
 
+        root.addStretch(1)
+        scroll.setWidget(page)
+        outer.addWidget(scroll, stretch=1)
+
         buttons = QHBoxLayout()
         if entry.url:
             link = QPushButton("Открыть страницу модели ↗")
             link.setObjectName("Ghost")
             link.setCursor(compat.CURSOR_POINTING_HAND)
+            link.setToolTip("Откроется страница модели в браузере (Hugging Face / сайт автора)")
             link.clicked.connect(lambda: open_url(entry.url))
             buttons.addWidget(link)
         buttons.addStretch(1)
@@ -813,4 +921,4 @@ class ModelInfoDialog(QDialog):
         close.setCursor(compat.CURSOR_POINTING_HAND)
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
-        root.addLayout(buttons)
+        outer.addLayout(buttons)

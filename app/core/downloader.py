@@ -33,18 +33,19 @@ ProgressCallback = Callable[[float, str], None]  # (доля 0..1, текст с
 CancelToken = Callable[[], bool]
 
 # Файлы, которые не нужны для запуска (экономят гигабайты трафика)
-SKIP_PATTERNS = (
+SKIP_ALWAYS = (
     re.compile(r"\.gitattributes$", re.I),
     re.compile(r"^\.git/", re.I),
-    re.compile(r"\.(safetensors|pt|pth|msgpack|onnx|bin\.index\.json)$", re.I),
     re.compile(r"^onnx/", re.I),
     re.compile(r"^flax_model", re.I),
 )
+WEIGHT_EXTENSIONS = (".safetensors", ".pt", ".pth", ".msgpack", ".onnx", ".bin")
 KEEP_ALWAYS = {
     "model.bin", "config.json", "tokenizer.json", "vocabulary.json", "vocabulary.txt",
     "preprocessor_config.json", "added_tokens.json", "special_tokens_map.json",
     "tokenizer_config.json", "vocab.json", "merges.txt", "normalizer.json",
-    "generation_config.json", "processor_config.json",
+    "generation_config.json", "processor_config.json", "tokenizer.model",
+    "chat_template.json", "model.safetensors.index.json", "README.md",
 }
 
 
@@ -178,23 +179,27 @@ def _plan_hf(repo_id: str, subfolder: str, entry: ModelEntry, revision: str = "m
 
 
 def _filter_needed(files) -> List:
-    """Отсекает лишнее: safetensors/onnx, если есть CT2 model.bin."""
+    """Отсекает лишнее: дубли комплектов весов и служебный мусор.
+
+    Правило: оставляем ТОЛЬКО ОДИН комплект весов — тот, который лежит в
+    репозитории (CT2 model.bin → safetensors → pytorch_model.bin), иначе
+    transformers-модели (Qwen, GigaAM) скачались бы без весов.
+    """
     names = [f.path.split("/")[-1].lower() for f in files]
     has_model_bin = "model.bin" in names
+    has_safetensors = any(n.endswith(".safetensors") for n in names)
 
     result = []
     for item in files:
         name = item.path.split("/")[-1]
         low = name.lower()
-        if has_model_bin and low in ("model.safetensors", "pytorch_model.bin", "flax_model.msgpack"):
+        if any(pattern.search(item.path) for pattern in SKIP_ALWAYS):
             continue
-        if has_model_bin and low.endswith(".safetensors"):
-            continue
-        if any(pattern.search(item.path) for pattern in SKIP_PATTERNS):
-            if name in KEEP_ALWAYS:
-                pass  # обязательные маленькие файлы оставляем
-            else:
-                continue
+        if low.endswith(WEIGHT_EXTENSIONS) and low not in KEEP_ALWAYS:
+            if has_model_bin and low != "model.bin":
+                continue  # есть CT2-веса — остальные комплекты не качаем
+            if not has_model_bin and has_safetensors and not low.endswith(".safetensors"):
+                continue  # есть safetensors — bin/pt-дубликаты не качаем
         result.append(item)
     return result or list(files)
 

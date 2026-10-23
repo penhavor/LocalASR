@@ -216,6 +216,22 @@ QPushButton#Link:hover {{
     text-decoration: underline;
 }}
 
+/* Кнопка «ℹ» — техническая информация о модели: заметная, круглая */
+QPushButton#InfoButton {{
+    background-color: #21304d;
+    border: 1px solid {ACCENT};
+    color: {ACCENT_HOVER};
+    border-radius: 15px;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 0;
+}}
+
+QPushButton#InfoButton:hover {{
+    background-color: {ACCENT};
+    color: #07101f;
+}}
+
 /* ---------------- поля ввода ---------------- */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     background-color: {BG_INPUT};
@@ -495,6 +511,16 @@ QGroupBox::title {{
 QScrollArea {{
     border: none;
     background: transparent;
+}}
+
+/* Подложка под прозрачными скролл-областями: без неё на части платформ
+   (offscreen/wayland) вместо фона темы остаются «прозрачные дыры». */
+QSplitter {{
+    background-color: {BG};
+}}
+
+QMainWindow::separator {{
+    background-color: {BG};
 }}
 """
 
