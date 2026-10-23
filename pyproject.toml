@@ -1,0 +1,30 @@
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:PySide6.*",
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 118
+target-version = "py310"
+extend-exclude = [".venv", "models", "outputs", "logs", "tests/stubs"]
+
+[tool.ruff.lint]
+# F — pyflakes (опечатки, неиспользуемые имена), E9 — синтаксические ошибки,
+# W — предупреждения, I — сортировка импортов, B — опасные паттерны (bugbear).
+select = ["F", "E9", "W", "B"]
+ignore = [
+    "E501",   # длину строк держим вручную (в QSS/таблицах бывают длинные)
+    "B008",   # вызов функции в аргументе по умолчанию — норма для Qt
+    "B905",   # zip(strict=...) не нужен в этом коде
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+"app/ui/compat.py" = ["B009", "B010"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,0 +1,28 @@
+{
+  "_comment": "Карта движок -> pip-пакеты. GUI доустанавливает нужный движок по требованию (строго в .venv).",
+  "faster-whisper": {
+    "title": "faster-whisper (CTranslate2)",
+    "pip": [],
+    "import": "faster_whisper",
+    "note": "Уже входит в базовую установку."
+  },
+  "whispercpp": {
+    "title": "whisper.cpp (pywhispercpp)",
+    "pip": ["pywhispercpp>=1.4.0"],
+    "import": "pywhispercpp",
+    "note": "Ставится один раз при первом выборе GGML-модели."
+  },
+  "vosk": {
+    "title": "Vosk (Kaldi)",
+    "pip": ["vosk>=0.3.45"],
+    "import": "vosk",
+    "note": "Ставится один раз при первом выборе Vosk-модели."
+  },
+  "cuda": {
+    "title": "NVIDIA CUDA 12 (cuBLAS + cuDNN 9)",
+    "pip": ["nvidia-cublas-cu12>=12.4", "nvidia-cudnn-cu12>=9.1,<10"],
+    "import": null,
+    "requirements_file": "gpu.txt",
+    "note": "На Windows дополнительно нужны системные DLL cuDNN9/cuBLAS (см. requirements/gpu.txt)."
+  }
+}

@@ -1,0 +1,39 @@
+# --- окружение проекта (создаётся bootstrap'ом, в git не нужно) ---
+.venv/
+venv/
+env/
+
+# --- пользовательские данные ---
+models/*
+!models/.gitkeep
+outputs/*
+!outputs/.gitkeep
+logs/
+settings/
+.cache/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- ОС / редакторы ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# --- артефакты сборки exe (если соберёшь) ---
+*.spec.bak
+release/
