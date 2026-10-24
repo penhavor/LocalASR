@@ -334,25 +334,35 @@ QListWidget::item:selected {{
 }}
 
 /* ---------------- прогресс ---------------- */
+/* Основной прогресс-бар: высокий, проценты читаются и на тёмном треке,
+   и на залитой части (белый жирный текст на насыщенном синем). */
 QProgressBar {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};
-    border-radius: 7px;
-    height: 14px;
+    border-radius: 10px;
+    min-height: 20px;
+    max-height: 20px;
+    padding: 0;
     text-align: center;
-    color: {TEXT_DIM};
-    font-size: 11px;
+    color: #f4f7ff;
+    font-size: 12px;
+    font-weight: 700;
 }}
 
 QProgressBar::chunk {{
-    background-color: {ACCENT};
-    border-radius: 6px;
+    background-color: {ACCENT_DOWN};
+    border-radius: 9px;
 }}
 
+/* Тонкий суб-бар (текущий файл): текст не рисуется вообще — иначе проценты
+   вылезали за пределы 6-пиксельной полосы. */
 QProgressBar#Subtle {{
     border: none;
     background-color: #10141d;
-    height: 6px;
+    min-height: 6px;
+    max-height: 6px;
+    color: transparent;
+    font-size: 1px;
 }}
 
 QProgressBar#Subtle::chunk {{

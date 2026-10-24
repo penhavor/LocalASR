@@ -6,5 +6,4 @@ from .base import (  # noqa: F401
     EngineNotInstalled,
     ModelRef,
     TranscriptResult,
-    TranscriptionProgress,
 )

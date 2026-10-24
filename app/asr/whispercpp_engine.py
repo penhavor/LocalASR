@@ -212,7 +212,6 @@ class WhisperCppEngine(ASREngine):
         started = time.time()
 
         def _progress_callback(segment) -> None:
-            nonlocal result
             try:
                 text = (segment.text or "").strip()
                 start = float(segment.t0) / 100.0

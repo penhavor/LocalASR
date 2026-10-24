@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..constants import (
     ENGINE_FASTER_WHISPER,
     ENGINE_GIGAAM,
+    ENGINE_HF,
     ENGINE_QWEN_ASR,
     ENGINE_VOSK,
     ENGINE_WHISPERCPP,
@@ -65,20 +66,6 @@ class ModelRef:
                 if child.is_dir() and (child / "model.bin").is_file():
                     return child
         return self.path
-
-
-@dataclass
-class TranscriptionProgress:
-    """Снимок прогресса для GUI."""
-
-    fraction: float = 0.0
-    stage: str = ""
-    audio_seconds: float = 0.0
-    processed_seconds: float = 0.0
-    speed_x: float = 0.0            # во сколько раз быстрее реального времени
-    eta_seconds: float = 0.0
-    segments_done: int = 0
-    last_text: str = ""
 
 
 @dataclass
@@ -189,6 +176,7 @@ def engine_packages(engine: str) -> List[str]:
             "torch>=2.6", "torchaudio>=2.6", "transformers>=4.52",
             "hydra-core>=1.3,<2", "omegaconf>=2.3,<3", "sentencepiece>=0.2.2",
         ],
+        ENGINE_HF: ["torch>=2.6", "transformers>=4.49", "accelerate>=1.0", "soundfile>=0.12"],
     }.get(engine, [])
 
 
@@ -212,11 +200,3 @@ def engine_note(engine: str) -> str:
     return ""
 
 
-def engine_import_name(engine: str) -> str:
-    return {
-        ENGINE_FASTER_WHISPER: "faster_whisper",
-        ENGINE_WHISPERCPP: "pywhispercpp",
-        ENGINE_VOSK: "vosk",
-        ENGINE_QWEN_ASR: "transformers",
-        ENGINE_GIGAAM: "transformers",
-    }.get(engine, "")

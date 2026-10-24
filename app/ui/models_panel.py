@@ -89,9 +89,10 @@ class ModelListPanel(QFrame):
         root.addLayout(header)
 
         subtitle = make_label(
-            "По умолчанию ничего не установлено. Скачай модель, затем кликни по её "
-            "карточке (или нажми «Выбрать для работы») — название появится в статус-баре "
-            "внизу окна, и кнопка «РАБОТАТЬ» станет активной.",
+            "По умолчанию ничего не установлено. Скачай модель, затем выбери её — "
+            "кликом по карточке (или в выпадающем списке «Модель» в блоке «3 · Работа»: "
+            "там перечислены ВСЕ скачанные модели, выбрать можно одну). "
+            "Пока модель не выбрана, кнопка «РАБОТАТЬ» неактивна.",
             "Dim",
             word_wrap=True,
         )
@@ -307,11 +308,6 @@ class ModelListPanel(QFrame):
             f"{len(entries)} в каталоге · {installed_count} установлено"
         )
         self._apply_filters()
-
-    def refresh_entry(self, entry: ModelEntry) -> None:
-        card = self._cards.get(entry.id)
-        if card is not None:
-            card.refresh_state(entry)
 
     def card(self, model_id: str) -> Optional[ModelCard]:
         return self._cards.get(model_id)

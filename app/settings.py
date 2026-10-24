@@ -55,6 +55,7 @@ class Settings:
     show_log_panel: bool = True
     theme: str = "dark"
     first_run_done: bool = False
+    gpu_boost_offered: bool = False       # предложение «ускорить GPU» показано один раз
 
     # ------------------------------------------------------------------ #
     @staticmethod

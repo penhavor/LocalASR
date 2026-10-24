@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -50,11 +51,20 @@ class PackageInstaller(QThread):
     progress = Signal(float, str)
     finishedWith = Signal(bool, str)
 
-    def __init__(self, packages: Sequence[str], title: str = "", parent=None) -> None:
+    def __init__(
+        self,
+        packages: Sequence[str],
+        title: str = "",
+        parent=None,
+        pre_uninstall: Optional[Sequence[str]] = None,
+    ) -> None:
         super().__init__(parent)
         self.packages = list(packages)
         self.title = title or "Установка пакетов"
         self._cancel = False
+        # что удалить ПЕРЕД установкой (например, CPU-сборку torch перед
+        # CUDA-сборкой: иначе pip скажет «already satisfied» и ничего не поставит)
+        self.pre_uninstall = list(pre_uninstall or [])
 
     def cancel(self) -> None:
         self._cancel = True
@@ -88,6 +98,12 @@ class PackageInstaller(QThread):
                     "--disable-pip-version-check", "--no-input", "--prefer-binary",
                     "--timeout", "60", "--retries", "3", *self.packages,
                 ]
+
+        if self.pre_uninstall:
+            self.progress.emit(0.03, "Удаляю старую версию: " + ", ".join(self.pre_uninstall))
+            uninstall_cmd = [python, "-m", "pip", "uninstall", "-y", *self.pre_uninstall]
+            self.outputLine.emit("$ " + " ".join(uninstall_cmd))
+            self._stream(uninstall_cmd, env)   # код возврата не важен: пакета могло и не быть
 
         self.progress.emit(0.05, "Запускаю установку…")
         self.outputLine.emit("$ " + " ".join(cmd))
@@ -242,6 +258,65 @@ class CatalogRefreshWorker(QThread):
                 self.finishedWith.emit(False, f"Обновлений нет (использую локальный каталог, {count} моделей)")
         except Exception as exc:  # noqa: BLE001
             self.finishedWith.emit(False, f"Не удалось обновить каталог: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+#  Зонд: видит ли torch из .venv CUDA (в отдельном процессе!)
+# --------------------------------------------------------------------------- #
+
+
+class TorchCudaProbeWorker(QThread):
+    """Проверяет subprocess'ом, стоит ли в .venv torch и видит ли он CUDA.
+
+    Почему не в процессе GUI:
+      * import torch блокирует на секунды — нельзя в GUI-потоке;
+      * импортированный torch «фиксирует» сборку (CPU/CUDA) на всю сессию,
+        а нам нужно знать состояние диска, не трогая текущий процесс.
+    """
+
+    probed = Signal(bool, bool, str)   # torch_installed, cuda_available, detail
+
+    _SCRIPT = (
+        "import importlib.util as iu, json\n"
+        "if iu.find_spec('torch') is None:\n"
+        "    print('PROBE' + json.dumps({'installed': False}))\n"
+        "else:\n"
+        "    import torch\n"
+        "    print('PROBE' + json.dumps({"
+        "'installed': True,"
+        "'cuda': bool(torch.cuda.is_available()),"
+        "'version': torch.__version__,"
+        "'cuda_ver': torch.version.cuda or ''}))\n"
+    )
+
+    def run(self) -> None:  # noqa: D102
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            out = subprocess.run(
+                [venv_python(), "-c", self._SCRIPT],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            for line in reversed((out.stdout or "").splitlines()):
+                if line.startswith("PROBE"):
+                    data = json.loads(line[len("PROBE"):])
+                    detail = str(data.get("version") or "")
+                    if data.get("cuda_ver"):
+                        detail += f" + CUDA {data['cuda_ver']}"
+                    self.probed.emit(
+                        bool(data.get("installed")), bool(data.get("cuda")), detail
+                    )
+                    return
+            log.debug("Зонд torch не дал результата: rc=%s stderr=%s",
+                      out.returncode, (out.stderr or "")[-300:])
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Зонд torch не запустился: %s", exc)
+        self.probed.emit(False, False, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -446,6 +521,11 @@ class TranscribeWorker(QThread):
                     fail += int(not result.ok)
                     self.fileFinished.emit(index, result)
                     self.overallProgress.emit(ok + fail, total)
+            # выгружаем модели ВНУТРИ рабочих потоков: кэш движков лежит в их
+            # thread-local, и вызов release из нашего потока не доставал его —
+            # память (в т.ч. VRAM) висела до смерти потоков
+            for _ in range(workers):
+                pool.submit(release_thread_engines)
 
         self.overallProgress.emit(total, total)
         return ok, fail

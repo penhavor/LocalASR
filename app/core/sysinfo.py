@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform as platform_mod
 import re
@@ -10,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..logutils import get_logger
 
@@ -126,8 +125,45 @@ def _cpu_name() -> str:
     return platform_mod.processor() or platform_mod.machine()
 
 
+def _cpu_physical_windows_ctypes() -> int:
+    """Физические ядра через GetLogicalProcessorInformation (без wmic).
+
+    wmic удалён из Windows 11 24H2+, поэтому основной путь — WinAPI.
+    """
+    try:
+        import ctypes
+
+        class SYSTEM_LOGICAL_PROCESSOR_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("ProcessorMask", ctypes.c_ulonglong),
+                ("Relationship", ctypes.c_int),
+                ("Reserved", ctypes.c_ulonglong * 2),
+            ]
+
+        RELATION_PROCESSOR_CORE = 0
+        kernel32 = ctypes.windll.kernel32
+        buffer_length = ctypes.c_ulong(0)
+        # первый вызов всегда «неудачный» — узнаём нужный размер буфера
+        kernel32.GetLogicalProcessorInformation(None, ctypes.byref(buffer_length))
+        if not buffer_length.value:
+            return 0
+        item_size = ctypes.sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION)
+        count = buffer_length.value // item_size
+        buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION * count)()
+        if not kernel32.GetLogicalProcessorInformation(buffer, ctypes.byref(buffer_length)):
+            return 0
+        return sum(
+            1 for item in buffer if item.Relationship == RELATION_PROCESSOR_CORE
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _cpu_physical() -> int:
     if IS_WINDOWS:
+        cores = _cpu_physical_windows_ctypes()
+        if cores:
+            return cores
         text = _run(["wmic", "cpu", "get", "NumberOfCores"], timeout=10)
         if text:
             numbers = re.findall(r"\d+", text)
@@ -287,10 +323,20 @@ def collect() -> HardwareInfo:
 #  Что рекомендуем под это железо
 # --------------------------------------------------------------------------- #
 
+def _hw_get(info: Any, key: str, default: Any = 0) -> Any:
+    """Поле железа из HardwareInfo ИЛИ словаря (GUI передаёт dict)."""
+    if isinstance(info, dict):
+        value = info.get(key, default)
+    else:
+        value = getattr(info, key, default)
+    return default if value is None else value
+
+
 # Пороги: (мин. RAM МБ, мин. VRAM МБ) -> «потолок» размера модели на диске (МБ)
-def max_model_size_mb(info: HardwareInfo) -> int:
-    if getattr(info, "cuda_runtime_ok", False) and getattr(info, "vram_mb", 0):
-        vram = int(info.vram_mb)
+def max_model_size_mb(info: Any) -> int:
+    cuda_ok = bool(_hw_get(info, "cuda_runtime_ok", False) or _hw_get(info, "cuda_ok", False))
+    vram = int(_hw_get(info, "vram_mb", 0) or 0)
+    if cuda_ok and vram:
         if vram >= 10_000:
             return 3_200        # large-v3
         if vram >= 7_000:
@@ -299,7 +345,7 @@ def max_model_size_mb(info: HardwareInfo) -> int:
             return 900          # turbo int8 / small
         return 500
 
-    ram = int(getattr(info, "ram_available_mb", 0) or getattr(info, "ram_total_mb", 0) or 0)
+    ram = int(_hw_get(info, "ram_available_mb", 0) or _hw_get(info, "ram_total_mb", 0) or 0)
     if ram >= 12_000:
         return 1_800
     if ram >= 8_000:
@@ -316,20 +362,3 @@ def recommended_device(info: HardwareInfo) -> tuple[str, str]:
     return "cpu", "int8"
 
 
-def fits(model_ram_mb: int, info: HardwareInfo) -> tuple[bool, str]:
-    """Проверяет, потянет ли железо модель. Возвращает (ok, причина)."""
-    if getattr(info, "cuda_runtime_ok", False) and getattr(info, "vram_mb", 0):
-        if model_ram_mb <= info.vram_mb * 0.85:
-            return True, ""
-        if model_ram_mb <= (info.ram_available_mb or info.ram_total_mb):
-            return True, "не влезает в VRAM — пойдёт через CPU (медленнее)"
-        return False, f"нужно ~{model_ram_mb} МБ памяти, свободно {info.ram_available_mb} МБ"
-    available = info.ram_available_mb or info.ram_total_mb
-    if available and model_ram_mb > available:
-        return False, f"нужно ~{model_ram_mb} МБ RAM, свободно {available} МБ"
-    return True, ""
-
-
-def dump_report(info: Optional[HardwareInfo] = None) -> str:
-    info = info or collect()
-    return json.dumps(info.to_dict(), ensure_ascii=False, indent=2)

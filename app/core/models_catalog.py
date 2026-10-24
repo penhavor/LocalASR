@@ -20,6 +20,7 @@ from ..constants import (
     CATALOG_REMOTE_URL,
     ENGINE_FASTER_WHISPER,
     ENGINE_GIGAAM,
+    ENGINE_HF,
     ENGINE_LABELS,
     ENGINE_QWEN_ASR,
     ENGINE_VOSK,
@@ -129,9 +130,59 @@ class ModelEntry:
 #  Определение движка по содержимому
 # --------------------------------------------------------------------------- #
 
+#: model_type из config.json -> движок LocalASR
+_CONFIG_TYPE_TO_ENGINE = {
+    "gigaam": ENGINE_GIGAAM,
+    "qwen3_asr": ENGINE_QWEN_ASR,
+    # всё остальное ASR-семейство Hugging Face уходит в универсальный движок
+    "whisper": ENGINE_HF,
+    "wav2vec2": ENGINE_HF,
+    "wav2vec2-bert": ENGINE_HF,
+    "wav2vec2_conformer": ENGINE_HF,
+    "hubert": ENGINE_HF,
+    "unispeech": ENGINE_HF,
+    "unispeech-sat": ENGINE_HF,
+    "data2vec-audio": ENGINE_HF,
+    "speecht5": ENGINE_HF,
+    "seamless-m4t": ENGINE_HF,
+    "seamless-m4t-v2": ENGINE_HF,
+    "mms": ENGINE_HF,
+    "vits": ENGINE_HF,
+    "parakeet": ENGINE_HF,
+    "canary": ENGINE_HF,
+    "distil-whisper": ENGINE_HF,
+}
+
+#: признаки аудио-модели в architectures (для config.json без известного model_type)
+_AUDIO_ARCH_MARKER = (
+    "speech", "asr", "wav2vec", "whisper", "hubert", "conformer", "parakeet",
+    "canary", "seamless", "mms", "audio", "ctc", "rnnt", "transducer",
+)
+
+
+def engine_from_config(cfg: Any) -> str:
+    """Движок по словарю config.json (transformers-модели). '' — не опознано."""
+    if not isinstance(cfg, dict):
+        return ""
+    model_type = str(cfg.get("model_type") or "").lower()
+    if model_type in _CONFIG_TYPE_TO_ENGINE:
+        return _CONFIG_TYPE_TO_ENGINE[model_type]
+    architectures = cfg.get("architectures") or []
+    joined = " ".join(str(a) for a in architectures).lower()
+    if any(marker in joined for marker in _AUDIO_ARCH_MARKER):
+        return ENGINE_HF
+    if isinstance(cfg.get("audio_config"), dict):
+        # мультимодальные модели со звуковым входом (qwen2-audio и т.п.)
+        return ENGINE_HF
+    return ""
+
 
 def detect_engine(folder: Path) -> str:
-    """Определяет движок по файлам в папке модели (или по одному файлу)."""
+    """Определяет движок по файлам в папке модели (или по одному файлу).
+
+    Порядок важен: CT2-сборки Whisper тоже содержат config.json, поэтому
+    сначала ищем их признак — `model.bin`.
+    """
     folder = Path(folder)
     if not folder.exists():
         return ""
@@ -149,29 +200,36 @@ def detect_engine(folder: Path) -> str:
     except OSError:
         return ""
 
-    # transformers-модели (Qwen3-ASR, GigaAM и т.п.) опознаём по config.json
-    config = folder / "config.json"
-    if config.is_file():
-        try:
-            with open(config, "r", encoding="utf-8") as fh:
-                model_type = str(json.load(fh).get("model_type") or "").lower()
-        except (OSError, ValueError):
-            model_type = ""
-        if model_type == "qwen3_asr":
-            return ENGINE_QWEN_ASR
-        if model_type == "gigaam":
-            return ENGINE_GIGAAM
-
-    if "am" in names or any(n == "final.mdl" or n.endswith(".mdl") for n in names):
-        return ENGINE_VOSK
-    if any(n.startswith("ggml") for n in names):
-        return ENGINE_WHISPERCPP
+    # 1) CTranslate2 (faster-whisper): model.bin может лежать и в подпапке
     if "model.bin" in names:
         return ENGINE_FASTER_WHISPER
-    # CT2-модель может лежать в подпапке (ct2_int8_float16 и т.п.)
-    for child in folder.iterdir() if folder.is_dir() else []:
+    for child in folder.iterdir():
         if child.is_dir() and (child / "model.bin").is_file():
             return ENGINE_FASTER_WHISPER
+
+    # 2) transformers-модели: GigaAM, Qwen3-ASR и любые прочие ASR с HF
+    config = folder / "config.json"
+    has_weights = any(
+        n.endswith((".safetensors", ".bin", ".pt", ".pth")) and n != "model.bin"
+        for n in names
+    )
+    if config.is_file() and has_weights:
+        try:
+            with open(config, "r", encoding="utf-8") as fh:
+                engine = engine_from_config(json.load(fh))
+            if engine:
+                return engine
+        except (OSError, ValueError):
+            pass
+
+    # 3) Vosk (Kaldi)
+    if "am" in names or any(n == "final.mdl" or n.endswith(".mdl") for n in names):
+        return ENGINE_VOSK
+
+    # 4) whisper.cpp (GGML)
+    if any(n.startswith("ggml") for n in names):
+        return ENGINE_WHISPERCPP
+
     return ""
 
 

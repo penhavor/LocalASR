@@ -165,6 +165,94 @@ def squeeze_repeats(text: str) -> str:
     return re.sub(r"\s{2,}", " ", collapsed).strip()
 
 
+def _sentence_norms(text: str) -> List[str]:
+    """Нормализованные предложения текста (для дедупликации)."""
+    return [
+        re.sub(r"\W+", " ", part.lower()).strip()
+        for part in re.split(r"(?<=[.!?…])\s+", text)
+        if part.strip()
+    ]
+
+
+def _is_echo_sentence(candidate: str, previous: str, threshold: float = 0.80) -> bool:
+    """candidate — эхо previous?
+
+    Правила (консервативные, чтобы не съесть легитимный контент):
+      * Dice-схожесть биграмм ≥ threshold  → почти дословный повтор;
+      * candidate КОРОЧЕ и его биграммы ≥90% содержатся в previous →
+        «обломок» предыдущей фразы (хвост петли); если candidate ДЛИННЕЕ и
+        продолжает previous — он несёт новую информацию, оставляем;
+      * уникальные слова candidate ≥90% покрыты словами previous И порядок
+        похож (Dice ≥ 0.55), и слов ≥5 → деградировавший повтор петли.
+    """
+    dice = _similarity(candidate, previous)
+    if dice >= threshold:
+        return True
+    cand_tokens = candidate.split()
+    prev_tokens = previous.split()
+    if not cand_tokens or not prev_tokens:
+        return False
+    cand_bigrams = {f"{a}|{b}" for a, b in zip(cand_tokens, cand_tokens[1:])}
+    prev_bigrams = {f"{a}|{b}" for a, b in zip(prev_tokens, prev_tokens[1:])}
+    if (
+        cand_bigrams
+        and len(cand_tokens) <= len(prev_tokens)
+        and len(cand_bigrams & prev_bigrams) / len(cand_bigrams) >= 0.90
+    ):
+        return True
+    cand_words = set(cand_tokens)
+    prev_words = set(prev_tokens)
+    if (
+        len(cand_words) >= 5
+        and len(cand_words & prev_words) / len(cand_words) >= 0.90
+        and dice >= 0.55
+    ):
+        return True
+    return False
+
+
+def squeeze_duplicate_sentences(
+    text: str,
+    threshold: float = 0.80,
+    lookback: int = 4,
+    context: Optional[Sequence[str]] = None,
+    min_words: int = 3,
+) -> str:
+    """Убирает дубли/эхо-предложения — внутри сегмента И через границу сегментов.
+
+    RNNT/CTC-модели на шуме и музыке «зацикливаются»: фраза повторяется 2–3
+    раза с постепенной деградацией, в том числе «перетекая» через границу
+    куска. `context` — нормализованные предложения предыдущих сегментов
+    (скользящее окно), чтобы ловить повтор «конец сегмента A = начало B».
+    Предложение короче min_words слов не дедуплицируется («Да.» в диалоге).
+    Из дублей оставляем самое длинное (в нём меньше «съеденных» слов).
+    """
+    if not text:
+        return text
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", text) if part.strip()]
+    if not sentences:
+        return text
+
+    # история последних предложений (включая уже отброшенные варианты —
+    # деградировавший повтор может быть ближе к ОТБРОШЕННОМУ, чем к оставленному)
+    history: List[str] = list(context or [])[-lookback:]
+
+    kept: List[str] = []
+    for sentence in sentences:
+        candidate = re.sub(r"\W+", " ", sentence.lower()).strip()
+        if len(candidate.split()) < min_words:
+            # «Да.» / «Ну что.» — диалогные мелочи не дедуплицируем
+            kept.append(sentence)
+            continue
+        if any(_is_echo_sentence(candidate, previous, threshold) for previous in history[-lookback:]):
+            continue    # эхо — отбрасываем, первое вхождение уже оставлено
+        kept.append(sentence)
+        history.append(candidate)
+        if len(history) > lookback * 3:
+            history = history[-lookback * 2:]
+    return " ".join(kept)
+
+
 # --------------------------------------------------------------------------- #
 #  Очистка потока сегментов
 # --------------------------------------------------------------------------- #
@@ -205,6 +293,7 @@ def sanitize_segments(
     """
     result: List[Segment] = []
     recent_texts: List[str] = []
+    recent_sentences: List[str] = []   # скользящее окно для межсегментных эхо-повторов
 
     for segment in segments:
         original = segment.text or ""
@@ -212,6 +301,11 @@ def sanitize_segments(
 
         if aggressive:
             text = squeeze_repeats(text)
+            text = squeeze_duplicate_sentences(text, context=recent_sentences)
+            for sentence_norm in _sentence_norms(text):
+                if len(sentence_norm.split()) >= 3:
+                    recent_sentences.append(sentence_norm)
+            recent_sentences = recent_sentences[-8:]
 
         segment.text = text
 
@@ -235,13 +329,26 @@ def sanitize_segments(
                 segment.drop_reason = f"дегенеративный текст (cr {segment.compression_ratio:.2f})"
                 continue
 
-        # повторы между сегментами (типичная петля Whisper)
+        # повторы между сегментами (типичная петля Whisper/GigaAM на шуме):
+        # либо высокая схожесть, либо один текст почти целиком содержится
+        # в другом (короткий «эхо-сегмент» после длинного)
         normalized = re.sub(r"\W+", " ", text.lower()).strip()
         duplicate = False
         for previous in recent_texts[-window:]:
             if _similarity(normalized, previous) >= duplicate_similarity:
                 duplicate = True
                 break
+            shorter, longer = sorted((normalized, previous), key=len)
+            if shorter and len(longer) > len(shorter) * 1.3:
+                set_s = set(shorter.split())
+                set_l = set(longer.split())
+                if set_s and len(set_s & set_l) / len(set_s) >= 0.92:
+                    # биграммный containment строже словесного — проверяем им
+                    big_s = {f"{a}|{b}" for a, b in zip(shorter.split(), shorter.split()[1:])}
+                    big_l = {f"{a}|{b}" for a, b in zip(longer.split(), longer.split()[1:])}
+                    if big_s and len(big_s & big_l) / len(big_s) >= 0.90:
+                        duplicate = True
+                        break
         if duplicate:
             segment.dropped = True
             segment.drop_reason = "повтор предыдущего сегмента"

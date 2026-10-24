@@ -147,10 +147,6 @@ COLOR_TRANSPARENT = _enum(Qt, "GlobalColor.transparent", "transparent", default=
 ROLE_USER = _enum(Qt, "ItemDataRole.UserRole", "UserRole", default=0x0100)
 
 
-def elide_mode() -> Any:
-    return _enum(Qt, "TextElideMode.ElideMiddle", "ElideMiddle", default=2)
-
-
 # --------------------------------------------------------------------------- #
 #  Аттрибуты приложения
 # --------------------------------------------------------------------------- #
@@ -199,10 +195,6 @@ def no_edit_triggers() -> Any:
 
 def frame_no_frame() -> Any:
     return _flag("QtWidgets.QFrame", "Shape", "NoFrame", 0)
-
-
-def frame_hline() -> Any:
-    return _flag("QtWidgets.QFrame", "Shape", "HLine", 5)
 
 
 # --------------------------------------------------------------------------- #

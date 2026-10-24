@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 from ..constants import HF_API_BASE, HF_RESOLVE_BASE, HTTP_CHUNK, HTTP_TIMEOUT, USER_AGENT
@@ -152,24 +152,21 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
     return files
 
 
-def hf_repo_size(repo_id: str, subfolder: str = "") -> Optional[int]:
-    try:
-        files = hf_tree(repo_id, subfolder)
-    except NetworkError:
-        return None
-    total = sum(f.size for f in files if not f.is_dir)
-    return total or None
+def hf_read_json(repo_id: str, filename: str, revision: str = "main", subfolder: str = "") -> Optional[Dict]:
+    """Прочитать маленький JSON (config.json) из репозитория HF. None — если нет.
 
-
-def hf_model_info(repo_id: str) -> Dict:
-    sess = session()
-    resp = sess.get(f"{HF_API_BASE}/{quote(repo_id, safe='/')}", timeout=HTTP_TIMEOUT)
-    if resp.status_code != 200:
-        raise NetworkError(f"HTTP {resp.status_code} для {repo_id}")
+    Используется, чтобы определить движок модели ДО скачивания.
+    """
+    rel = f"{subfolder.strip('/')}/{filename}" if subfolder else filename
+    url = hf_resolve_url(repo_id, rel, revision=revision)
     try:
+        sess = session()
+        resp = sess.get(url, timeout=HTTP_TIMEOUT)
+        if resp.status_code != 200:
+            return None
         return resp.json()
-    except ValueError as exc:
-        raise NetworkError(f"Не-JSON ответ: {exc}") from exc
+    except Exception:  # noqa: BLE001 - нет сети/битый JSON: просто None
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +205,14 @@ def download_file(
                     headers = {}
                     continue
                 if resp.status_code not in (200, 206):
-                    raise NetworkError(f"HTTP {resp.status_code} при скачивании {url}")
+                    hint = ""
+                    if resp.status_code in (401, 403):
+                        hint = (
+                            " — репозиторий закрытый (gated) или нужен токен Hugging Face: "
+                            "открой страницу модели в браузере, войди в аккаунт и нажми "
+                            "«Agree and access», либо используй открытый зеркальный репозиторий."
+                        )
+                    raise NetworkError(f"HTTP {resp.status_code} при скачивании {url}{hint}")
 
                 if resp.status_code == 200 and existing:
                     # сервер не поддержал Range — качаем заново
@@ -323,13 +327,6 @@ def guess_model_kind(name: str) -> str:
     if "ggml" in low or low.endswith(".bin") and "ggml" in low:
         return "whispercpp"
     return "faster-whisper"
-
-
-def iter_with_progress(items: Iterable, total: int, progress: Optional[Callable[[float], None]]):
-    for index, item in enumerate(items, start=1):
-        yield item
-        if progress is not None:
-            progress(index / max(1, total))
 
 
 def write_json(path: Path, payload) -> None:

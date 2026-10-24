@@ -22,10 +22,22 @@ from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from .. import paths
-from ..constants import APP_VERSION, ENGINE_VOSK, ENGINE_WHISPERCPP, MODELS_DIRNAME
+from ..constants import (
+    APP_VERSION,
+    ENGINE_FASTER_WHISPER,
+    ENGINE_VOSK,
+    ENGINE_WHISPERCPP,
+    MODELS_DIRNAME,
+)
 from ..logutils import get_logger
 from . import net
-from .models_catalog import META_FILENAME, ModelEntry, ct2_subfolder, detect_engine
+from .models_catalog import (
+    META_FILENAME,
+    ModelEntry,
+    ct2_subfolder,
+    detect_engine,
+    engine_from_config,
+)
 
 log = get_logger("downloader")
 
@@ -425,6 +437,29 @@ def uninstall_model(entry: ModelEntry, root: Optional[Path] = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _engine_from_hf_listing(repo_id: str, subfolder: str, revision: str, names: List[str]) -> str:
+    """Движок по списку файлов HF-репозитория (+ удалённый config.json).
+
+    Так «Своя модель» понимает ЛЮБУю ASR-модель Hugging Face, а не только
+    заранее известные: неизвестный config.json с аудио-архитектурой уходит
+    в универсальный движок hf-transformers.
+    """
+    if any(n.startswith("ggml") for n in names):
+        return ENGINE_WHISPERCPP
+    if "model.bin" in names:
+        return ENGINE_FASTER_WHISPER
+    if any(n == "final.mdl" or n.endswith(".mdl") for n in names):
+        return ENGINE_VOSK
+    if "config.json" in names:
+        cfg = net.hf_read_json(repo_id, "config.json", revision=revision, subfolder=subfolder)
+        engine = engine_from_config(cfg)
+        if engine:
+            return engine
+    return ENGINE_FASTER_WHISPER
+
+
+
+
 def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntry:
     """Создаёт ModelEntry из произвольного источника: путь, HF-репо или URL.
 
@@ -467,17 +502,15 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
             model_id = repo_id
             url = net.hf_repo_page(repo_id)
             try:
-                files = net.hf_tree(repo_id, subfolder)
-                size_bytes = sum(f.size for f in files if not f.is_dir)
+                files = net.hf_tree(repo_id, subfolder, revision=revision)
                 names = [f.path.split("/")[-1].lower() for f in files]
-                if any(n.startswith("ggml") for n in names):
-                    engine = "whispercpp"
-                elif "model.bin" in names:
-                    engine = "faster-whisper"
-                elif any(n == "final.mdl" for n in names):
-                    engine = ENGINE_VOSK
+                engine = _engine_from_hf_listing(repo_id, subfolder, revision, names)
+                if engine == ENGINE_WHISPERCPP:
+                    size_bytes = sum(
+                        f.size for f in files if not f.is_dir and "ggml" in f.path.lower()
+                    )
                 else:
-                    engine = "faster-whisper"
+                    size_bytes = sum(f.size for f in _filter_needed(files))
             except net.NetworkError as exc:
                 raise InstallError(str(exc)) from exc
         else:
@@ -513,20 +546,15 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
         except net.NetworkError as exc:
             raise InstallError(str(exc)) from exc
         names = [f.path.split("/")[-1].lower() for f in files]
-        if any(n.startswith("ggml") for n in names):
-            engine = ENGINE_WHISPERCPP
+        engine = _engine_from_hf_listing(repo_id, subfolder, revision, names)
+        if engine == ENGINE_WHISPERCPP:
             ggml = [f for f in files if f.path.lower().endswith(".bin") and "ggml" in f.path.lower()]
             if len(ggml) == 1:
                 single_file = ggml[0].path.split("/")[-1]
             size_bytes = sum(f.size for f in files if not f.is_dir and "ggml" in f.path.lower())
-        elif "model.bin" in names:
-            engine = "faster-whisper"
+        elif engine in (ENGINE_FASTER_WHISPER,):
             size_bytes = sum(f.size for f in _filter_needed(files))
-        elif any(n.endswith(".mdl") for n in names):
-            engine = ENGINE_VOSK
-            size_bytes = sum(f.size for f in files if not f.is_dir)
         else:
-            engine = "faster-whisper"
             size_bytes = sum(f.size for f in files if not f.is_dir)
 
     entry = ModelEntry(

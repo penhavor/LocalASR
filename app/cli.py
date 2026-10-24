@@ -124,6 +124,16 @@ def run_gui(argv: Sequence[str]) -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    # Чужие библиотеки (например, modeling_gigaam.py) запускают ffmpeg через
+    # subprocess без CREATE_NO_WINDOW — из pythonw это мигающие чёрные окна.
+    # Глушим консоли всех дочерних процессов, пока мы без своей консоли.
+    try:
+        from .core.winutil import suppress_child_consoles
+
+        suppress_child_consoles()
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         from PySide6.QtCore import qInstallMessageHandler
         from PySide6.QtGui import QSurfaceFormat
@@ -278,8 +288,10 @@ def cmd_doctor(_args) -> int:
     print(f"ffmpeg      : {find_ffmpeg() or 'не найден (будет PyAV)'}")
     print(f"ffmpeg ver  : {ffmpeg_version()}")
     print()
-    for engine in ("faster-whisper", "whispercpp", "vosk"):
-        print(f"движок {engine:<16}: {'установлен' if engine_available(engine) else 'не установлен'}")
+    from .constants import ENGINES
+
+    for engine in ENGINES:
+        print(f"движок {engine:<18}: {'установлен' if engine_available(engine) else 'не установлен'}")
     print()
     try:
         hardware = registry.hardware()

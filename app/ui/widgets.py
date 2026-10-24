@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QProgressBar,
     QPushButton,
-    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -41,11 +40,6 @@ def make_label(text: str, object_name: str = "", word_wrap: bool = False) -> QLa
     return label
 
 
-def elide(text: str, width: int, font: Optional[QFont] = None) -> str:
-    metrics = QFontMetrics(font or QFont())
-    return metrics.elidedText(text, compat.elide_mode(), width)
-
-
 def open_in_file_manager(path: Path | str) -> None:
     """Открывает папку в системном проводнике (или выделяет файл)."""
     path = Path(path)
@@ -68,13 +62,6 @@ def chip(text: str, object_name: str = "BadgeEngine") -> QLabel:
     label.setObjectName(object_name)
     label.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
     return label
-
-
-def hline() -> QFrame:
-    line = QFrame()
-    line.setFrameShape(QFrame.HLine)
-    line.setStyleSheet("color: #2a3244; background-color: #2a3244; max-height: 1px;")
-    return line
 
 
 class FlowLayout(QLayout):
@@ -202,9 +189,6 @@ class FileListWidget(QListWidget):
         if added:
             self.filesChanged.emit()
         return added
-
-    def add_files(self, file_list: Iterable[str]) -> int:
-        return self.add_paths(file_list)
 
     def files(self) -> List[Path]:
         result: List[Path] = []
@@ -564,14 +548,6 @@ class ModelCard(QFrame):
                 return f"⚠ VRAM {vram / 1024:.1f} ГБ — модель пойдёт через CPU"
         return ""
 
-    def _toggle_more(self) -> None:
-        visible = not self.full_description.isVisible()
-        self.full_description.setVisible(visible)
-        self.more_button.setText("Свернуть" if visible else "Подробнее")
-        self.updateGeometry()
-        if self.parentWidget():
-            self.parentWidget().updateGeometry()
-
     def _on_action(self) -> None:
         if self.entry.installed:
             self.selectRequested.emit(self.entry)
@@ -616,12 +592,3 @@ class ModelCard(QFrame):
             self.progress.setRange(0, 1000)
             self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
         self.progress_label.setText(status)
-
-    def refresh_state(self, entry: ModelEntry) -> None:
-        self.entry = entry
-        self.delete_button.setVisible(entry.installed)
-        self.action_button.setText("Выбрать для работы" if entry.installed else "Скачать")
-        self._update_card_tooltip()
-        self.action_button.setObjectName("Primary" if not entry.installed else "")
-        self.action_button.style().unpolish(self.action_button)
-        self.action_button.style().polish(self.action_button)

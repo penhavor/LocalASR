@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from ..constants import (
     ENGINE_FASTER_WHISPER,
     ENGINE_GIGAAM,
+    ENGINE_HF,
     ENGINE_QWEN_ASR,
     ENGINE_VOSK,
     ENGINE_WHISPERCPP,
@@ -20,6 +21,7 @@ from ..core.models_catalog import ModelEntry
 from ..logutils import get_logger
 from .base import ASREngine, EngineError, EngineNotInstalled, ModelRef, engine_packages
 from .faster_whisper_engine import FasterWhisperEngine
+from .hf_pipeline_engine import HFPipelineEngine
 from .torch_engines import GigaAMEngine, QwenASREngine
 from .vosk_engine import VoskEngine
 from .whispercpp_engine import WhisperCppEngine
@@ -32,6 +34,7 @@ ENGINE_CLASSES: Dict[str, type] = {
     ENGINE_VOSK: VoskEngine,
     ENGINE_QWEN_ASR: QwenASREngine,
     ENGINE_GIGAAM: GigaAMEngine,
+    ENGINE_HF: HFPipelineEngine,
 }
 
 
@@ -46,6 +49,11 @@ def engine_class(engine: str) -> type:
 
 def engine_available(engine: str) -> bool:
     try:
+        # движок могли только что установить из GUI — сбрасываем кэш импортёров,
+        # иначе find_spec() не увидит свежие пакеты до перезапуска
+        import importlib
+
+        importlib.invalidate_caches()
         return engine_class(engine).is_available()
     except EngineError:
         return False
@@ -80,6 +88,7 @@ def ref_from_entry(entry: ModelEntry) -> ModelRef:
 class EngineRegistry:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._load_lock = threading.Lock()
         self._engine: Optional[ASREngine] = None
         self._engine_model_id: Optional[str] = None
         self._hardware_cache: Optional[Dict[str, Any]] = None
@@ -104,6 +113,8 @@ class EngineRegistry:
             "gpu_index": 0,
             "cuda_ok": bool(info.cuda_runtime_ok),
             "vram_mb": info.vram_mb,
+            "gpu_driver": (info.best_gpu.driver if info.best_gpu else ""),
+            "gpu_name": (info.best_gpu.name if info.best_gpu else ""),
             "ram_available_mb": info.ram_available_mb,
             "ram_total_mb": info.ram_total_mb,
             "has_nvidia": info.has_nvidia,
@@ -123,7 +134,12 @@ class EngineRegistry:
 
     # ------------------------------------------------------------------ #
     def get(self, entry: ModelEntry, settings: Optional[Dict[str, Any]] = None) -> ASREngine:
-        """Возвращает ЗАГРУЖЕННЫЙ движок под модель (переиспользует кэш)."""
+        """Возвращает ЗАГРУЖЕННЫЙ движок под модель (переиспользует кэш).
+
+        Загрузка выполняется ВНЕ `_lock` (под отдельным `_load_lock`): иначе
+        любой GUI-вызов hardware() на время загрузки модели (десятки секунд)
+        блокировал бы интерфейс.
+        """
         settings = dict(settings or {})
         ref = ref_from_entry(entry)
 
@@ -134,8 +150,25 @@ class EngineRegistry:
                 and self._engine.name == ref.engine
             ):
                 return self._engine
-            # другая модель — освобождаем память
-            self._unload_locked()
+
+        with self._load_lock:
+            # double-check: пока ждали _load_lock, движок мог загрузить сосед
+            with self._lock:
+                if (
+                    self._engine is not None
+                    and self._engine_model_id == ref.model_id
+                    and self._engine.name == ref.engine
+                ):
+                    return self._engine
+                stale = self._engine
+                self._engine = None
+                self._engine_model_id = None
+            if stale is not None:
+                try:
+                    stale.unload()
+                    log.info("Предыдущая модель выгружена (%s)", stale.name)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Не удалось выгрузить предыдущую модель: %s", exc)
 
             cls = engine_class(ref.engine)
             engine: ASREngine = cls()
@@ -152,8 +185,9 @@ class EngineRegistry:
             )
             log.info("Загружаю движок %s для модели %s", ref.engine, ref.name)
             engine.load(ref, hardware)
-            self._engine = engine
-            self._engine_model_id = ref.model_id
+            with self._lock:
+                self._engine = engine
+                self._engine_model_id = ref.model_id
             return engine
 
     def current(self) -> Optional[ASREngine]:

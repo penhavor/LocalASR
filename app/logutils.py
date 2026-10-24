@@ -127,12 +127,3 @@ def detach_qt_sink(handler: Optional[logging.Handler]) -> None:
             get_logger().removeHandler(handler)
         except Exception:  # noqa: BLE001
             pass
-
-
-def tail_log(lines: int = 200, root: Optional[Path] = None) -> str:
-    path = paths.logs_dir(root) / "localasr.log"
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return "".join(fh.readlines()[-lines:])
-    except OSError:
-        return f"(лог не найден: {path})"

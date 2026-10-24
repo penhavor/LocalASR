@@ -46,6 +46,17 @@
     "import": "transformers",
     "note": "Нужен для русских моделей GigaAM (Sber). Ставится по требованию, ОДИН РАЗ: самое тяжёлое — PyTorch (~120–200 МБ в CPU-варианте), остальное мелко. Повторные запуски ничего не качают."
   },
+  "hf-transformers": {
+    "title": "Transformers (любая ASR-модель Hugging Face)",
+    "pip": [
+      "torch>=2.6",
+      "transformers>=4.49",
+      "accelerate>=1.0",
+      "soundfile>=0.12"
+    ],
+    "import": "transformers",
+    "note": "Универсальный движок для ЛЮБЫХ ASR-моделей Hugging Face, которых нет в других движках: оригинальные Whisper, wav2vec2, HuBERT, Parakeet, MMS и т.д. Ставится по требованию, ОДИН РАЗ (тяжелее всего PyTorch)."
+  },
   "cuda": {
     "title": "NVIDIA CUDA 12 (cuBLAS + cuDNN 9)",
     "pip": [

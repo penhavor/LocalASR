@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 APP_NAME = "LocalASR"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.3.0"
 ORG_NAME = "LocalASR"
 
 # --- папки внутри проекта -------------------------------------------------- #
@@ -61,7 +61,23 @@ ENGINE_WHISPERCPP = "whispercpp"
 ENGINE_VOSK = "vosk"
 ENGINE_QWEN_ASR = "qwen-asr"          # Qwen3-ASR (Alibaba) через transformers + torch
 ENGINE_GIGAAM = "gigaam"              # GigaAM (Sber) через transformers + torch
-ENGINES = (ENGINE_FASTER_WHISPER, ENGINE_WHISPERCPP, ENGINE_VOSK, ENGINE_QWEN_ASR, ENGINE_GIGAAM)
+ENGINE_HF = "hf-transformers"         # ЛЮБАЯ ASR-модель Hugging Face через transformers.pipeline
+ENGINES = (
+    ENGINE_FASTER_WHISPER,
+    ENGINE_WHISPERCPP,
+    ENGINE_VOSK,
+    ENGINE_QWEN_ASR,
+    ENGINE_GIGAAM,
+    ENGINE_HF,
+)
+
+#: движки на PyTorch — для них имеет смысл ставить CUDA-сборку torch
+TORCH_ENGINE_NAMES = (ENGINE_QWEN_ASR, ENGINE_GIGAAM, ENGINE_HF)
+
+#: индекс CUDA-сборок PyTorch (Windows-pip ставит только CPU-вариант).
+#: cu126 работает с драйверами NVIDIA >= 525/527 (minor version compatibility)
+TORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
+TORCH_CUDA_MIN_DRIVER_MAJOR = 527
 
 ENGINE_LABELS = {
     ENGINE_FASTER_WHISPER: "faster-whisper · CTranslate2",
@@ -69,6 +85,7 @@ ENGINE_LABELS = {
     ENGINE_VOSK: "Vosk · Kaldi",
     ENGINE_QWEN_ASR: "Qwen3-ASR · transformers",
     ENGINE_GIGAAM: "GigaAM (Sber) · transformers",
+    ENGINE_HF: "Transformers · любая ASR с Hugging Face",
 }
 
 # --- язык ------------------------------------------------------------------ #

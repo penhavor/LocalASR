@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import QByteArray, QUrl, QTimer
+from PySide6.QtCore import QByteArray, QUrl, QTimer, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -46,6 +47,9 @@ from ..constants import (
     AUDIO_EXTENSIONS,
     LANGUAGES,
     MEDIA_EXTENSIONS,
+    TORCH_CUDA_INDEX_URL,
+    TORCH_CUDA_MIN_DRIVER_MAJOR,
+    TORCH_ENGINE_NAMES,
     VIDEO_EXTENSIONS,
 )
 from ..core.ffmpeg import ffmpeg_version, find_ffmpeg
@@ -63,7 +67,13 @@ from .dialogs import (
 )
 from .models_panel import ModelListPanel
 from .widgets import FileListWidget, FlowLayout, make_label, open_in_file_manager
-from .workers import CatalogRefreshWorker, ModelDownloadWorker, PackageInstaller, TranscribeWorker
+from .workers import (
+    CatalogRefreshWorker,
+    ModelDownloadWorker,
+    PackageInstaller,
+    TorchCudaProbeWorker,
+    TranscribeWorker,
+)
 
 log = get_logger("ui")
 
@@ -134,6 +144,9 @@ def app_icon() -> QIcon:
 
 
 class MainWindow(QMainWindow):
+    #: записи лога из фоновых потоков приходят в GUI-поток очередью (безопасно)
+    logRecord = Signal(str, str)
+
     def __init__(self, settings: Optional[Settings] = None, catalog: Optional[ModelCatalog] = None) -> None:
         super().__init__()
         self.settings = settings or Settings.load()
@@ -152,6 +165,14 @@ class MainWindow(QMainWindow):
         self.results: dict[int, FileResult] = {}
         self.job_started_at: float = 0.0
         self._pending_job: bool = False
+        self._working: bool = False
+        self._job_total_files: int = 1
+        self._job_done_files: int = 0
+        self._last_job_engine: str = ""
+        self._last_install_torch_cuda: bool = False
+        self.torch_probe: Optional[TorchCudaProbeWorker] = None
+        # состояние PyTorch в .venv: probed/installed/cuda/detail
+        self.gpu_state: dict = {"probed": False, "installed": False, "cuda": False, "detail": ""}
 
         self.setWindowTitle(f"{APP_NAME} — локальное распознавание речи")
         self.setWindowIcon(app_icon())
@@ -165,7 +186,11 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._restore_geometry()
 
-        self.log_handler = attach_qt_sink(self._on_log_record)
+        # ВАЖНО: лог-записи рождаются в фоновых потоках, а виджеты Qt можно
+        # трогать только из GUI-потока — поэтому мост идёт через сигнал
+        # (автоматически доставляется очередью в GUI-поток).
+        self.logRecord.connect(self._on_log_record)
+        self.log_handler = attach_qt_sink(self.logRecord.emit)
         log.info("GUI запущен (%s %s, Python %s)", APP_NAME, APP_VERSION, sys.version.split()[0])
 
         QTimer.singleShot(60, self._startup_checks)
@@ -517,10 +542,39 @@ class MainWindow(QMainWindow):
 
         work_layout.addWidget(make_label("3 · Работа", "H2"))
 
+        # --- выбор модели: выпадающий список ВСЕХ скачанных моделей --------- #
+        model_row = QHBoxLayout()
+        model_row.setSpacing(8)
+        model_label = make_label("Модель", "Dim")
+        model_label.setToolTip(
+            "Какую из СКАЧАННЫХ моделей использовать для распознавания.\n"
+            "Выбрать можно только одну; пока выбрано «Не выбрано», кнопка «РАБОТАТЬ»\n"
+            "неактивна. Скачать новые модели — в правой панели окна."
+        )
+        model_row.addWidget(model_label)
+        self.model_combo = QComboBox()
+        self.model_combo.setToolTip(model_label.toolTip())
+        self.model_combo.setCursor(compat.CURSOR_POINTING_HAND)
+        self.model_combo.currentIndexChanged.connect(self._on_model_combo_changed)
+        model_row.addWidget(self.model_combo, stretch=1)
+        work_layout.addLayout(model_row)
+        self.rebuild_model_combo()
+
+        # --- GPU-статус/кнопка: предлагает CUDA-сборку PyTorch, когда есть
+        # видеокарта NVIDIA, но torch считает на процессоре -----------------
+        self.gpu_button = QPushButton("Определяю железо…")
+        self.gpu_button.setObjectName("Ghost")
+        self.gpu_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.gpu_button.setEnabled(False)
+        self.gpu_button.clicked.connect(self._install_torch_cuda)
+        work_layout.addWidget(self.gpu_button)
+
         self.overall_progress = QProgressBar()
-        self.overall_progress.setRange(0, 100)
+        self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(0)
-        self.overall_progress.setFormat("%v%")
+        # %p — именно ПРОЦЕНТ (Qt сам пересчитывает из диапазона 0..1000);
+        # %v показал бы «сырое» значение — отсюда были «1000%» в финале
+        self.overall_progress.setFormat("%p%")
         work_layout.addWidget(self.overall_progress)
 
         self.overall_label = make_label("Готов к работе", "Dim", word_wrap=True)
@@ -531,6 +585,7 @@ class MainWindow(QMainWindow):
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
         self.file_progress.setFixedHeight(6)
+        self.file_progress.setFormat("")  # текст на 6-пиксельной полосе не помещается
         work_layout.addWidget(self.file_progress)
 
         self.file_label = make_label("", "Muted", word_wrap=True)
@@ -540,6 +595,7 @@ class MainWindow(QMainWindow):
         self.preview.setReadOnly(True)
         self.preview.setPlaceholderText("Здесь появится распознанный текст по мере работы…")
         self.preview.setMaximumHeight(96)
+        self.preview.setMaximumBlockCount(1500)  # память не растёт бесконечно
         work_layout.addWidget(self.preview)
 
         action_row = QHBoxLayout()
@@ -555,13 +611,14 @@ class MainWindow(QMainWindow):
         shadow.setColor(compat.COLOR_TRANSPARENT)
         self.work_button.setGraphicsEffect(shadow)
         self.work_button.clicked.connect(self.on_work)
-        action_row.addWidget(self.work_button, stretch=3)
+        action_row.addWidget(self.work_button, stretch=1)
 
-        self.cancel_button = QPushButton("Отмена")
+        # Кнопка-переключатель: на время работы «РАБОТАТЬ» заменяется «ОТМЕНИТЬ»
+        self.cancel_button = QPushButton("ОТМЕНИТЬ")
         self.cancel_button.setObjectName("Danger")
         self.cancel_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.cancel_button.setMinimumHeight(48)
-        self.cancel_button.setEnabled(False)
+        self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self.on_cancel)
         action_row.addWidget(self.cancel_button, stretch=1)
         work_layout.addLayout(action_row)
@@ -689,6 +746,8 @@ class MainWindow(QMainWindow):
 
         self.models_panel.set_hardware(self.hardware)
         self.models_panel.rebuild()
+        self._refresh_gpu_button()
+        self._start_torch_probe()
 
         gpu = self.hardware.get("vram_mb") or 0
         self.status_hardware.setText(
@@ -716,6 +775,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(250, self._show_first_run)
 
     def _restore_selected_model(self) -> None:
+        self.rebuild_model_combo()
         wanted = self.settings.selected_model_id or self.settings.last_used_model_id
         entry = self.catalog.get(wanted) if wanted else None
         if entry is not None and entry.installed:
@@ -727,6 +787,7 @@ class MainWindow(QMainWindow):
             else:
                 self.selected_model = None
                 self.status_model.setText("модель не выбрана")
+                self.model_combo.setCurrentIndex(0)
 
     def _show_first_run(self) -> None:
         if self.settings.first_run_done:
@@ -822,9 +883,44 @@ class MainWindow(QMainWindow):
             return
         self._select_model(entry)
 
+    def rebuild_model_combo(self) -> None:
+        """Пересобирает выпадающий список СКАЧАННЫХ моделей (пункт 0 — «Не выбрано»)."""
+        combo = getattr(self, "model_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— Не выбрано —", "")
+        for entry in self.catalog.sorted_for_display(self.catalog.installed()):
+            combo.addItem(f"{entry.name} · {entry.size_text}", entry.id)
+        current_id = self.selected_model.id if self.selected_model is not None else ""
+        index = combo.findData(current_id)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_model_combo_changed(self, _index: int) -> None:
+        model_id = self.model_combo.currentData() or ""
+        if not model_id:
+            # «Нет» — снимаем выбор, кнопка «РАБОТАТЬ» гаснет
+            if self.selected_model is not None:
+                self.selected_model = None
+                self.models_panel.set_selected("")
+                self.status_model.setText("модель не выбрана")
+                self._update_banner()
+                self._update_work_button()
+            return
+        entry = self.catalog.get(model_id)
+        if entry is not None and entry.installed:
+            self._select_model(entry)
+
     def _select_model(self, entry: ModelEntry, save: bool = True) -> None:
         self.selected_model = entry
         self.models_panel.set_selected(entry.id)
+        index = self.model_combo.findData(entry.id)
+        if index >= 0 and self.model_combo.currentIndex() != index:
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentIndex(index)
+            self.model_combo.blockSignals(False)
         self.status_model.setText(f"модель: {entry.name}")
         self.status_model.setToolTip(
             f"{entry.engine_label} · {entry.size_text} · {entry.memory_text}\n{entry.description}"
@@ -882,7 +978,7 @@ class MainWindow(QMainWindow):
         dialog.finish("Готово" if ok else "Остановлено")
         self.catalog.refresh_installed()
         self.models_panel.rebuild()
-        self._restore_selected_model()
+        self._restore_selected_model()   # внутри пересобирается и комбо моделей
 
         if ok and entry is not None:
             self._log(message)
@@ -912,6 +1008,13 @@ class MainWindow(QMainWindow):
         return True
 
     def on_delete_model(self, entry: ModelEntry) -> None:
+        if self._working:
+            QMessageBox.information(
+                self, "Идёт распознавание",
+                "Нельзя удалять модель во время работы — сначала нажми «ОТМЕНИТЬ» "
+                "и дождись остановки.",
+            )
+            return
         answer = QMessageBox.question(
             self, "Удалить модель",
             f"Удалить «{entry.name}» с диска?\n\nПапка: {entry.install_dir}\n"
@@ -977,6 +1080,12 @@ class MainWindow(QMainWindow):
         self._log(message)
 
     def _unload_model(self) -> None:
+        if self._working:
+            QMessageBox.information(
+                self, "Идёт распознавание",
+                "Модель сейчас используется — выгрузить можно после завершения работы.",
+            )
+            return
         registry.unload()
         self._log("Модель выгружена из оперативной памяти")
 
@@ -988,6 +1097,22 @@ class MainWindow(QMainWindow):
         installed = self.catalog.installed()
         if installed and self.selected_model is not None:
             self.banner.setVisible(False)
+            return
+        if installed:
+            # модели ЕСТЬ, но в списке «Модель» стоит «Не выбрано»
+            self.banner_text.setText(
+                "<b>Модель не выбрана.</b> Выбери одну из скачанных в списке «Модель» "
+                "в блоке «3 · Работа» (или кликни по карточке справа) — пока модель "
+                "не выбрана, кнопка «РАБОТАТЬ» неактивна."
+            )
+            self.banner_button.setText("Открыть каталог")
+            self._banner_target = None
+            try:
+                self.banner_button.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            self.banner_button.clicked.connect(self._focus_models)
+            self.banner.setVisible(True)
             return
         recommendation = self.catalog.recommendation(self.hardware)
         if recommendation is None:
@@ -1020,17 +1145,32 @@ class MainWindow(QMainWindow):
     def _update_work_button(self) -> None:
         files_ready = self.file_list.count() > 0
         model_ready = self.selected_model is not None and self.selected_model.installed
-        busy = self.worker is not None and self.worker.isRunning()
-        self.work_button.setEnabled(files_ready and model_ready and not busy)
-        if busy:
-            self.work_button.setText("РАБОТАЮ…")
-        elif not files_ready:
+        if self._working:
+            # на время работы «РАБОТАТЬ» скрыта, видна «ОТМЕНИТЬ»
+            self.work_button.setEnabled(False)
+            return
+        self.work_button.setEnabled(files_ready and model_ready)
+        if not files_ready:
             self.work_button.setText("Добавь файлы")
         elif not model_ready:
             self.work_button.setText("Выбери модель")
         else:
             count = self.file_list.count()
             self.work_button.setText(f"РАБОТАТЬ · {count} файл(ов)")
+
+    def _set_working(self, working: bool) -> None:
+        """Переключает интерфейс между состояниями «ожидание» и «работа».
+
+        «РАБОТАТЬ» на время работы ЗАМЕНЯЕТСЯ кнопкой «ОТМЕНИТЬ» (и наоборот):
+        одна и та же позиция, интуитивное поведение.
+        """
+        self._working = working
+        self.work_button.setVisible(not working)
+        self.cancel_button.setVisible(working)
+        if working:
+            self.cancel_button.setEnabled(True)
+            self.cancel_button.setText("ОТМЕНИТЬ")
+        self._update_work_button()
 
     def on_work(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -1079,6 +1219,7 @@ class MainWindow(QMainWindow):
         self._collect_settings()
         self.settings.last_used_model_id = entry.id
         self.settings.selected_model_id = entry.id
+        self._last_job_engine = entry.engine
         self.settings.save()
 
         options = JobOptions.from_settings(entry, self.settings, output_dir)
@@ -1088,13 +1229,14 @@ class MainWindow(QMainWindow):
         self.results = {}
         self.job_started_at = time.time()
         self.preview.clear()
-        self.overall_progress.setRange(0, len(files))
+        self._job_total_files = max(1, len(files))
+        self._job_done_files = 0
+        self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(0)
         self.overall_label.setText(f"Обрабатываю {len(files)} файл(ов) моделью «{entry.name}»")
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
-        self._update_work_button()
-        self.cancel_button.setEnabled(True)
+        self._set_working(True)   # ДО start(): без гонки «кнопка не погасла»
         self.results_button.setEnabled(False)
 
         worker = TranscribeWorker(files, options, self.settings, self)
@@ -1115,16 +1257,24 @@ class MainWindow(QMainWindow):
 
     # ---------------- сигналы воркера ---------------------------------- #
     def _on_overall_progress(self, done: int, total: int) -> None:
-        self.overall_progress.setRange(0, max(1, total))
-        self.overall_progress.setValue(min(done, total))
-        self.overall_label.setText(f"Файл {min(done + 1, total)} из {total}")
+        self._job_total_files = max(1, total)
+        self._job_done_files = max(0, min(done, total))
+        self.overall_progress.setRange(0, 1000)
+        self.overall_progress.setValue(int(self._job_done_files / self._job_total_files * 1000))
+        if total > 1:
+            self.overall_label.setText(f"Файл {min(done + 1, total)} из {total}")
 
     def _on_file_progress(self, index: int, fraction: float, stage: str) -> None:
         if fraction < 0:
             self.file_progress.setRange(0, 0)
         else:
+            fraction = max(0.0, min(1.0, fraction))
             self.file_progress.setRange(0, 1000)
-            self.file_progress.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
+            self.file_progress.setValue(int(fraction * 1000))
+            # общий бар: доля готовых файлов + прогресс текущего — чтобы на
+            # ОДНОМ файле проценты шли плавно, а не стояли на нуле всю лекцию
+            overall = (self._job_done_files + fraction) / max(1, self._job_total_files)
+            self.overall_progress.setValue(max(0, min(1000, int(overall * 1000))))
         try:
             name = Path(self.file_list.files()[index]).name
         except IndexError:
@@ -1134,7 +1284,12 @@ class MainWindow(QMainWindow):
     def _on_segment_ready(self, index: int, text: str, start: float, end: float) -> None:
         if not text:
             return
-        self.preview.appendPlainText(f"[{int(start // 60):02d}:{int(start % 60):02d}] {text.strip()}")
+        start = max(0.0, float(start))
+        if start >= 3600:
+            stamp = f"{int(start // 3600)}:{int(start % 3600 // 60):02d}:{int(start % 60):02d}"
+        else:
+            stamp = f"{int(start // 60):02d}:{int(start % 60):02d}"
+        self.preview.appendPlainText(f"[{stamp}] {text.strip()}")
         scrollbar = self.preview.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -1143,21 +1298,24 @@ class MainWindow(QMainWindow):
         self.results_button.setEnabled(bool(self.results))
 
     def _on_job_finished(self, ok: int, fail: int, seconds: float) -> None:
-        total = len(self.file_list.files())
+        cancelled = self.worker is not None and self.worker.cancelled
+        total = self._job_total_files
         produced = [path for result in self.results.values() for path in result.outputs]
         words = sum(result.words for result in self.results.values())
         audio = sum(result.audio_duration for result in self.results.values())
         speed = (audio / seconds) if seconds > 0 else 0.0
 
         self.overall_label.setText(
-            f"Готово: {ok} из {total}"
+            ("Отменено" if cancelled else "Готово") + f": {ok} из {total}"
             + (f" · {fail} с ошибкой" if fail else "")
             + f" · {words} слов · {speed:.1f}× реального времени · {seconds:.0f} с"
         )
         self.file_label.setText(", ".join(path.name for path in produced[:3]) + (" …" if len(produced) > 3 else ""))
         self._log(self.overall_label.text())
 
-        if fail:
+        self._finish_worker()
+
+        if fail and not cancelled:
             failed = [result for result in self.results.values() if not result.ok]
             details = "\n".join(f"• {Path(result.source).name}: {result.error}" for result in failed[:12])
             QMessageBox.warning(
@@ -1166,19 +1324,29 @@ class MainWindow(QMainWindow):
             )
         elif ok:
             self.results_button.setEnabled(True)
-            if self.settings.open_output_folder_when_done and produced:
+            if self.settings.open_output_folder_when_done and produced and not cancelled:
                 open_in_file_manager(produced[0])
             self._toast(f"Распознано файлов: {ok}")
+            self._maybe_offer_gpu_boost()
+
+    def _finish_worker(self) -> None:
+        """Возвращает интерфейс в ожидание и убирает завершённый воркер."""
+        self._set_working(False)
+        self.file_progress.setRange(0, 1000)
+        self.file_progress.setValue(0)
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_job_failed(self, message: str) -> None:
-        self._set_idle()
+        self._finish_worker()
         self.overall_label.setText("Ошибка")
         self.file_label.setText(message.splitlines()[0] if message else "")
         self._log("ОШИБКА: " + message.replace("\n", " | "))
         QMessageBox.critical(self, "Ошибка при распознавании", message)
 
     def _on_engine_missing(self, engine: str, packages) -> None:
-        self._set_idle()
+        self._finish_worker()
         answer = QMessageBox.question(
             self, "Нужен движок",
             f"Для этой модели нужен движок «{engine}».\nУстановить {', '.join(packages)} в .venv?",
@@ -1189,30 +1357,225 @@ class MainWindow(QMainWindow):
             self._pending_job = True
             self.install_packages_interactive(list(packages or []), f"Движок {engine}")
 
-    def _set_idle(self) -> None:
-        """Возвращает интерфейс в состояние «ожидание»."""
-        self.cancel_button.setEnabled(False)
-        self.file_progress.setRange(0, 1000)
-        self.file_progress.setValue(0)
-        self._update_work_button()
-
     def on_cancel(self) -> None:
         if self.worker is None or not self.worker.isRunning():
+            self._finish_worker()
             return
         self.worker.cancel()
         self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Останавливаю…")
         self.file_label.setText("Останавливаю… (дожидаемся текущего сегмента)")
         self._log("Запрошена отмена")
 
     # ================================================================== #
+    #  GPU-ускорение torch-моделей (кнопка-статус + разовое предложение)
+    # ================================================================== #
+    def _start_torch_probe(self) -> None:
+        """Асинхронно узнаёт, стоит ли torch и видит ли он CUDA (subprocess)."""
+        if not self.hardware.get("has_nvidia"):
+            return    # нет карты NVIDIA — зонд не нужен, кнопка уже серая
+        if self.torch_probe is not None and self.torch_probe.isRunning():
+            return
+        probe = TorchCudaProbeWorker(self)
+        probe.probed.connect(self._on_torch_probed)
+        self.torch_probe = probe
+        probe.start()
+
+    def _on_torch_probed(self, installed: bool, cuda: bool, detail: str) -> None:
+        self.gpu_state = {"probed": True, "installed": installed, "cuda": cuda, "detail": detail}
+        probe, self.torch_probe = self.torch_probe, None
+        if probe is not None:
+            probe.deleteLater()
+        self._refresh_gpu_button()
+        if installed:
+            log.info(
+                "PyTorch в .venv: %s, CUDA %s (%s)",
+                "установлен" if installed else "нет",
+                "доступна" if cuda else "НЕ доступна",
+                detail or "—",
+            )
+
+    def _refresh_gpu_button(self) -> None:
+        """Текст/доступность кнопки GPU = честное текущее состояние ускорения."""
+        button = getattr(self, "gpu_button", None)
+        if button is None:
+            return
+        hardware = self.hardware or {}
+        gpu_name = str(hardware.get("gpu_name") or "NVIDIA")
+        vram = int(hardware.get("vram_mb") or 0)
+        state = self.gpu_state
+
+        if not hardware:
+            button.setText("Определяю железо…")
+            button.setEnabled(False)
+            return
+
+        if not hardware.get("has_nvidia"):
+            button.setText("GPU-ускорение недоступно: нет видеокарты NVIDIA")
+            button.setToolTip(
+                "Все движки будут работать на процессоре.\n"
+                "Для максимально быстрого CPU-распознавания выбирай модели с int8/q5_0\n"
+                "(faster-whisper / whisper.cpp) — см. баннер-рекомендацию и каталог справа."
+            )
+            button.setEnabled(False)
+            return
+
+        if not state.get("probed"):
+            button.setText(f"Проверяю PyTorch для {gpu_name}…")
+            button.setEnabled(False)
+            return
+
+        if state.get("cuda"):
+            button.setText(f"✓ GPU используется: PyTorch CUDA ({state.get('detail') or gpu_name})")
+            button.setToolTip(
+                f"{gpu_name}" + (f" · {vram / 1024:.1f} ГБ VRAM" if vram else "") + "\n"
+                "CUDA-сборка PyTorch на месте: GigaAM / Qwen3-ASR / HF-модели\n"
+                "считают энкодер на видеокарте, а декодирование — параллельно на CPU.\n"
+                "Ставить больше нечего — кнопка неактивна.\n\n"
+                "(Для Whisper-моделей faster-whisper CUDA настраивается отдельно:\n"
+                "Сервис → Настройки → Движки и CUDA.)"
+            )
+            button.setEnabled(False)
+            return
+
+        # NVIDIA есть, а torch CPU-сборка (или ещё не установлен) — можно ускорить
+        if state.get("installed"):
+            text = f"⚡ Ускорить на GPU: PyTorch сейчас без CUDA ({state.get('detail') or 'cpu'})"
+        else:
+            text = "⚡ Ускорить на GPU: поставить PyTorch с CUDA (~2.5–3 ГБ)"
+        button.setText(text)
+        button.setToolTip(
+            f"Видеокарта {gpu_name}" + (f" ({vram / 1024:.1f} ГБ VRAM) " if vram else " ") +
+            "простаивает: в .venv стоит CPU-сборка PyTorch.\n"
+            "Клик установит CUDA-сборку (torch+torchaudio, разово ~2.5–3 ГБ) —\n"
+            "torch-модели (GigaAM, Qwen3-ASR, любые HF) ускорятся ориентировочно в 1.5–2 раза:\n"
+            "энкодер перейдёт на видеокарту, декодирование останется на процессоре.\n\n"
+            "Установка идёт строго в .venv проекта; нужен интернет."
+        )
+        button.setEnabled(True)
+
+    def _install_torch_cuda(self) -> None:
+        """Ставит CUDA-сборку torch в .venv (с удалением CPU-сборки)."""
+        if self.package_worker is not None and self.package_worker.isRunning():
+            QMessageBox.information(self, "Уже идёт установка", "Дождись завершения предыдущей установки.")
+            return
+        hardware = self.hardware or {}
+        gpu_name = str(hardware.get("gpu_name") or "NVIDIA")
+        vram = int(hardware.get("vram_mb") or 0)
+        driver = str(hardware.get("gpu_driver") or "")
+
+        driver_note = ""
+        try:
+            major = int(driver.split(".")[0])
+            if 0 < major < TORCH_CUDA_MIN_DRIVER_MAJOR:
+                driver_note = (
+                    f"\n\n⚠ Драйвер NVIDIA {driver} старее {TORCH_CUDA_MIN_DRIVER_MAJOR} — "
+                    "CUDA-сборка может не заработать. Сначала обнови драйвер (nvidia.com)."
+                )
+        except (ValueError, IndexError):
+            pass
+
+        answer = QMessageBox.question(
+            self, "Ускорение на видеокарте",
+            f"Видеокарта: {gpu_name}" + (f" · {vram / 1024:.1f} ГБ VRAM" if vram else "") +
+            (f" · драйвер {driver}" if driver else "") + "\n\n"
+            "Сейчас torch-модели (GigaAM, Qwen3-ASR, HF) считаются на процессоре.\n"
+            "Установить CUDA-сборку PyTorch в .venv проекта?\n\n"
+            "• скачается ~2.5–3 ГБ (разово, при следующих запусках — ничего);\n"
+            "• энкодер перейдёт на GPU: ориентировочно в 1.5–2 раза быстрее;\n"
+            "• системный Python не затрагивается." + driver_note + "\n\n"
+            "Установить сейчас?",
+            compat.message_box_yes() | compat.message_box_no(),
+            compat.message_box_yes(),
+        )
+        if answer != compat.message_box_yes():
+            return
+
+        self._last_install_torch_cuda = True
+        self.install_packages_interactive(
+            ["--index-url", TORCH_CUDA_INDEX_URL, "torch>=2.6", "torchaudio>=2.6"],
+            "PyTorch CUDA (GPU-ускорение)",
+            pre_uninstall=["torch", "torchaudio"],
+        )
+
+    def _maybe_offer_gpu_boost(self) -> None:
+        """Разовое предложение «сейчас / позже / не предлагать» после CPU-прогона
+        torch-модели на машине с видеокартой NVIDIA."""
+        try:
+            if self._last_job_engine not in TORCH_ENGINE_NAMES:
+                return   # задача шла не на torch-движке — предложение не к месту
+            if self.settings.gpu_boost_offered:
+                return
+            if not self.hardware.get("has_nvidia"):
+                return
+            state = self.gpu_state
+            if not state.get("probed") or state.get("cuda"):
+                return
+            # Linux: pip-torch по умолчанию уже идёт с CUDA; CPU-сборка там —
+            # редкость, и предложение только запутает. macOS: CUDA не существует.
+            if os.name != "nt":
+                return
+
+            self.settings.gpu_boost_offered = True
+            self.settings.save()
+
+            box = QMessageBox(self)
+            box.setWindowTitle("Доступно GPU-ускорение")
+            box.setIcon(QMessageBox.Icon.Information)
+            gpu_name = str(self.hardware.get("gpu_name") or "NVIDIA")
+            box.setText(
+                f"Задача выполнена на процессоре, хотя у тебя есть видеокарта {gpu_name}:\n"
+                "PyTorch в .venv установлен без CUDA.\n\n"
+                "Установка CUDA-сборки (~2.5–3 ГБ, разово) ускорит GigaAM /\n"
+                "Qwen3-ASR / HF-модели ориентировочно в 1.5–2 раза.\n\n"
+                "Поставить сейчас? (потом можно в любой момент — кнопкой\n"
+                "«⚡ Ускорить на GPU» в блоке «3 · Работа»)"
+            )
+            now = box.addButton("Поставить сейчас", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+            box.addButton("Не предлагать", QMessageBox.ButtonRole.DestructiveRole)
+            box.exec()
+            if box.clickedButton() is now:
+                self._install_torch_cuda()
+        except Exception as exc:  # noqa: BLE001 - предложение не должно ронять финал задачи
+            log.debug("Не удалось предложить GPU-ускорение: %s", exc)
+
+    # ================================================================== #
     #  Установка пакетов (движки, CUDA, ремонт окружения)
     # ================================================================== #
-    def install_packages_interactive(self, packages: List[str], title: str = "") -> None:
+    @staticmethod
+    def _with_cuda_index(packages: List[str], hardware: Optional[dict]) -> List[str]:
+        """Добавляет CUDA-индекс PyTorch, если ставится torch на Windows+NVIDIA.
+
+        На Linux pip и так ставит torch с CUDA, на macOS CUDA нет — поэтому
+        только Windows. Явный --index-url в списке не перебиваем.
+        """
+        packages = list(packages)
+        if (
+            os.name == "nt"
+            and (hardware or {}).get("has_nvidia")
+            and "--index-url" not in packages
+            and any(str(pkg).lower().startswith("torch") for pkg in packages)
+        ):
+            packages = ["--index-url", TORCH_CUDA_INDEX_URL, *packages]
+        return packages
+
+    def install_packages_interactive(
+        self, packages: List[str], title: str = "", pre_uninstall: Optional[List[str]] = None,
+    ) -> None:
         if not packages:
             return
         if self.package_worker is not None and self.package_worker.isRunning():
             QMessageBox.information(self, "Уже идёт установка", "Дождись завершения предыдущей установки.")
             return
+
+        # Windows: pip по умолчанию ставит CPU-сборку torch. Если есть карта
+        # NVIDIA и в списке есть torch — сразу берём CUDA-индекс PyTorch,
+        # чтобы движки «из коробки» использовали видеокарту.
+        before = list(packages)
+        packages = self._with_cuda_index(packages, self.hardware)
+        if packages != before:
+            self._log("Есть GPU NVIDIA — torch ставится сразу в CUDA-сборке")
 
         size_note = ""
         if any(pkg.lower().startswith("torch") for pkg in packages):
@@ -1226,7 +1589,7 @@ class MainWindow(QMainWindow):
             "Пакеты: " + ", ".join(packages) + size_note,
             parent=self,
         )
-        worker = PackageInstaller(packages, title, self)
+        worker = PackageInstaller(packages, title, self, pre_uninstall=pre_uninstall)
         worker.outputLine.connect(dialog.append_log)
         worker.progress.connect(lambda fraction, status: dialog.set_fraction(fraction))
         worker.progress.connect(lambda fraction, status: dialog.set_status(status))
@@ -1244,8 +1607,30 @@ class MainWindow(QMainWindow):
         registry.hardware(refresh=True)
         self.hardware = registry.hardware()
         self.models_panel.set_hardware(self.hardware)
+
+        was_torch_cuda = self._last_install_torch_cuda
+        self._last_install_torch_cuda = False
+
         if not ok:
             QMessageBox.warning(self, "Установка не завершилась", message + self._install_hint(message))
+        elif was_torch_cuda:
+            # перепроверяем состояние torch (зондом в subprocess) и подсказываем
+            # про перезапуск: если torch уже был импортирован в этой сессии,
+            # процесс продолжит видеть старую (CPU) сборку до перезапуска
+            self.gpu_state = {"probed": False, "installed": False, "cuda": False, "detail": ""}
+            self._refresh_gpu_button()
+            self._start_torch_probe()
+            restart_note = ""
+            if "torch" in sys.modules:
+                restart_note = (
+                    "\n\nВажно: в этой сессии torch уже загружен — перезапусти программу,\n"
+                    "чтобы новая CUDA-сборка подхватилась."
+                )
+            QMessageBox.information(
+                self, "PyTorch CUDA установлен",
+                "CUDA-сборка PyTorch установлена в .venv.\n"
+                "Состояние кнопки «⚡ Ускорить на GPU» обновится после проверки." + restart_note,
+            )
         elif getattr(self, "_pending_job", False):
             self._pending_job = False
             QTimer.singleShot(250, self.on_work)
@@ -1363,7 +1748,9 @@ class MainWindow(QMainWindow):
             self, f"О {APP_NAME}",
             f"<h3>{APP_NAME} {APP_VERSION}</h3>"
             "<p>Локальное распознавание речи: аудио и видео → текст, субтитры, JSON.</p>"
-            "<p>Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi).<br>"
+            "<p>Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi), "
+            "Qwen3-ASR и GigaAM (torch), а также универсальный hf-transformers "
+            "для любых ASR-моделей Hugging Face.<br>"
             "GUI: PySide6. Всё устанавливается в <code>.venv</code> внутри папки проекта.</p>"
             f"<p>Python: {sys.version.split()[0]}<br>Интерпретатор: {sys.executable}<br>"
             f"Проект: {paths.ROOT_DIR}</p>",
@@ -1398,8 +1785,13 @@ class MainWindow(QMainWindow):
         self.timestamps_check.setChecked(self.settings.add_timestamps_to_txt)
         self.wordts_check.setChecked(self.settings.word_timestamps)
         self.translate_check.setChecked(self.settings.translate_to_english)
-        index = self.beam_combo.findData(int(self.settings.beam_size or 5))
-        self.beam_combo.setCurrentIndex(index if index >= 0 else 2)
+        beam = int(self.settings.beam_size or 5)
+        index = self.beam_combo.findData(beam)
+        if index < 0:
+            # значение из «Все настройки…» (например 7) не теряем — добавляем пункт
+            self.beam_combo.addItem(f"beam {beam}", beam)
+            index = self.beam_combo.count() - 1
+        self.beam_combo.setCurrentIndex(index)
         self.batched_check.setChecked(bool(self.settings.batched))
         self.hotwords_edit.setText(self.settings.hotwords)
         self.prompt_edit.setText(self.settings.initial_prompt)

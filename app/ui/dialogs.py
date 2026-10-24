@@ -795,7 +795,8 @@ class SettingsDialog(QDialog):
             make_label(
                 "Локальное распознавание речи: лекции, видео, подкасты — без облака и без "
                 "отправки данных куда-либо. Видео автоматически превращается в звук.\n\n"
-                "Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi).\n"
+                "Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi),\n"
+                "Qwen3-ASR и GigaAM (torch), hf-transformers (любые ASR-модели HF).\n"
                 "Всё ставится строго в .venv внутри папки проекта.",
                 "Dim",
                 word_wrap=True,
