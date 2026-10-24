@@ -19,7 +19,14 @@ from ..constants import (
 )
 from ..core.models_catalog import ModelEntry
 from ..logutils import get_logger
-from .base import ASREngine, EngineError, EngineNotInstalled, ModelRef, engine_packages
+from .base import (
+    ASREngine,
+    EngineError,
+    EngineNotInstalled,
+    ModelRef,
+    engine_not_installed_from_exc,
+    engine_packages,
+)
 from .faster_whisper_engine import FasterWhisperEngine
 from .hf_pipeline_engine import HFPipelineEngine
 from .torch_engines import GigaAMEngine, QwenASREngine
@@ -184,7 +191,18 @@ class EngineRegistry:
                 }
             )
             log.info("Загружаю движок %s для модели %s", ref.engine, ref.name)
-            engine.load(ref, hardware)
+            try:
+                engine.load(ref, hardware)
+            except EngineNotInstalled:
+                raise
+            except (ImportError, ModuleNotFoundError) as exc:
+                # Код модели (trust_remote_code) потребовал библиотеку, которой
+                # нет в .venv: превращаем стектрейс в понятный диалог установки.
+                converted = engine_not_installed_from_exc(ref.engine, exc)
+                if converted is not None:
+                    log.warning("Движку %s не хватает модуля: %s", ref.engine, exc)
+                    raise converted from exc
+                raise
             with self._lock:
                 self._engine = engine
                 self._engine_model_id = ref.model_id
@@ -251,7 +269,15 @@ def thread_engine(entry: ModelEntry, settings: Optional[Dict[str, Any]] = None) 
         }
     )
     log.info("[поток %s] загружаю %s для %s", threading.current_thread().name, ref.engine, ref.name)
-    engine.load(ref, hardware)
+    try:
+        engine.load(ref, hardware)
+    except EngineNotInstalled:
+        raise
+    except (ImportError, ModuleNotFoundError) as exc:
+        converted = engine_not_installed_from_exc(ref.engine, exc)
+        if converted is not None:
+            raise converted from exc
+        raise
     cache[key] = engine
     _thread_local.engines = cache
     return engine

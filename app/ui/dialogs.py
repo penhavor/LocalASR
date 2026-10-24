@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -340,117 +342,6 @@ class CustomModelDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-#  Первый запуск: рекомендация модели
-# --------------------------------------------------------------------------- #
-
-
-class FirstRunDialog(QDialog):
-    """Показывается, когда ни одна модель не установлена."""
-
-    downloadRequested = Signal(object)
-
-    def __init__(self, hardware_summary: str, recommendations: List[ModelEntry], parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("LocalASR · первый запуск")
-        self.setModal(True)
-        self.setMinimumWidth(720)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 18)
-        root.setSpacing(14)
-
-        root.addWidget(make_label("Привет! Нужна модель", "H1"))
-        root.addWidget(
-            make_label(
-                "Программа работает полностью офлайн, но моделей в комплекте нет — они весят "
-                "сотни мегабайт. Выбери одну (или несколько) и скачай: она ляжет в папку "
-                "models/ внутри проекта.\n\n"
-                "Вот что подойдёт твоему железу:",
-                "Dim",
-                word_wrap=True,
-            )
-        )
-
-        hardware_box = QFrame()
-        hardware_box.setObjectName("Banner")
-        hardware_layout = QVBoxLayout(hardware_box)
-        hardware_layout.setContentsMargins(14, 12, 14, 12)
-        hardware_label = QLabel(hardware_summary)
-        hardware_label.setWordWrap(True)
-        hardware_label.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
-        hardware_layout.addWidget(hardware_label)
-        root.addWidget(hardware_box)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(compat.frame_no_frame())
-        container = QWidget()
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 8, 0)
-        container_layout.setSpacing(10)
-
-        for entry in recommendations:
-            card = QFrame()
-            card.setObjectName("Card")
-            layout = QVBoxLayout(card)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(6)
-
-            top = QHBoxLayout()
-            name = make_label(entry.name, "H2")
-            name.setWordWrap(True)
-            top.addWidget(name, stretch=1)
-            if entry.recommended:
-                top.addWidget(make_label("★ рекомендуем", "BadgeRecommended"))
-            layout.addLayout(top)
-
-            chips = FlowLayout(spacing=6)
-            for text in (
-                entry.engine_label,
-                f"⬇ {entry.size_text}",
-                f"🧠 {entry.memory_text}",
-                f"точность {stars(entry.quality)}",
-                f"скорость {stars(entry.speed)}",
-            ):
-                chips.addWidget(make_label(text, "BadgeEngine"))
-            layout.addLayout(chips)
-
-            layout.addWidget(make_label(entry.languages_text, "Dim"))
-            layout.addWidget(make_label(entry.recommended_for or entry.description, "Dim", word_wrap=True))
-
-            buttons = QHBoxLayout()
-            buttons.addStretch(1)
-            if entry.url:
-                link = QPushButton("Страница модели ↗")
-                link.setObjectName("Link")
-                link.clicked.connect(lambda _=False, url=entry.url: open_url(url))
-                buttons.addWidget(link)
-            download = QPushButton("Скачать")
-            download.setObjectName("Primary")
-            download.setCursor(compat.CURSOR_POINTING_HAND)
-            download.clicked.connect(lambda _=False, item=entry: self.downloadRequested.emit(item))
-            buttons.addWidget(download)
-            layout.addLayout(buttons)
-
-            container_layout.addWidget(card)
-
-        container_layout.addStretch(1)
-        scroll.setWidget(container)
-        root.addWidget(scroll, stretch=1)
-
-        bottom = QHBoxLayout()
-        bottom.addWidget(
-            make_label("Полный список моделей с фильтрами — в правой панели окна.", "Muted", word_wrap=True)
-        )
-        bottom.addStretch(1)
-        close = QPushButton("Выбрать позже")
-        close.setObjectName("Ghost")
-        close.clicked.connect(self.accept)
-        bottom.addWidget(close)
-        root.addLayout(bottom)
-
-
-# --------------------------------------------------------------------------- #
 #  Информация о железе
 # --------------------------------------------------------------------------- #
 
@@ -489,10 +380,17 @@ class HardwareDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, hardware: dict, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        hardware: dict,
+        parent: Optional[QWidget] = None,
+        on_reset_defaults=None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.hardware = hardware or {}
+        self._on_reset_defaults = on_reset_defaults
         self.setWindowTitle("Настройки")
         self.setModal(True)
         self.setMinimumSize(700, 640)
@@ -500,7 +398,7 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._scroll_wrap(self._tab_quality()), "Качество текста")
         self.tabs.addTab(self._scroll_wrap(self._tab_speed()), "Скорость и железо")
-        self.tabs.addTab(self._scroll_wrap(self._tab_engines()), "Движки и CUDA")
+        self.tabs.addTab(self._scroll_wrap(self._tab_engines()), "Движки")
         self.tabs.addTab(self._scroll_wrap(self._tab_about()), "О программе")
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Save", "Cancel"))
@@ -510,10 +408,45 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
 
+        self.reset_button = QPushButton("Сбросить настройки по умолчанию")
+        self.reset_button.setObjectName("Ghost")
+        self.reset_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.reset_button.setToolTip(
+            "Вернуть ВСЕ настройки к стандартным: параметры распознавания, папки,\n"
+            "положение и размер окна, фильтры каталога моделей."
+        )
+        self.reset_button.clicked.connect(self._reset_defaults)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.addWidget(self.reset_button)
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(buttons)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 14)
         root.addWidget(self.tabs, stretch=1)
-        root.addWidget(buttons)
+        root.addLayout(buttons_row)
+
+    # -- сброс настроек ----------------------------------------------------- #
+    def _reset_defaults(self) -> None:
+        answer = QMessageBox.question(
+            self, "Сброс настроек",
+            "Вернуть все настройки к стандартным?\n\n"
+            "Будут сброшены: параметры распознавания, папка результатов,\n"
+            "положение и размер окна, фильтры каталога моделей.\n"
+            "Скачанные модели и файлы результатов не затрагиваются.",
+            compat.message_box_yes() | compat.message_box_no(),
+            compat.message_box_no(),
+        )
+        if answer != compat.message_box_yes():
+            return
+        self.settings.reset_to_defaults()
+        if self._on_reset_defaults is not None:
+            try:
+                self._on_reset_defaults()
+            except Exception:  # noqa: BLE001
+                pass
+        self.done(0)   # не accept(): старые значения виджетов сохранять не нужно
 
     # -- помощники --------------------------------------------------------- #
     @staticmethod
@@ -640,7 +573,9 @@ class SettingsDialog(QDialog):
         self._hinted(
             form, "Устройство", self.device_combo,
             "Где считаем: «Авто» выберет GPU, если CUDA видна, иначе CPU. "
-            "Принудительный CPU полезен, когда GPU занят играми/рендером.",
+            "Принудительный CPU полезен, когда GPU занят играми/рендером. "
+            "Если выберешь GPU без установленных CUDA-библиотек — программа предложит "
+            "установку (вкладка «Движки»), а до тех пор будет работать на CPU.",
         )
 
         self.compute_combo = QComboBox()
@@ -713,62 +648,93 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        from ..asr.registry import engine_available, missing_engine_packages
-        from ..asr.base import engine_note
+        from ..asr.base import engine_install_size, engine_note
+        from ..asr.registry import engine_available
 
-        for engine in ENGINES:
-            box = QGroupBox(ENGINE_LABELS[engine])
-            box_layout = QVBoxLayout(box)
-            installed = engine_available(engine)
-            status = make_label(
-                "✓ установлен" if installed else "✗ не установлен",
-                "BadgeInstalled" if installed else "BadgeWarn",
-            )
-            status.setToolTip("Проверяется по наличию pip-пакетов движка в .venv проекта")
-            box_layout.addWidget(status)
-            note = engine_note(engine)
-            if note:
-                box_layout.addWidget(make_label(note, "Muted", word_wrap=True))
-            packages = missing_engine_packages(engine)
-            if packages:
-                box_layout.addWidget(make_label("Пакеты: " + ", ".join(packages), "Muted", word_wrap=True))
-            if not installed:
-                button = QPushButton("Установить движок")
-                button.setObjectName("Primary")
-                button.setCursor(compat.CURSOR_POINTING_HAND)
-                button.clicked.connect(
-                    lambda _=False, pkgs=packages, eng=engine: self._install_engine(eng, pkgs)
-                )
-                box_layout.addWidget(button, alignment=compat.ALIGN_LEFT)
-            layout.addWidget(box)
-
-        cuda_box = QGroupBox("Ускорение NVIDIA CUDA")
-        cuda_layout = QVBoxLayout(cuda_box)
-        cuda_ok = bool(self.hardware.get("cuda_ok"))
-        cuda_layout.addWidget(
+        layout.addWidget(
             make_label(
-                "✓ CTranslate2 видит CUDA — GPU можно использовать"
-                if cuda_ok
-                else "✗ CUDA недоступна (нет GPU NVIDIA или не установлены cuBLAS/cuDNN 9)",
-                "BadgeInstalled" if cuda_ok else "BadgeWarn",
-                word_wrap=True,
-            )
-        )
-        cuda_layout.addWidget(
-            make_label(
-                "Нужны pip-пакеты nvidia-cublas-cu12 и nvidia-cudnn-cu12 (Linux достаточно).\n"
-                "Windows: дополнительно скачай DLL cuBLAS/cuDNN 9 из "
-                "github.com/Purfview/whisper-standalone-win (релиз libs) и положи в "
-                ".venv\\Lib\\site-packages.",
+                "Движок — это библиотека, которой программа распознаёт речь. "
+                "Ставить что-то заранее не нужно: отсутствующий движок установится "
+                "сам, когда ты запустишь подходящую модель (программа спросит "
+                "подтверждение и покажет объём скачивания).",
                 "Muted",
                 word_wrap=True,
             )
         )
-        install_cuda = QPushButton("Установить CUDA-библиотеки (pip)")
-        install_cuda.setObjectName("Ghost")
-        install_cuda.setCursor(compat.CURSOR_POINTING_HAND)
-        install_cuda.clicked.connect(lambda: self._install_engine("cuda", ["-r requirements/gpu.txt"]))
-        cuda_layout.addWidget(install_cuda, alignment=compat.ALIGN_LEFT)
+
+        for engine in ENGINES:
+            box = QGroupBox(ENGINE_LABELS[engine])
+            box.setToolTip("Статус движка в виртуальном окружении проекта (.venv)")
+            box_layout = QVBoxLayout(box)
+            installed = engine_available(engine)
+            status = make_label(
+                "✓ установлен" if installed else "○ не установлен — установится автоматически при необходимости",
+                "BadgeInstalled" if installed else "Muted",
+            )
+            status.setToolTip(
+                "Проверяется по наличию pip-пакетов движка в .venv проекта.\n"
+                "Отсутствующий движок программа предложит скачать в момент запуска модели."
+            )
+            status.setWordWrap(True)
+            box_layout.addWidget(status)
+            note = engine_note(engine)
+            if note:
+                box_layout.addWidget(make_label(note, "Muted", word_wrap=True))
+            size_text = engine_install_size(engine)
+            if size_text and not installed:
+                box_layout.addWidget(
+                    make_label(f"Объём установки: {size_text}", "Dim", word_wrap=True)
+                )
+            layout.addWidget(box)
+
+        # CUDA для faster-whisper: кнопка установки появляется ТОЛЬКО когда
+        # она действительно нужна (карта NVIDIA есть, а библиотек нет).
+        cuda_box = QGroupBox("Ускорение NVIDIA CUDA (для faster-whisper)")
+        cuda_layout = QVBoxLayout(cuda_box)
+        cuda_ok = bool(self.hardware.get("cuda_ok"))
+        has_nvidia = bool(self.hardware.get("has_nvidia"))
+        if cuda_ok:
+            cuda_layout.addWidget(
+                make_label("✓ CUDA доступна — Whisper-модели могут работать на GPU",
+                           "BadgeInstalled", word_wrap=True)
+            )
+        elif not has_nvidia:
+            cuda_layout.addWidget(
+                make_label("○ Видеокарта NVIDIA не обнаружена — раздел не требуется",
+                           "Muted", word_wrap=True)
+            )
+        else:
+            cuda_layout.addWidget(
+                make_label(
+                    "○ Видеокарта NVIDIA есть, но библиотеки CUDA (cuBLAS/cuDNN 9) "
+                    "не установлены — распознавание идёт на процессоре",
+                    "BadgeWarn",
+                    word_wrap=True,
+                )
+            )
+            cuda_layout.addWidget(
+                make_label(
+                    "Установка: ~1 ГБ (nvidia-cublas-cu12 + nvidia-cudnn-cu12, один раз).\n"
+                    "Windows: дополнительно нужны системные DLL cuBLAS/cuDNN 9 — скачать из "
+                    "github.com/Purfview/whisper-standalone-win (релиз libs) и положить в "
+                    ".venv\\Lib\\site-packages.",
+                    "Muted",
+                    word_wrap=True,
+                )
+            )
+            install_cuda = QPushButton("Установить CUDA-библиотеки (~1 ГБ)")
+            install_cuda.setObjectName("Primary")
+            install_cuda.setCursor(compat.CURSOR_POINTING_HAND)
+            install_cuda.setToolTip(
+                "Скачает cuBLAS/cuDNN в .venv проекта (разово, ~1 ГБ).\n"
+                "После этого Whisper-модели смогут работать на видеокарте."
+            )
+            install_cuda.clicked.connect(
+                lambda: self._install_engine(
+                    "cuda", ["-r", str(paths.ROOT_DIR / "requirements" / "gpu.txt")]
+                )
+            )
+            cuda_layout.addWidget(install_cuda, alignment=compat.ALIGN_LEFT)
         layout.addWidget(cuda_box)
 
         layout.addStretch(1)
@@ -778,7 +744,7 @@ class SettingsDialog(QDialog):
         window = self.parent()
         if window is not None and hasattr(window, "install_packages_interactive"):
             self.accept()
-            window.install_packages_interactive(packages, f"Установка движка {engine}")
+            window.install_packages_interactive(packages, f"Установка: {engine}")
         else:
             QMessageBox.information(self, "Движки", "Установить пакеты можно из главного окна программы.")
 
@@ -788,7 +754,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        from ..constants import APP_NAME, APP_VERSION
+        from ..constants import APP_NAME, APP_VERSION, REPO_URL
 
         layout.addWidget(make_label(f"{APP_NAME} {APP_VERSION}", "H1"))
         layout.addWidget(
@@ -804,7 +770,7 @@ class SettingsDialog(QDialog):
         )
 
         for text, url in (
-            ("Репозиторий и документация", "https://github.com/local-asr/LocalASR"),
+            ("Репозиторий и документация", REPO_URL),
             ("faster-whisper", "https://github.com/SYSTRAN/faster-whisper"),
             ("whisper.cpp", "https://github.com/ggml-org/whisper.cpp"),
             ("Vosk и модели", "https://alphacephei.com/vosk/models"),
@@ -876,6 +842,9 @@ class ModelInfoDialog(QDialog):
             ("Производитель", entry.vendor or "—"),
             ("Источник", entry.source or "—"),
             ("Подпапка", entry.subfolder or "—"),
+            ("Число параметров", entry.params_text),
+            ("Квантование (формат весов)", entry.quantization_text),
+            ("Год релиза", entry.released_year_text),
             ("Размер скачивания", entry.size_text),
             ("Занимает на диске", paths.human_size(entry.installed_size_bytes) if entry.installed else "—"),
             ("Память в работе", entry.memory_text),
@@ -883,7 +852,6 @@ class ModelInfoDialog(QDialog):
             ("Точность / скорость", f"{stars(entry.quality)} / {stars(entry.speed)}"),
             ("Теги", ", ".join(entry.tags) if entry.tags else "—"),
             ("Лицензия", entry.license or "—"),
-            ("Релиз", entry.released or "—"),
             ("Установлена", "да: " + str(entry.install_dir) if entry.installed else "нет"),
         ]
         table = QFormLayout()
@@ -895,7 +863,8 @@ class ModelInfoDialog(QDialog):
         root.addLayout(table)
 
         if entry.recommended_for:
-            root.addWidget(make_label("Кому подходит: " + entry.recommended_for, "BadgeRecommended", word_wrap=True))
+            hint = make_label("Кому подходит: " + entry.recommended_for, "Dim", word_wrap=True)
+            root.addWidget(hint)
 
         description = make_label(entry.description or "", "Dim", word_wrap=True)
         description.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
@@ -923,3 +892,358 @@ class ModelInfoDialog(QDialog):
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
         outer.addLayout(buttons)
+
+
+# --------------------------------------------------------------------------- #
+#  Диагностика и восстановление (целостность программы)
+# --------------------------------------------------------------------------- #
+
+
+class DiagnosticsDialog(QDialog):
+    """Сервис → Диагностика и восстановление.
+
+    Проверяет три уровня устойчивости программы:
+      1. файлы самого проекта (удалил случайно — восстановим с GitHub);
+      2. рабочие папки (models/, outputs/… — создаются автоматически);
+      3. окружение .venv (не хватает библиотек — починим; лишние пакеты —
+         предложим удалить, чтобы освободить место).
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Диагностика и восстановление")
+        self.setModal(True)
+        self.setMinimumSize(700, 640)
+        self.report: dict = {}
+        self.audit_worker = None
+        self.restore_worker = None
+        self.package_worker = None
+        self.package_dialog = None
+        self._build_ui()
+        self._start_audit()
+
+    # ------------------------------------------------------------------ #
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(10)
+
+        outer.addWidget(make_label("Состояние программы", "H1"))
+        outer.addWidget(
+            make_label(
+                "Проверка файлов проекта, рабочих папок и библиотек в .venv. "
+                "Здесь ничего не ломается само: программа только сообщает о проблемах "
+                "и предлагает исправить их одной кнопкой.",
+                "Dim",
+                word_wrap=True,
+            )
+        )
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(compat.frame_no_frame())
+        scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(0, 0, 8, 0)
+        root.setSpacing(12)
+
+        # --- 1. файлы проекта
+        files_box = QGroupBox("Файлы программы")
+        files_layout = QVBoxLayout(files_box)
+        self.files_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        files_layout.addWidget(self.files_status)
+        self.files_list = make_label("", "Dim", word_wrap=True)
+        self.files_list.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
+        self.files_list.setVisible(False)
+        files_layout.addWidget(self.files_list)
+        self.restore_button = QPushButton("Восстановить недостающие файлы с GitHub")
+        self.restore_button.setObjectName("Primary")
+        self.restore_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.restore_button.setToolTip(
+            "Скачает удалённые файлы программы заново (несколько сотен килобайт).\n"
+            "Модели, результаты и настройки не затрагиваются."
+        )
+        self.restore_button.setVisible(False)
+        self.restore_button.clicked.connect(self._restore_files)
+        files_layout.addWidget(self.restore_button, alignment=compat.ALIGN_LEFT)
+        root.addWidget(files_box)
+
+        # --- 2. папки
+        folders_box = QGroupBox("Рабочие папки")
+        folders_layout = QVBoxLayout(folders_box)
+        self.folders_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        folders_layout.addWidget(self.folders_status)
+        folders_layout.addWidget(
+            make_label(
+                "Эти папки создаются автоматически, когда нужны. Их отсутствие "
+                "не ошибка: например, models/ появится при первом скачивании модели.",
+                "Dim",
+                word_wrap=True,
+            )
+        )
+        root.addWidget(folders_box)
+
+        # --- 3. окружение
+        venv_box = QGroupBox("Окружение (.venv)")
+        venv_layout = QVBoxLayout(venv_box)
+        self.venv_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        self.venv_status.setWordWrap(True)
+        venv_layout.addWidget(self.venv_status)
+        self.repair_button = QPushButton("Починить окружение (доустановить недостающее)")
+        self.repair_button.setObjectName("Primary")
+        self.repair_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.repair_button.setToolTip(
+            "Перепроверит базовые библиотеки в .venv и доустановит отсутствующие.\n"
+            "Системный Python не затрагивается."
+        )
+        self.repair_button.setVisible(False)
+        self.repair_button.clicked.connect(self._repair_env)
+        venv_layout.addWidget(self.repair_button, alignment=compat.ALIGN_LEFT)
+
+        self.extra_hint = make_label("", "Muted", word_wrap=True)
+        self.extra_hint.setVisible(False)
+        venv_layout.addWidget(self.extra_hint)
+        self.extra_list = QListWidget()
+        self.extra_list.setVisible(False)
+        self.extra_list.setMaximumHeight(180)
+        self.extra_list.setToolTip(
+            "Пакеты, которые не требуются ни программе, ни другим установленным\n"
+            "пакетам. Отметь галочками то, что удалить. Если ставил их сам для\n"
+            "других задач — оставь."
+        )
+        self.extra_list.itemChanged.connect(self._update_delete_button)
+        venv_layout.addWidget(self.extra_list)
+        self.delete_button = QPushButton("Удалить выбранные пакеты")
+        self.delete_button.setObjectName("Danger")
+        self.delete_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.delete_button.setVisible(False)
+        self.delete_button.clicked.connect(self._delete_extra)
+        venv_layout.addWidget(self.delete_button, alignment=compat.ALIGN_LEFT)
+        root.addWidget(venv_box)
+
+        root.addStretch(1)
+        scroll.setWidget(page)
+        outer.addWidget(scroll, stretch=1)
+
+        buttons = QHBoxLayout()
+        self.refresh_button = QPushButton("⟳ Перепроверить")
+        self.refresh_button.setObjectName("Ghost")
+        self.refresh_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.refresh_button.setToolTip("Запустить проверку заново")
+        self.refresh_button.clicked.connect(self._start_audit)
+        buttons.addWidget(self.refresh_button)
+        buttons.addStretch(1)
+        close = QPushButton("Закрыть")
+        close.setObjectName("Primary")
+        close.setCursor(compat.CURSOR_POINTING_HAND)
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        outer.addLayout(buttons)
+
+    # ------------------------------------------------------------------ #
+    def _start_audit(self) -> None:
+        if self.audit_worker is not None and self.audit_worker.isRunning():
+            return
+        from .workers import EnvAuditWorker
+
+        self.refresh_button.setEnabled(False)
+        self.files_status.setText("Проверяю файлы программы…")
+        self.venv_status.setText("Проверяю окружение .venv… (pip list занимает несколько секунд)")
+        worker = EnvAuditWorker(self)
+        worker.finishedWith.connect(self._on_audit)
+        self.audit_worker = worker
+        worker.start()
+
+    def _on_audit(self, report) -> None:
+        worker, self.audit_worker = self.audit_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self.refresh_button.setEnabled(True)
+        self.report = dict(report or {})
+
+        if self.report.get("error"):
+            self.files_status.setText(f"Не удалось завершить проверку: {self.report['error']}")
+            return
+
+        # --- файлы
+        missing = list(self.report.get("missing_files") or [])
+        if missing:
+            self.files_status.setText(
+                f"⚠ Отсутствует файлов: {len(missing)}. Программа может работать "
+                "неполноценно — восстанови их (нужен интернет, вес ~сотни КБ)."
+            )
+            self.files_list.setText("  • " + "\n  • ".join(missing[:30]))
+            self.files_list.setVisible(True)
+            self.restore_button.setVisible(True)
+        else:
+            self.files_status.setText("✓ Все файлы программы на месте")
+            self.files_list.setVisible(False)
+            self.restore_button.setVisible(False)
+
+        # --- папки
+        folders = list(self.report.get("folders") or [])
+        lines = [f"• {item['name']} — {item['status']} ({item['purpose']})" for item in folders]
+        self.folders_status.setText("\n".join(lines) or "—")
+
+        # --- venv
+        base_missing = list(self.report.get("base_missing") or [])
+        python = str(self.report.get("python") or "")
+        if base_missing:
+            self.venv_status.setText(
+                f"⚠ Не хватает базовых библиотек: {', '.join(base_missing)}\n"
+                f"Интерпретатор: {python}"
+            )
+            self.repair_button.setVisible(True)
+        else:
+            self.venv_status.setText(f"✓ Все базовые библиотеки установлены\nИнтерпретатор: {python}")
+            self.repair_button.setVisible(False)
+
+        # --- лишние пакеты
+        extra = list(self.report.get("extra_packages") or [])
+        self.extra_list.clear()
+        if extra:
+            from ..paths import human_size
+
+            total = sum(int(item.get("size_bytes") or 0) for item in extra)
+            self.extra_hint.setText(
+                f"Пакеты, которые программе не нужны (не требуются ни ей, ни другим "
+                f"пакетам): {len(extra)} шт., всего {human_size(total)}. "
+                "Удалять не обязательно — это только экономия места."
+            )
+            self.extra_hint.setVisible(True)
+            self.extra_list.setVisible(True)
+            self.delete_button.setVisible(True)
+            for item in extra:
+                size = human_size(int(item.get("size_bytes") or 0))
+                entry = QListWidgetItem(
+                    f"{item.get('name')} {item.get('version') or ''} · {size}".strip()
+                )
+                entry.setData(compat.ROLE_USER, str(item.get("name")))
+                entry.setFlags(entry.flags() | compat.ITEM_USER_CHECKABLE)
+                entry.setCheckState(compat.CHECK_UNCHECKED)
+                self.extra_list.addItem(entry)
+            self._update_delete_button()
+        else:
+            self.extra_hint.setText("Лишних пакетов в .venv не найдено.")
+            self.extra_hint.setVisible(True)
+            self.extra_list.setVisible(False)
+            self.delete_button.setVisible(False)
+
+    def _selected_extra(self) -> List[str]:
+        names = []
+        for index in range(self.extra_list.count()):
+            item = self.extra_list.item(index)
+            if item.checkState() == compat.CHECK_CHECKED:
+                data = item.data(compat.ROLE_USER)
+                if data:
+                    names.append(str(data))
+        return names
+
+    def _update_delete_button(self, *_args) -> None:
+        from ..paths import human_size
+
+        names = self._selected_extra()
+        total = 0
+        for item in self.report.get("extra_packages") or []:
+            if item.get("name") in names:
+                total += int(item.get("size_bytes") or 0)
+        if names:
+            self.delete_button.setText(f"Удалить выбранные ({len(names)} шт., ~{human_size(total)})")
+            self.delete_button.setEnabled(True)
+        else:
+            self.delete_button.setText("Удалить выбранные пакеты")
+            self.delete_button.setEnabled(False)
+
+    # ------------------------------------------------------------------ #
+    def _restore_files(self) -> None:
+        missing = list(self.report.get("missing_files") or [])
+        if not missing:
+            return
+        if self.restore_worker is not None and self.restore_worker.isRunning():
+            return
+        from .workers import FileRestoreWorker
+
+        dialog = ProgressDialog(
+            "Восстановление файлов",
+            f"Скачиваем {len(missing)} файл(ов) из репозитория проекта…",
+            parent=self,
+        )
+        worker = FileRestoreWorker(missing, self)
+        worker.progress.connect(dialog.set_fraction)
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
+        worker.outputLine.connect(dialog.append_log)
+        dialog.cancelRequested.connect(worker.cancel)
+        worker.finishedWith.connect(lambda ok, message: self._on_restore_done(ok, message, dialog))
+        self.restore_worker = worker
+        worker.start()
+        dialog.exec()
+
+    def _on_restore_done(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
+        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.accept()
+        worker, self.restore_worker = self.restore_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        if ok:
+            QMessageBox.information(self, "Восстановление", message)
+        else:
+            QMessageBox.warning(self, "Восстановление", message)
+        self._start_audit()
+
+    def _repair_env(self) -> None:
+        window = self.parent()
+        requirements = paths.ROOT_DIR / "requirements" / "base.txt"
+        if not requirements.is_file():
+            QMessageBox.warning(
+                self, "Ремонт окружения",
+                f"Файл {requirements} отсутствует.\n"
+                "Сначала восстанови файлы программы (кнопка выше).",
+            )
+            return
+        if window is not None and hasattr(window, "install_packages_interactive"):
+            self.accept()
+            window.install_packages_interactive(["-r", str(requirements)], "Ремонт окружения (.venv)")
+        else:
+            QMessageBox.information(self, "Ремонт окружения", "Запусти ремонт из главного окна программы.")
+
+    def _delete_extra(self) -> None:
+        names = self._selected_extra()
+        if not names:
+            return
+        answer = QMessageBox.question(
+            self, "Удаление пакетов",
+            "Удалить из .venv выбранные пакеты?\n\n  • " + "\n  • ".join(names[:20])
+            + ("\n  …" if len(names) > 20 else "")
+            + "\n\nПрограмме они не нужны; системный Python не затрагивается.",
+            compat.message_box_yes() | compat.message_box_no(),
+            compat.message_box_no(),
+        )
+        if answer != compat.message_box_yes():
+            return
+        if self.package_worker is not None and self.package_worker.isRunning():
+            return
+        from .workers import PackageInstaller
+
+        dialog = ProgressDialog("Удаление пакетов", ", ".join(names), parent=self)
+        worker = PackageInstaller(names, "Удаление пакетов", self, mode="uninstall")
+        worker.outputLine.connect(dialog.append_log)
+        worker.progress.connect(lambda fraction, status: dialog.set_fraction(fraction))
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
+        dialog.cancelRequested.connect(worker.cancel)
+        worker.finishedWith.connect(lambda ok, message: self._on_delete_done(ok, message, dialog))
+        self.package_worker = worker
+        self.package_dialog = dialog
+        worker.start()
+        dialog.exec()
+
+    def _on_delete_done(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
+        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.accept()
+        worker, self.package_worker = self.package_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self.package_dialog = None
+        if not ok:
+            QMessageBox.warning(self, "Удаление", message)
+        self._start_audit()

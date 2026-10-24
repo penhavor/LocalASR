@@ -82,7 +82,8 @@ class HFPipelineEngine(TorchASREngine):
         except Exception as exc:  # noqa: BLE001
             raise EngineError(
                 f"Не удалось импортировать torch/transformers: {exc}\n"
-                "Установи движок: Сервис → Настройки → Движки → Transformers → «Установить»."
+                "Недостающие компоненты программа предложит установить автоматически "
+                "при запуске модели (или: Сервис → Диагностика и восстановление)."
             ) from exc
 
         path = str(model.resolved_path)
@@ -156,6 +157,16 @@ class HFPipelineEngine(TorchASREngine):
             kwargs["language"] = language
         if options.get("translate"):
             kwargs["task"] = "translate"
+        # Beam search вместо жадного декодирования: без этого pipeline
+        # генерирует с num_beams=1, и потенциал весов модели используется
+        # не полностью. Если конкретная модель параметр не примет — каскад
+        # откатов в _call повторит вызов без generate_kwargs.
+        try:
+            beam = int(options.get("beam_size") or 0)
+        except (TypeError, ValueError):
+            beam = 0
+        if beam > 1:
+            kwargs["num_beams"] = min(beam, 8)
         return kwargs
 
     def _call(self, pieces: List[np.ndarray], generate_kwargs: Dict[str, Any]) -> List[str]:

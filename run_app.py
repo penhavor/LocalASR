@@ -34,7 +34,9 @@ def _inside_project_venv() -> bool:
 
 
 def main() -> int:
-    headless = len(sys.argv) > 1 and sys.argv[1] in {"transcribe", "doctor", "models", "list-models"}
+    headless = len(sys.argv) > 1 and sys.argv[1] in {
+        "transcribe", "doctor", "models", "list-models", "version",
+    }
 
     if not _inside_project_venv() and not headless:
         # не в том окружении — пусть bootstrap всё подготовит и перезапустит нас
@@ -45,11 +47,45 @@ def main() -> int:
     try:
         from app import cli
     except Exception as exc:  # noqa: BLE001
+        # Возможно, пользователь удалил файлы самой программы — проверим
+        # манифест и предложим восстановить их с GitHub.
+        import bootstrap
+
+        still_missing: list = []
+        try:
+            still_missing = bootstrap.check_project_files(ROOT)
+            if still_missing:
+                bootstrap.repair_missing_files(ROOT)
+                still_missing = bootstrap.check_project_files(ROOT)
+        except Exception:  # noqa: BLE001
+            pass
+        if not still_missing:
+            try:
+                import importlib
+
+                for name in list(sys.modules):
+                    if name == "app" or name.startswith("app."):
+                        del sys.modules[name]
+                importlib.invalidate_caches()
+                from app import cli  # noqa: F811
+
+                return cli.main(sys.argv[1:])
+            except Exception as exc2:  # noqa: BLE001
+                exc = exc2
         sys.stderr.write(
             "\n[LocalASR] Не удалось загрузить приложение:\n"
             f"  {type(exc).__name__}: {exc}\n\n"
-            "Удали папку .venv и запусти main.py ещё раз — окружение пересоздастся.\n"
         )
+        if still_missing:
+            sys.stderr.write(
+                "В папке программы отсутствуют файлы:\n  "
+                + "\n  ".join(still_missing[:20])
+                + "\n\nВосстанови их (Сервис → Диагностика) или скачай проект заново.\n"
+            )
+        else:
+            sys.stderr.write(
+                "Удали папку .venv и запусти main.py ещё раз — окружение пересоздастся.\n"
+            )
         try:
             input("Нажми Enter для выхода...")
         except (EOFError, KeyboardInterrupt, OSError):

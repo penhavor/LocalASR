@@ -175,9 +175,67 @@ def engine_packages(engine: str) -> List[str]:
         ENGINE_GIGAAM: [
             "torch>=2.6", "torchaudio>=2.6", "transformers>=4.52",
             "hydra-core>=1.3,<2", "omegaconf>=2.3,<3", "sentencepiece>=0.2.2",
+            "soundfile>=0.12",
         ],
         ENGINE_HF: ["torch>=2.6", "transformers>=4.49", "accelerate>=1.0", "soundfile>=0.12"],
     }.get(engine, [])
+
+
+#: Соответствие «импортируемый модуль -> pip-пакет», когда имена различаются.
+#: Нужно, чтобы превращать ModuleNotFoundError кода модели в понятное
+#: предложение установить конкретный пакет (политика «установка по требованию»).
+MODULE_TO_PIP = {
+    "soundfile": "soundfile",
+    "pyannote": "pyannote.audio",
+    "hydra": "hydra-core",
+    "omegaconf": "omegaconf",
+    "sentencepiece": "sentencepiece",
+    "torchaudio": "torchaudio",
+    "transformers": "transformers",
+    "accelerate": "accelerate",
+    "ctranslate2": "ctranslate2",
+    "faster_whisper": "faster-whisper",
+    "pywhispercpp": "pywhispercpp",
+    "vosk": "vosk",
+    "huggingface_hub": "huggingface-hub",
+    "yaml": "pyyaml",
+    "PIL": "pillow",
+    "sklearn": "scikit-learn",
+    "cv2": "opencv-python",
+}
+
+
+def pip_package_for_module(module: str) -> str:
+    """pip-пакет для имени импортируемого модуля ('soundfile' -> 'soundfile')."""
+    root = (module or "").split(".")[0]
+    return MODULE_TO_PIP.get(root, root)
+
+
+def _dist_name(spec: str) -> str:
+    import re as _re
+
+    return _re.split(r"[<>=\[;!@ ]", str(spec), maxsplit=1)[0].strip().lower()
+
+
+def engine_not_installed_from_exc(engine: str, exc: BaseException) -> Optional["EngineNotInstalled"]:
+    """Превращает ModuleNotFoundError кода модели в EngineNotInstalled.
+
+    Возвращает None, если исключение не про отсутствующий модуль. Список
+    пакетов = стандартные пакеты движка + пакет для недостающего модуля
+    (pip пропустит уже установленное, докачается только недостающее).
+    """
+    mod = getattr(exc, "name", None) if isinstance(exc, ModuleNotFoundError) else None
+    if not mod:
+        return None
+    packages = list(engine_packages(engine))
+    pkg = pip_package_for_module(mod)
+    if _dist_name(pkg) not in {_dist_name(p) for p in packages}:
+        packages.append(pkg)
+    return EngineNotInstalled(
+        engine,
+        packages,
+        note=f"Коду модели нужен модуль «{mod}»: {exc}",
+    )
 
 
 def engine_note(engine: str) -> str:
@@ -195,6 +253,26 @@ def engine_note(engine: str) -> str:
             with open(config_path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             return str((data.get(engine) or {}).get("note") or "")
+        except (OSError, ValueError):
+            pass
+    return ""
+
+
+def engine_install_size(engine: str) -> str:
+    """Оценка объёма скачивания для установки движка (из engines.json)."""
+    import json
+
+    from .. import paths
+
+    config_path = paths.resource_path("engines.json")
+    if config_path is None:
+        candidate = paths.ROOT_DIR / "requirements" / "engines.json"
+        config_path = candidate if candidate.is_file() else None
+    if config_path is not None:
+        try:
+            with open(config_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return str((data.get(engine) or {}).get("install_size_text") or "")
         except (OSError, ValueError):
             pass
     return ""

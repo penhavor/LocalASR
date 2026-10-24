@@ -95,7 +95,8 @@ class WhisperCppEngine(ASREngine):
         except Exception as exc:  # noqa: BLE001
             raise EngineError(
                 f"Не удалось импортировать pywhispercpp: {exc}\n"
-                "Установи движок: Настройки → Движки → whisper.cpp → «Установить»."
+                "Недостающие компоненты программа предложит установить автоматически "
+                "при запуске модели (или: Сервис → Диагностика и восстановление)."
             ) from exc
 
         ggml = resolve_ggml_file(model)

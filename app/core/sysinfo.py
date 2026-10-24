@@ -306,15 +306,15 @@ def collect() -> HardwareInfo:
         if not info.cuda_runtime_ok:
             info.notes.append(
                 "Видеокарта NVIDIA найдена, но CTranslate2 не видит CUDA "
-                "(нет cuBLAS/cuDNN 9). Настройки → Ускорение → «Установить CUDA-библиотеки»."
+                "(нет cuBLAS/cuDNN 9). Установка: Сервис → Настройки → вкладка «Движки»."
             )
     elif IS_MACOS and info.arch.lower() in ("arm64", "aarch64"):
         info.notes.append("Apple Silicon: ускорение идёт через CPU-оптимизации (Accelerate/AMX).")
 
     if info.ram_total_mb and info.ram_total_mb < 6000:
         info.notes.append(
-            "Меньше 6 ГБ RAM — выбирай модели до 500 МБ: "
-            "GigaAM v3 (Sber, 449 МБ) или Whisper turbo q5_0 (whisper.cpp, 574 МБ)."
+            "Меньше 6 ГБ RAM — комфортнее работать с моделями размером до ~500 МБ; "
+            "размер каждой модели виден в каталоге (фильтр «Размер, МБ»)."
         )
     return info
 

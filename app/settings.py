@@ -46,18 +46,39 @@ class Settings:
     # --- модели ------------------------------------------------------------ #
     selected_model_id: str = ""
     last_used_model_id: str = ""
-    catalog_filters: Dict[str, Any] = field(default_factory=lambda: {"engine": "", "hide_installed": False})
+    #: состояние фильтров/сортировки панели моделей (числовые диапазоны и пр.)
+    catalog_filters: Dict[str, Any] = field(default_factory=lambda: {
+        "engine": "",
+        "vendor": "",
+        "sort": "default",
+        "only_installed": False,
+        "only_russian": True,
+        "min_quality": 0,
+        "size_mb_lo": 0,
+        "size_mb_hi": 0,
+        "ram_mb_lo": 0,
+        "ram_mb_hi": 0,
+        "year_lo": 0,
+        "year_hi": 0,
+        "params_lo": 0.0,
+        "params_hi": 0.0,
+    })
 
     # --- интерфейс --------------------------------------------------------- #
     window_geometry: str = ""
     window_state: str = ""
     splitter_sizes: List[int] = field(default_factory=list)
     show_log_panel: bool = True
+    advanced_open: bool = False           # раскрыта ли панель «Расширенные настройки»
     theme: str = "dark"
-    first_run_done: bool = False
     gpu_boost_offered: bool = False       # предложение «ускорить GPU» показано один раз
 
     # ------------------------------------------------------------------ #
+    # Корень, из которого настройки были загружены (None = корень проекта).
+    # БЕЗ аннотации типа — это обычный атрибут класса, а не поле dataclass
+    # (иначе попал бы в asdict()/fields() и сломал сериализацию).
+    _root = None
+
     @staticmethod
     def file_path(root: Optional[Path] = None) -> Path:
         base = Path(root) if root else paths.ROOT_DIR
@@ -113,10 +134,11 @@ class Settings:
             settings.device = "auto"
         if settings.output_format not in ("txt", "txt-time", "srt", "vtt", "json", "md"):
             settings.output_format = DEFAULT_OUTPUT_FORMAT
+        settings._root = Path(root) if root else None
         return settings
 
     def save(self, root: Optional[Path] = None) -> None:
-        path = self.file_path(root)
+        path = self.file_path(root if root is not None else getattr(self, "_root", None))
         payload = {"version": 1, "settings": asdict(self)}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,3 +169,10 @@ class Settings:
         for key, value in values.items():
             if key in known:
                 setattr(self, key, value)
+
+    def reset_to_defaults(self) -> None:
+        """Возвращает ВСЕ настройки к стандартным (включая геометрию окна)."""
+        defaults = Settings()
+        for f in fields(self):
+            object.__setattr__(self, f.name, getattr(defaults, f.name))
+        self.save()

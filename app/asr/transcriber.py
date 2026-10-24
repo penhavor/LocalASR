@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import paths
-from ..constants import SAMPLE_RATE
+from ..constants import APP_VERSION, SAMPLE_RATE
 from ..core import exporters
 from ..core.ffmpeg import AudioError, decode_audio, probe
 from ..core.models_catalog import ModelEntry
@@ -325,7 +325,7 @@ def transcribe_file(
         "audio_duration": round(result.audio_duration, 2),
         "sample_rate": SAMPLE_RATE,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "app_version": "1.0.0",
+        "app_version": APP_VERSION,
         "header": header,
         "warnings": result.warnings or None,
     }

@@ -70,7 +70,8 @@ class VoskEngine(ASREngine):
         except Exception as exc:  # noqa: BLE001
             raise EngineError(
                 f"Не удалось импортировать vosk: {exc}\n"
-                "Установи движок: Настройки → Движки → Vosk → «Установить»."
+                "Недостающие компоненты программа предложит установить автоматически "
+                "при запуске модели (или: Сервис → Диагностика и восстановление)."
             ) from exc
 
         folder = resolve_model_dir(model)

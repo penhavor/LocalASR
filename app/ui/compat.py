@@ -146,6 +146,11 @@ COLOR_TRANSPARENT = _enum(Qt, "GlobalColor.transparent", "transparent", default=
 
 ROLE_USER = _enum(Qt, "ItemDataRole.UserRole", "UserRole", default=0x0100)
 
+# Флаги/состояния чекбоксов в списках (QListWidgetItem.setCheckState и др.)
+ITEM_USER_CHECKABLE = _flag("QtCore.Qt", "ItemFlag", "ItemIsUserCheckable", 0x0010)
+CHECK_UNCHECKED = _enum(Qt, "CheckState.Unchecked", "Unchecked", default=0)
+CHECK_CHECKED = _enum(Qt, "CheckState.Checked", "Checked", default=2)
+
 
 # --------------------------------------------------------------------------- #
 #  Аттрибуты приложения

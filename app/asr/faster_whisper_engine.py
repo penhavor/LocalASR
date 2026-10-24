@@ -98,7 +98,8 @@ class FasterWhisperEngine(ASREngine):
             if "cudnn" in low or "cublas" in low or "cuda" in low:
                 hint = (
                     "\n\nПохоже на проблему с CUDA: нужны cuBLAS 12 и cuDNN 9.\n"
-                    "Вариант 1: Настройки → Ускорение → «Установить CUDA-библиотеки».\n"
+                    "Вариант 1: Сервис → Диагностика и восстановление → установить "
+                    "CUDA-библиотеки (программа сама предложит это при выборе GPU).\n"
                     "Вариант 2 (Windows): скачать DLL из "
                     "https://github.com/Purfview/whisper-standalone-win/releases/tag/libs "
                     "и положить в .venv\\Lib\\site-packages.\n"

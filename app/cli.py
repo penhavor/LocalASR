@@ -261,11 +261,14 @@ def cmd_list_models(args) -> int:
     print(f"{APP_NAME} {APP_VERSION} · моделей в каталоге: {len(catalog.all())} · установлено: {len(catalog.installed())}\n")
     for entry in entries:
         mark = "✓" if entry.installed else " "
-        star = "★" if entry.recommended else " "
         ru = "RU" if entry.supports_russian else "  "
+        year = str(entry.released_year) if entry.released_year else "  ?"
+        quant = entry.quantization or "?"
+        params = entry.params_text
         print(
-            f"{mark}{star} {entry.id:<34} {entry.engine:<15} {ru} "
-            f"{entry.size_text:>9}  RAM {entry.ram_mb:>5} МБ  Q{entry.quality}/S{entry.speed}  {entry.name}"
+            f"{mark} {entry.id:<34} {entry.engine:<15} {ru} "
+            f"{entry.size_text:>9}  RAM {entry.ram_mb:>5} МБ  "
+            f"{year}  {params:>10}  {quant:<13}  Q{entry.quality}/S{entry.speed}  {entry.name}"
         )
     print("\nУстановка: python run_app.py transcribe <файл> -m <id>  (модель скачается при необходимости — или через GUI)")
     return 0
@@ -283,6 +286,16 @@ def cmd_doctor(_args) -> int:
     print(f"Python      : {sys.executable}")
     print(f"Версия      : {sys.version.split()[0]} ({platform.platform()})")
     print(f"venv        : {'да' if _inside_venv() else 'НЕТ (запусти main.py)'}")
+    try:
+        from .core import integrity
+
+        missing_files = integrity.missing_project_files()
+        print(
+            "Файлы прог  : "
+            + ("все на месте" if not missing_files else f"ОТСУТСТВУЮТ: {', '.join(missing_files[:8])}")
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Файлы прог  : не удалось проверить ({exc})")
     print(f"models/     : {paths.models_dir()}")
     print(f"outputs/    : {paths.outputs_dir()}")
     print(f"ffmpeg      : {find_ffmpeg() or 'не найден (будет PyAV)'}")

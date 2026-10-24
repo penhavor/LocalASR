@@ -47,6 +47,7 @@ from ..constants import (
     AUDIO_EXTENSIONS,
     LANGUAGES,
     MEDIA_EXTENSIONS,
+    REPO_URL,
     TORCH_CUDA_INDEX_URL,
     TORCH_CUDA_MIN_DRIVER_MAJOR,
     TORCH_ENGINE_NAMES,
@@ -59,7 +60,7 @@ from ..settings import Settings
 from . import compat
 from .dialogs import (
     CustomModelDialog,
-    FirstRunDialog,
+    DiagnosticsDialog,
     HardwareDialog,
     ModelInfoDialog,
     ProgressDialog,
@@ -69,6 +70,7 @@ from .models_panel import ModelListPanel
 from .widgets import FileListWidget, FlowLayout, make_label, open_in_file_manager
 from .workers import (
     CatalogRefreshWorker,
+    FileRestoreWorker,
     ModelDownloadWorker,
     PackageInstaller,
     TorchCudaProbeWorker,
@@ -160,6 +162,7 @@ class MainWindow(QMainWindow):
         self.package_worker: Optional[PackageInstaller] = None
         self.package_dialog: Optional[ProgressDialog] = None
         self.catalog_worker: Optional[CatalogRefreshWorker] = None
+        self.restore_worker: Optional[FileRestoreWorker] = None
         self.log_handler = None
 
         self.results: dict[int, FileResult] = {}
@@ -193,6 +196,21 @@ class MainWindow(QMainWindow):
         self.log_handler = attach_qt_sink(self.logRecord.emit)
         log.info("GUI запущен (%s %s, Python %s)", APP_NAME, APP_VERSION, sys.version.split()[0])
 
+        # Медленный таймер синхронизирует «рантаймовые» состояния кнопок/пунктов
+        # меню (например, «Выгрузить модель» активен, только когда модель в памяти).
+        self._state_timer = QTimer(self)
+        self._state_timer.setInterval(2000)
+        self._state_timer.timeout.connect(self._sync_runtime_actions)
+        self._state_timer.start()
+        self._sync_runtime_actions()
+
+        # Дебаунс сохранения геометрии окна: любое движение/ресайз сохраняется
+        # не мгновенно, а через паузу — настройки переживают даже аварийный выход.
+        self._geo_timer = QTimer(self)
+        self._geo_timer.setSingleShot(True)
+        self._geo_timer.setInterval(800)
+        self._geo_timer.timeout.connect(self._save_geometry_now)
+
         QTimer.singleShot(60, self._startup_checks)
 
     # ================================================================== #
@@ -208,6 +226,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([720, 520])
+        splitter.splitterMoved.connect(lambda *_: self._schedule_geometry_save())
         self.splitter = splitter
 
         self.setCentralWidget(splitter)
@@ -236,26 +255,6 @@ class MainWindow(QMainWindow):
         version = make_label(f"v{APP_VERSION}", "Muted")
         header.addWidget(version)
         layout.addLayout(header)
-
-        # --- баннер-рекомендация (появится, если моделей нет)
-        self.banner = QFrame()
-        self.banner.setObjectName("Banner")
-        banner_layout = QVBoxLayout(self.banner)
-        banner_layout.setContentsMargins(14, 12, 12, 12)
-        banner_layout.setSpacing(10)
-        self.banner_text = make_label("", "Dim", word_wrap=True)
-        banner_layout.addWidget(self.banner_text)
-        self.banner_button = QPushButton("Открыть каталог")
-        self.banner_button.setObjectName("Primary")
-        self.banner_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.banner_button.clicked.connect(self._focus_models)
-        self._banner_target: Optional[ModelEntry] = None
-        banner_buttons = QHBoxLayout()
-        banner_buttons.addStretch(1)
-        banner_buttons.addWidget(self.banner_button)
-        banner_layout.addLayout(banner_buttons)
-        self.banner.setVisible(False)
-        layout.addWidget(self.banner)
 
         # --- 1. ФАЙЛЫ
         files_box = QFrame()
@@ -306,6 +305,11 @@ class MainWindow(QMainWindow):
 
         self.file_list = FileListWidget()
         self.file_list.setMinimumHeight(180)
+        self.file_list.setToolTip(
+            "Очередь файлов на распознавание.\n"
+            "Выделение — мышью с Ctrl/Shift, удаление выделенного — клавишей Del\n"
+            "или кнопкой «Убрать выбранные». Сами файлы на диске не изменяются."
+        )
         self.file_list.filesChanged.connect(self._update_files_label)
         files_layout.addWidget(self.file_list, stretch=1)
 
@@ -422,6 +426,7 @@ class MainWindow(QMainWindow):
         self.advanced_toggle.setObjectName("Link")
         self.advanced_toggle.setCursor(compat.CURSOR_POINTING_HAND)
         self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(bool(self.settings.advanced_open))
         self.advanced_toggle.setToolTip(
             "Тонкие настройки: слова-подсказки, подсказка стилю, beam, batched-режим,\n"
             "таймкоды слов, перевод, автооткрытие папки."
@@ -434,7 +439,9 @@ class MainWindow(QMainWindow):
         advanced_layout = QVBoxLayout(self.advanced_frame)
         advanced_layout.setContentsMargins(0, 6, 0, 0)
         advanced_layout.setSpacing(8)
-        self.advanced_frame.setVisible(False)
+        self.advanced_frame.setVisible(bool(self.settings.advanced_open))
+        if self.settings.advanced_open:
+            self.advanced_toggle.setText("▾ Расширенные настройки")
 
         hot_row = QHBoxLayout()
         hot_label = make_label("Слова-подсказки (термины лекции)", "Dim")
@@ -570,6 +577,7 @@ class MainWindow(QMainWindow):
         work_layout.addWidget(self.gpu_button)
 
         self.overall_progress = QProgressBar()
+        self.overall_progress.setToolTip("Общий прогресс очереди файлов")
         self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(0)
         # %p — именно ПРОЦЕНТ (Qt сам пересчитывает из диапазона 0..1000);
@@ -581,6 +589,7 @@ class MainWindow(QMainWindow):
         work_layout.addWidget(self.overall_label)
 
         self.file_progress = QProgressBar()
+        self.file_progress.setToolTip("Прогресс текущего файла")
         self.file_progress.setObjectName("Subtle")
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
@@ -593,6 +602,10 @@ class MainWindow(QMainWindow):
 
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
+        self.preview.setToolTip(
+            "Живая лента распознанного текста текущего файла\n"
+            "(таймкод начала фразы + сама фраза). Итоговый результат — в файле."
+        )
         self.preview.setPlaceholderText("Здесь появится распознанный текст по мере работы…")
         self.preview.setMaximumHeight(96)
         self.preview.setMaximumBlockCount(1500)  # память не растёт бесконечно
@@ -627,12 +640,20 @@ class MainWindow(QMainWindow):
         self.results_button = QPushButton("Показать результаты")
         self.results_button.setObjectName("Ghost")
         self.results_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.results_button.setToolTip(
+            "Таблица обработанных файлов: статус, имена результатов, число слов,\n"
+            "скорость и время. Появляется после первого завершённого запуска."
+        )
         self.results_button.setEnabled(False)
         self.results_button.clicked.connect(self.on_show_results)
         results_row.addWidget(self.results_button)
         self.open_output_button = QPushButton("Открыть папку результатов")
         self.open_output_button.setObjectName("Ghost")
         self.open_output_button.setCursor(compat.CURSOR_POINTING_HAND)
+        self.open_output_button.setToolTip(
+            "Открыть в проводнике папку, куда сохраняются готовые тексты\n"
+            "(настраивается в поле «Куда сохранять»)"
+        )
         self.open_output_button.clicked.connect(lambda: open_in_file_manager(self.current_output_dir()))
         results_row.addWidget(self.open_output_button)
         work_layout.addLayout(results_row)
@@ -644,7 +665,7 @@ class MainWindow(QMainWindow):
 
     # ---------------- правая колонка ----------------------------------- #
     def _build_right_panel(self) -> QWidget:
-        self.models_panel = ModelListPanel(self.catalog, self.hardware)
+        self.models_panel = ModelListPanel(self.catalog, self.hardware, settings=self.settings)
         self.models_panel.modelSelected.connect(self.on_model_selected)
         self.models_panel.downloadRequested.connect(self.on_download_model)
         self.models_panel.deleteRequested.connect(self.on_delete_model)
@@ -661,61 +682,81 @@ class MainWindow(QMainWindow):
         self.log_dock.setFeatures(compat.DOCK_CLOSABLE | compat.DOCK_MOVABLE)
 
         self.log_view = QPlainTextEdit()
+        self.log_view.setToolTip("Журнал событий программы (скрыть/показать — крестик на панели «Журнал»)")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         self.log_view.setPlaceholderText("Журнал событий…")
         self.log_dock.setWidget(self.log_view)
         self.addDockWidget(compat.BOTTOM_DOCK_AREA, self.log_dock)
         self.log_dock.setVisible(bool(self.settings.show_log_panel))
+        self.log_dock.visibilityChanged.connect(lambda *_: self._schedule_geometry_save())
 
     # ---------------- меню --------------------------------------------- #
     def _build_menu(self) -> None:
         bar = self.menuBar()
 
         file_menu = bar.addMenu("Файлы")
-        self._add_action(file_menu, "Добавить файлы…", self.on_add_files, "Ctrl+O")
-        self._add_action(file_menu, "Добавить папку…", self.on_add_folder, "Ctrl+Shift+O")
+        self._add_action(file_menu, "Добавить файлы…", self.on_add_files, "Ctrl+O",
+                         tip="Выбрать аудио/видео файлы для распознавания (можно несколько сразу)")
+        self._add_action(file_menu, "Добавить папку…", self.on_add_folder, "Ctrl+Shift+O",
+                         tip="Добавить все аудио/видео из папки, включая подпапки")
         file_menu.addSeparator()
-        self._add_action(file_menu, "Открыть папку результатов", lambda: open_in_file_manager(self.current_output_dir()))
-        self._add_action(file_menu, "Показать результаты", self.on_show_results)
+        self._add_action(file_menu, "Открыть папку результатов",
+                         lambda: open_in_file_manager(self.current_output_dir()),
+                         tip="Открыть в проводнике папку, куда сохраняются готовые тексты")
+        self._add_action(file_menu, "Показать результаты", self.on_show_results,
+                         tip="Таблица обработанных файлов: статусы, имена результатов, скорость")
         file_menu.addSeparator()
         self._add_action(file_menu, "Выход", self.close, "Ctrl+Q")
 
         models_menu = bar.addMenu("Модели")
-        self._add_action(models_menu, "Добавить свою модель (ссылка/путь)…", self.on_add_custom_model)
-        self._add_action(models_menu, "Обновить каталог из сети", self.on_refresh_catalog)
-        self._add_action(models_menu, "Открыть папку models/", lambda: open_in_file_manager(self.catalog.models_root))
+        self._add_action(models_menu, "Добавить свою модель (ссылка/путь)…", self.on_add_custom_model,
+                         tip="Модель не из каталога: репозиторий Hugging Face, прямая ссылка или папка на диске")
+        self._add_action(models_menu, "Обновить каталог из сети", self.on_refresh_catalog,
+                         tip="Проверить онлайн-каталог: не появились ли новые модели")
+        self._add_action(models_menu, "Открыть папку models/",
+                         lambda: open_in_file_manager(self.catalog.models_root),
+                         tip="Папка, куда скачиваются модели (создаётся автоматически)")
         models_menu.addSeparator()
-        self._add_action(models_menu, "Выгрузить модель из памяти", self._unload_model)
+        self.unload_action = self._add_action(
+            models_menu, "Выгрузить модель из памяти", self._unload_model,
+            tip="Освободить оперативную память (и видеопамять), занятую загруженной моделью.\n"
+                "Доступно, только когда модель действительно загружена; при следующем запуске\n"
+                "она загрузится заново (несколько секунд).",
+        )
+        self.unload_action.setEnabled(False)
 
         service_menu = bar.addMenu("Сервис")
-        self._add_action(service_menu, "Настройки…", self.on_open_settings, "Ctrl+,")
-        self._add_action(service_menu, "Железо и окружение…", self.on_show_hardware)
+        self._add_action(service_menu, "Настройки…", self.on_open_settings, "Ctrl+,",
+                         tip="Качество текста, устройство (CPU/GPU), сброс настроек по умолчанию")
+        self._add_action(service_menu, "Железо и окружение…", self.on_show_hardware,
+                         tip="Что видит программа: процессор, память, видеокарта, ffmpeg")
         service_menu.addSeparator()
-        self._add_action(service_menu, "Установить движок whisper.cpp", lambda: self.install_packages_interactive(
-            ["pywhispercpp>=1.4.0"], "whisper.cpp"))
-        self._add_action(service_menu, "Установить движок Vosk", lambda: self.install_packages_interactive(
-            ["vosk>=0.3.45"], "Vosk"))
-        self._add_action(service_menu, "Установить CUDA-библиотеки (GPU)", lambda: self.install_packages_interactive(
-            ["-r", str(paths.ROOT_DIR / "requirements" / "gpu.txt")], "CUDA"))
-        service_menu.addSeparator()
-        self._add_action(service_menu, "Проверить и починить окружение (.venv)", self.on_repair_env)
-        self._add_action(service_menu, "Открыть лог запуска", self.on_open_bootstrap_log)
-        self._add_action(service_menu, "Открыть папку логов", lambda: open_in_file_manager(paths.logs_dir()))
+        self._add_action(service_menu, "Диагностика и восстановление…", self.on_diagnostics,
+                         tip="Проверить файлы программы, папки и библиотеки в .venv;\n"
+                             "восстановить удалённое, починить окружение, убрать лишние пакеты")
+        self._add_action(service_menu, "Открыть лог запуска", self.on_open_bootstrap_log,
+                         tip="Журнал подготовки окружения (создаётся при первом запуске main.py)")
+        self._add_action(service_menu, "Открыть папку логов",
+                         lambda: open_in_file_manager(paths.logs_dir()),
+                         tip="Журналы работы программы: localasr.log и лог установки")
 
         help_menu = bar.addMenu("Справка")
-        self._add_action(help_menu, "Как выбрать модель", self.on_help_models)
-        self._add_action(help_menu, "README (GitHub)", lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/local-asr/LocalASR")))
-        self._add_action(help_menu, "Сообщить о проблеме", lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/local-asr/LocalASR/issues/new")))
+        self._add_action(help_menu, "README (GitHub)", lambda: QDesktopServices.openUrl(QUrl(REPO_URL)),
+                         tip="Открыть страницу проекта с документацией в браузере")
+        self._add_action(help_menu, "Сообщить о проблеме",
+                         lambda: QDesktopServices.openUrl(QUrl(f"{REPO_URL}/issues/new")),
+                         tip="Открыть форму создания issue на GitHub (нужен аккаунт)")
         help_menu.addSeparator()
         self._add_action(help_menu, f"О программе ({APP_VERSION})", self.on_about)
 
-    def _add_action(self, menu: QMenu, text: str, slot, shortcut: str = "") -> QAction:
+    def _add_action(self, menu: QMenu, text: str, slot, shortcut: str = "", tip: str = "") -> QAction:
         action = QAction(text, self)
         if shortcut:
             action.setShortcut(QKeySequence(shortcut))
+        if tip:
+            action.setToolTip(tip)
+            action.setStatusTip(tip.splitlines()[0])   # показывается в статус-баре при наведении
         action.triggered.connect(slot)
         menu.addAction(action)
         return action
@@ -768,11 +809,8 @@ class MainWindow(QMainWindow):
             log.warning(note)
 
         self._restore_selected_model()
-        self._update_banner()
         self._update_output_hint()
-
-        if not self.catalog.installed():
-            QTimer.singleShot(250, self._show_first_run)
+        QTimer.singleShot(400, self._check_integrity)
 
     def _restore_selected_model(self) -> None:
         self.rebuild_model_combo()
@@ -789,31 +827,6 @@ class MainWindow(QMainWindow):
                 self.status_model.setText("модель не выбрана")
                 self.model_combo.setCurrentIndex(0)
 
-    def _show_first_run(self) -> None:
-        if self.settings.first_run_done:
-            return
-        recommendation = self.catalog.recommendation(self.hardware)
-        top: List[ModelEntry] = []
-        if recommendation is not None:
-            top.append(recommendation)
-        for entry in self.catalog.sorted_for_display(self.catalog.not_installed()):
-            if entry in top:
-                continue
-            if entry.supports_russian or entry.recommended:
-                top.append(entry)
-            if len(top) >= 4:
-                break
-        dialog = FirstRunDialog(
-            hardware_summary=self.hardware.get("summary", "Информация о железе недоступна"),
-            recommendations=top,
-            parent=self,
-        )
-        dialog.downloadRequested.connect(self.on_download_model)
-        dialog.exec()
-        self.settings.first_run_done = True
-        self.settings.save()
-        self._update_banner()
-
     # ================================================================== #
     #  Файлы
     # ================================================================== #
@@ -823,6 +836,7 @@ class MainWindow(QMainWindow):
         if not picked:
             return
         self.settings.last_open_dir = str(Path(picked[0]).parent)
+        self.settings.save()
         added = self.file_list.add_paths(picked)
         self._log(f"Добавлено файлов: {added} (всего {len(self.file_list.files())})")
 
@@ -832,6 +846,7 @@ class MainWindow(QMainWindow):
         if not picked:
             return
         self.settings.last_open_dir = picked
+        self.settings.save()
         added = self.file_list.add_paths([picked])
         self._log(f"Из папки добавлено файлов: {added}")
         if added == 0:
@@ -860,7 +875,7 @@ class MainWindow(QMainWindow):
     def _update_files_label(self) -> None:
         count = self.file_list.count()
         total = self.file_list.total_size()
-        word = "файл" if count == 1 else "файла" if 1 < count % 10 < 5 and not 10 < count % 100 < 20 else "файлов"
+        word = paths.plural_ru(count, "файл", "файла", "файлов")
         self.files_count_label.setText(
             f"{count} {word}" + (f" · {paths.human_size(total)}" if total else "")
         )
@@ -906,7 +921,6 @@ class MainWindow(QMainWindow):
                 self.selected_model = None
                 self.models_panel.set_selected("")
                 self.status_model.setText("модель не выбрана")
-                self._update_banner()
                 self._update_work_button()
             return
         entry = self.catalog.get(model_id)
@@ -931,7 +945,6 @@ class MainWindow(QMainWindow):
             self.settings.save()
             self._log(f"Выбрана модель: {entry.name}")
             self._toast(f"Модель для работы: {entry.name}")
-        self._update_banner()
         self._update_work_button()
 
     def on_download_model(self, entry: ModelEntry) -> None:
@@ -1040,7 +1053,6 @@ class MainWindow(QMainWindow):
         self.catalog.refresh_installed()
         self.models_panel.rebuild()
         self._restore_selected_model()
-        self._update_banner()
 
     def on_model_info(self, entry: ModelEntry) -> None:
         ModelInfoDialog(entry, self).exec()
@@ -1088,56 +1100,23 @@ class MainWindow(QMainWindow):
             return
         registry.unload()
         self._log("Модель выгружена из оперативной памяти")
+        self._sync_runtime_actions()
+
+    def _sync_runtime_actions(self) -> None:
+        """Держит «состояние зависимые» пункты меню честными.
+
+        «Выгрузить модель из памяти» имеет смысл только когда модель реально
+        загружена в память (или идёт работа — тогда выгружать нельзя).
+        """
+        action = getattr(self, "unload_action", None)
+        if action is None:
+            return
+        loaded = registry.current() is not None
+        action.setEnabled(loaded and not self._working)
 
     def _focus_models(self) -> None:
         self.splitter.setSizes([420, 820])
         self.models_panel.search.setFocus()
-
-    def _update_banner(self) -> None:
-        installed = self.catalog.installed()
-        if installed and self.selected_model is not None:
-            self.banner.setVisible(False)
-            return
-        if installed:
-            # модели ЕСТЬ, но в списке «Модель» стоит «Не выбрано»
-            self.banner_text.setText(
-                "<b>Модель не выбрана.</b> Выбери одну из скачанных в списке «Модель» "
-                "в блоке «3 · Работа» (или кликни по карточке справа) — пока модель "
-                "не выбрана, кнопка «РАБОТАТЬ» неактивна."
-            )
-            self.banner_button.setText("Открыть каталог")
-            self._banner_target = None
-            try:
-                self.banner_button.clicked.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            self.banner_button.clicked.connect(self._focus_models)
-            self.banner.setVisible(True)
-            return
-        recommendation = self.catalog.recommendation(self.hardware)
-        if recommendation is None:
-            self.banner.setVisible(False)
-            return
-        self.banner_text.setText(
-            f"<b>Моделей пока нет.</b> Рекомендуем начать с «{recommendation.name}»: "
-            f"{recommendation.size_text} на диске, {recommendation.memory_text}. "
-            f"{recommendation.recommended_for}"
-        )
-        self.banner_button.setText("Скачать рекомендованную")
-        self._banner_target = recommendation
-        try:
-            self.banner_button.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        self.banner_button.clicked.connect(self._on_banner_clicked)
-        self.banner.setVisible(True)
-
-    def _on_banner_clicked(self) -> None:
-        target = self._banner_target
-        if target is not None:
-            self.on_download_model(target)
-        else:
-            self._focus_models()
 
     # ================================================================== #
     #  Работа
@@ -1156,7 +1135,8 @@ class MainWindow(QMainWindow):
             self.work_button.setText("Выбери модель")
         else:
             count = self.file_list.count()
-            self.work_button.setText(f"РАБОТАТЬ · {count} файл(ов)")
+            word = paths.plural_ru(count, "файл", "файла", "файлов")
+            self.work_button.setText(f"РАБОТАТЬ · {count} {word}")
 
     def _set_working(self, working: bool) -> None:
         """Переключает интерфейс между состояниями «ожидание» и «работа».
@@ -1171,6 +1151,7 @@ class MainWindow(QMainWindow):
             self.cancel_button.setEnabled(True)
             self.cancel_button.setText("ОТМЕНИТЬ")
         self._update_work_button()
+        self._sync_runtime_actions()
 
     def on_work(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -1183,20 +1164,26 @@ class MainWindow(QMainWindow):
         if entry is None or not entry.installed:
             QMessageBox.information(
                 self, "Модель не выбрана",
-                "Скачай и выбери модель в правой панели — без неё распознавать нечем.\n\n"
-                "Если не знаешь, что выбрать: нажми «★ рекомендуем» в баннере наверху.",
+                "Скачай и выбери модель в правой панели — без неё распознавать нечем.\n"
+                "В карточках моделей указаны размер, потребление памяти, языки,\n"
+                "оценки точности и скорости — выбери под своё железо.",
             )
             self._focus_models()
             return
 
+        from ..asr.base import engine_install_size
         from ..asr.registry import engine_available, missing_engine_packages
 
         if not engine_available(entry.engine):
             packages = missing_engine_packages(entry.engine)
+            size_text = engine_install_size(entry.engine)
             answer = QMessageBox.question(
-                self, "Нужен движок",
-                f"Модель «{entry.name}» работает на движке {entry.engine_label}, "
-                f"которого ещё нет.\n\nУстановить в .venv: {', '.join(packages)}?",
+                self, "Нужны дополнительные компоненты",
+                f"Модель «{entry.name}» работает на движке «{entry.engine_label}».\n"
+                "Его библиотеки установятся в папку программы (.venv) — системный\n"
+                "Python не затрагивается, это разовая операция.\n\n"
+                + (f"Объём скачивания: {size_text}\n" if size_text else "")
+                + f"Пакеты: {', '.join(packages)}\n\nУстановить сейчас?",
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_yes(),
             )
@@ -1299,11 +1286,22 @@ class MainWindow(QMainWindow):
 
     def _on_job_finished(self, ok: int, fail: int, seconds: float) -> None:
         cancelled = self.worker is not None and self.worker.cancelled
+        engine_missing = bool(getattr(self.worker, "engine_missing", False))
         total = self._job_total_files
         produced = [path for result in self.results.values() for path in result.outputs]
         words = sum(result.words for result in self.results.values())
         audio = sum(result.audio_duration for result in self.results.values())
         speed = (audio / seconds) if seconds > 0 else 0.0
+
+        if engine_missing:
+            self.overall_label.setText(
+                "Распознавание отложено: движку не хватает компонентов — "
+                "установи их в появившемся окне, задача продолжится сама."
+            )
+            self.file_label.setText("")
+            self._log(self.overall_label.text())
+            self._finish_worker()
+            return
 
         self.overall_label.setText(
             ("Отменено" if cancelled else "Готово") + f": {ok} из {total}"
@@ -1347,9 +1345,14 @@ class MainWindow(QMainWindow):
 
     def _on_engine_missing(self, engine: str, packages) -> None:
         self._finish_worker()
+        from ..asr.base import engine_install_size
+
+        size_text = engine_install_size(engine)
         answer = QMessageBox.question(
-            self, "Нужен движок",
-            f"Для этой модели нужен движок «{engine}».\nУстановить {', '.join(packages)} в .venv?",
+            self, "Нужны дополнительные компоненты",
+            f"Для этой модели нужен движок «{engine}».\n"
+            + (f"Объём скачивания: {size_text}\n" if size_text else "")
+            + f"Установить {', '.join(packages)} в .venv проекта?",
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_yes(),
         )
@@ -1415,7 +1418,7 @@ class MainWindow(QMainWindow):
             button.setToolTip(
                 "Все движки будут работать на процессоре.\n"
                 "Для максимально быстрого CPU-распознавания выбирай модели с int8/q5_0\n"
-                "(faster-whisper / whisper.cpp) — см. баннер-рекомендацию и каталог справа."
+                "(faster-whisper / whisper.cpp) — их характеристики видны в каталоге справа."
             )
             button.setEnabled(False)
             return
@@ -1433,7 +1436,7 @@ class MainWindow(QMainWindow):
                 "считают энкодер на видеокарте, а декодирование — параллельно на CPU.\n"
                 "Ставить больше нечего — кнопка неактивна.\n\n"
                 "(Для Whisper-моделей faster-whisper CUDA настраивается отдельно:\n"
-                "Сервис → Настройки → Движки и CUDA.)"
+                "Сервис → Настройки → вкладка «Движки».)"
             )
             button.setEnabled(False)
             return
@@ -1549,16 +1552,28 @@ class MainWindow(QMainWindow):
 
         На Linux pip и так ставит torch с CUDA, на macOS CUDA нет — поэтому
         только Windows. Явный --index-url в списке не перебиваем.
+
+        ВАЖНО: --index-url ПОЛНОСТЬЮ заменяет PyPI. Для списка только из
+        torch-пакетов это то, что нужно (берём CUDA-сборку). Но движки
+        ставятся смешанным списком (torch + transformers + hydra-core + …),
+        и на индексе PyTorch остальных пакетов просто нет — установка падала
+        с «No matching distribution». Поэтому для смешанных списков индекс
+        PyTorch добавляется как ДОПОЛНИТЕЛЬНЫЙ (--extra-index-url): pip/uv
+        сами возьмут torch/torchaudio в CUDA-сборке (версия с суффиксом
+        +cu126 старше чистой по PEP 440), а остальное — с PyPI.
         """
         packages = list(packages)
-        if (
-            os.name == "nt"
-            and (hardware or {}).get("has_nvidia")
-            and "--index-url" not in packages
-            and any(str(pkg).lower().startswith("torch") for pkg in packages)
-        ):
-            packages = ["--index-url", TORCH_CUDA_INDEX_URL, *packages]
-        return packages
+        if not (os.name == "nt" and (hardware or {}).get("has_nvidia")):
+            return packages
+        if "--index-url" in packages or "--extra-index-url" in packages:
+            return packages
+        if not any(str(pkg).lower().startswith("torch") for pkg in packages):
+            return packages
+        has_non_torch = any(
+            not str(pkg).lower().startswith("torch") for pkg in packages
+        )
+        flag = "--extra-index-url" if has_non_torch else "--index-url"
+        return [flag, TORCH_CUDA_INDEX_URL, *packages]
 
     def install_packages_interactive(
         self, packages: List[str], title: str = "", pre_uninstall: Optional[List[str]] = None,
@@ -1663,21 +1678,75 @@ class MainWindow(QMainWindow):
             )
         return ""
 
-    def on_repair_env(self) -> None:
+    def on_diagnostics(self) -> None:
+        """Сервис → Диагностика и восстановление (файлы, папки, .venv)."""
+        DiagnosticsDialog(self).exec()
+        # после ремонта окружения железо/движки могли измениться
+        registry.hardware(refresh=True)
+        self.hardware = registry.hardware()
+        self.models_panel.set_hardware(self.hardware)
+        self._refresh_gpu_button()
+
+    def _check_integrity(self) -> None:
+        """Тихая проверка файлов программы при старте.
+
+        Ничего не ломает: если пользователь удалил файлы проекта — сообщаем
+        и предлагаем восстановить их с GitHub (одной кнопкой).
+        """
+        try:
+            from ..core import integrity
+
+            missing = integrity.missing_project_files()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Проверка целостности не выполнена: %s", exc)
+            return
+        if not missing:
+            return
+        log.warning("Отсутствуют файлы программы: %s", ", ".join(missing[:10]))
+        listing = "\n".join("  • " + name for name in missing[:12])
+        if len(missing) > 12:
+            listing += f"\n  … и ещё {len(missing) - 12}"
         answer = QMessageBox.question(
-            self, "Проверка окружения",
-            "Перепроверить все базовые зависимости в .venv и доустановить недостающее?\n\n"
-            "Это безопасно: системный Python не затрагивается.",
+            self, "Отсутствуют файлы программы",
+            f"В папке программы не хватает {len(missing)} файл(ов):\n{listing}\n\n"
+            "Программа продолжит работу, но может быть неполноценной.\n"
+            "Скачать недостающие файлы заново из репозитория проекта?\n"
+            "(нужен интернет; вес — считаные килобайты, данные не затрагиваются)",
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_yes(),
         )
-        if answer != compat.message_box_yes():
+        if answer == compat.message_box_yes():
+            self._restore_files_interactive(missing)
+
+    def _restore_files_interactive(self, missing: List[str]) -> None:
+        if self.restore_worker is not None and self.restore_worker.isRunning():
             return
-        requirements = paths.ROOT_DIR / "requirements" / "base.txt"
-        if requirements.is_file():
-            self.install_packages_interactive(["-r", str(requirements)], "Проверка окружения")
+        dialog = ProgressDialog(
+            "Восстановление файлов программы",
+            f"Скачиваем {len(missing)} файл(ов) из репозитория проекта…",
+            parent=self,
+        )
+        worker = FileRestoreWorker(missing, self)
+        worker.progress.connect(dialog.set_fraction)
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
+        worker.outputLine.connect(dialog.append_log)
+        dialog.cancelRequested.connect(worker.cancel)
+        worker.finishedWith.connect(lambda ok, message: self._on_restore_finished(ok, message, dialog))
+        self.restore_worker = worker
+        worker.start()
+        dialog.exec()
+
+    def _on_restore_finished(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
+        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.accept()
+        worker, self.restore_worker = self.restore_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self._log(message)
+        if ok:
+            self._toast("Файлы программы восстановлены")
         else:
-            QMessageBox.warning(self, "Не найдено", f"Нет файла {requirements}")
+            QMessageBox.warning(self, "Восстановление", message)
 
     def on_open_bootstrap_log(self) -> None:
         log_file = paths.logs_dir() / "bootstrap.log"
@@ -1704,10 +1773,42 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     def on_open_settings(self) -> None:
         self._collect_settings()
-        dialog = SettingsDialog(self.settings, self.hardware, self)
+        dialog = SettingsDialog(
+            self.settings, self.hardware, self,
+            on_reset_defaults=self._reset_settings_to_defaults,
+        )
         if dialog.exec() == compat.dialog_accepted():
             self._apply_settings_to_ui()
             self._log("Настройки сохранены")
+
+    def _reset_settings_to_defaults(self) -> None:
+        """Вызывается из диалога настроек после сброса: применяем дефолты к UI.
+
+        К этому моменту `self.settings` уже сброшен в стандартные значения и
+        сохранён на диск. Осталось привести интерфейс в соответствие и вернуть
+        окну/фильтрам исходный вид.
+        """
+        self._apply_settings_to_ui()
+        # геометрия окна — к стандартной
+        self.settings.window_geometry = ""
+        self.settings.window_state = ""
+        self.settings.splitter_sizes = []
+        try:
+            self.splitter.setSizes([720, 520])
+            self.log_dock.setVisible(bool(self.settings.show_log_panel))
+            self.showNormal()
+            self.resize(1280, 800)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось сбросить геометрию: %s", exc)
+        self.settings.save()
+        # фильтры каталога — к стандартным
+        try:
+            self.models_panel.reset_filters_to_defaults()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось сбросить фильтры: %s", exc)
+        self._update_output_hint()
+        self._log("Настройки сброшены к стандартным")
+        self._toast("Настройки сброшены к стандартным")
 
     def on_show_hardware(self) -> None:
         hardware = registry.hardware(refresh=True)
@@ -1722,26 +1823,6 @@ class MainWindow(QMainWindow):
 
     def on_show_results(self) -> None:
         ResultsDialog(self.results, self).exec()
-
-    def on_help_models(self) -> None:
-        QMessageBox.information(
-            self, "Как выбрать модель",
-            "Коротко:\n\n"
-            "• Русские лекции, есть 8+ ГБ RAM или любая GPU →\n"
-            "   «Whisper Large v3 Turbo · Russian (int8, CT2)» — наш основной выбор.\n"
-            "• Мало памяти (4–6 ГБ), хочется точности →\n"
-            "   «Whisper Large v3 Turbo q5_0 (whisper.cpp)» — 574 МБ.\n"
-            "• Язык заранее неизвестен или запись многоязычная →\n"
-            "   «Whisper Large v3 Turbo (multilingual)».\n"
-            "• Нужен максимум качества и время не важно →\n"
-            "   «Whisper Large v3» (3.1 ГБ) или Qwen3-ASR 1.7B (4.7 ГБ, torch).\n"
-            "• Русский с пунктуацией на слабом железе →\n"
-            "   «GigaAM v3 E2E RNNT» (Sber, 449 МБ, torch).\n"
-            "• Записи на языках СНГ (kk, ky, uz) →\n"
-            "   «GigaAM Multilingual» (Sber).\n\n"
-            "В карточках указаны размер файла, потребление памяти, языки,\n"
-            "оценки точности и скорости — сравнивай и выбирай.",
-        )
 
     def on_about(self) -> None:
         QMessageBox.about(
@@ -1796,6 +1877,14 @@ class MainWindow(QMainWindow):
         self.hotwords_edit.setText(self.settings.hotwords)
         self.prompt_edit.setText(self.settings.initial_prompt)
         self.open_folder_check.setChecked(bool(self.settings.open_output_folder_when_done))
+        # состояние панели «Расширенные настройки»
+        self.advanced_toggle.blockSignals(True)
+        self.advanced_toggle.setChecked(bool(self.settings.advanced_open))
+        self.advanced_toggle.blockSignals(False)
+        self.advanced_frame.setVisible(bool(self.settings.advanced_open))
+        self.advanced_toggle.setText(
+            "▾ Расширенные настройки" if self.settings.advanced_open else "▸ Расширенные настройки"
+        )
         self._update_output_hint()
 
     def _on_settings_changed(self, *_args) -> None:
@@ -1805,6 +1894,8 @@ class MainWindow(QMainWindow):
     def _toggle_advanced(self, checked: bool) -> None:
         self.advanced_frame.setVisible(checked)
         self.advanced_toggle.setText("▾ Расширенные настройки" if checked else "▸ Расширенные настройки")
+        self.settings.advanced_open = bool(checked)
+        self.settings.save()
 
     def _update_output_hint(self) -> None:
         output_dir = self.current_output_dir()
@@ -1857,6 +1948,47 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             log.debug("Не удалось восстановить геометрию окна: %s", exc)
 
+    def _save_geometry_now(self) -> None:
+        """Пишет текущую геометрию/состояние окна в настройки (атомарно)."""
+        try:
+            self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
+            self.settings.window_state = bytes(self.saveState().toBase64()).decode("ascii")
+            self.settings.splitter_sizes = [int(v) for v in self.splitter.sizes()]
+            self.settings.show_log_panel = self.log_dock.isVisible()
+            self.settings.save()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось сохранить геометрию: %s", exc)
+
+    def _schedule_geometry_save(self) -> None:
+        """Дебаунс: окно можно двигать непрерывно — сохраним один раз через паузу.
+
+        Благодаря этому любое изменение (размер, позиция, свернутое/развёрнутое
+        состояние, панели) переживает даже аварийное завершение программы.
+        """
+        try:
+            self._geo_timer.start()
+        except RuntimeError:
+            pass    # окно уже удалено — сохранять некуда
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._schedule_geometry_save()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._schedule_geometry_save()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        # смена состояния окна (свернуто/развёрнуто/обычное)
+        super().changeEvent(event)
+        try:
+            from PySide6.QtCore import QEvent
+
+            if event.type() == QEvent.Type.WindowStateChange:
+                self._schedule_geometry_save()
+        except Exception:  # noqa: BLE001
+            pass
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
@@ -1871,20 +2003,13 @@ class MainWindow(QMainWindow):
             self.worker.cancel()
             self.worker.wait(5000)
 
-        for worker in (self.download_worker, self.package_worker):
+        for worker in (self.download_worker, self.package_worker, self.restore_worker):
             if worker is not None and worker.isRunning():
                 worker.cancel()
                 worker.wait(3000)
 
         self._collect_settings()
-        try:
-            self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
-            self.settings.window_state = bytes(self.saveState().toBase64()).decode("ascii")
-            self.settings.splitter_sizes = [int(v) for v in self.splitter.sizes()]
-            self.settings.show_log_panel = self.log_dock.isVisible()
-            self.settings.save()
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось сохранить геометрию: %s", exc)
+        self._save_geometry_now()
 
         detach_qt_sink(self.log_handler)
         registry.unload()

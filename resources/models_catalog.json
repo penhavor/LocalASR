@@ -1,7 +1,7 @@
 {
-  "version": 4,
-  "updated": "2026-10-23",
-  "note": "Каталог LocalASR. Слабые микро-модели убраны: остались средние, мощные и флагманы (универсальные и заточенные под русский). Размеры указаны по фактическим данным Hugging Face API на момент сборки; в рантайме уточняются автоматически, если есть сеть.",
+  "version": 5,
+  "updated": "2026-10-24",
+  "note": "Каталог LocalASR. Размеры указаны по фактическим данным Hugging Face API на момент сборки; в рантайме уточняются автоматически, если есть сеть. released_year — число (год первого релиза весов), params_b — число параметров в миллиардах, quantization — формат хранения весов.",
   "engines": {
     "faster-whisper": "CTranslate2: самый быстрый запуск Whisper-моделей, int8-квантование, VAD, hotwords, batched-декодинг. Основной движок.",
     "whispercpp": "whisper.cpp (GGML): минимум RAM, квантованные модели q5_0/q8_0, отличный выбор для слабых CPU.",
@@ -19,42 +19,72 @@
       "size_bytes": 819000000,
       "ram_mb": 2000,
       "vram_mb": 2200,
-      "languages": ["ru", "uk", "be", "kk", "en"],
+      "languages": [
+        "ru",
+        "uk",
+        "be",
+        "kk",
+        "en"
+      ],
       "languages_note": "RU (приоритет) + 99 языков Whisper, лучше всего русский",
       "quality": 5,
       "speed": 4,
       "license": "MIT",
-      "released": "2026",
       "vendor": "Сообщество (fine-tune Whisper)",
       "url": "https://huggingface.co/coriollon/whisper-large-v3-turbo-russian",
       "description": "Fine-tune Whisper Large v3 Turbo (809M, архитектура 2024–2026) на русском. Заявленный автором AGG WER ≈ 9.4% — заметно лучше базового turbo на русской речи: лекции, подкасты, живые выступления. int8-сборка CTranslate2: 819 МБ на диске, ~1.4 ГБ RAM, запускается и на CPU, и на GPU. Лучшее соотношение «точность на русском / размер / скорость».",
-      "recommended": true,
       "recommended_for": "Основной выбор для лекций на русском: точно, быстро, ~1.4 ГБ памяти",
-      "tags": ["рекомендуем", "русский", "турбо", "int8"],
-      "defaults": {"beam_size": 5, "batched": true, "batch_size": 8}
+      "tags": [
+        "рекомендуем",
+        "русский",
+        "турбо",
+        "int8"
+      ],
+      "defaults": {
+        "beam_size": 5,
+        "batched": true,
+        "batch_size": 8
+      },
+      "params_b": 0.809,
+      "quantization": "int8_float16",
+      "released_year": 2026
     },
     {
       "id": "ru-turbo-coriollon-float16",
-      "name": "Whisper Large v3 Turbo · Russian (float16, CT2)",
+      "name": "Whisper Large v3 Turbo · Russian (int16, CT2)",
       "engine": "faster-whisper",
       "source": "coriollon/whisper-large-v3-turbo-russian",
-      "subfolder": "ct2_int16",
+      "subfolder": "ct2-int16",
       "size_bytes": 1620000000,
       "ram_mb": 2600,
       "vram_mb": 3000,
-      "languages": ["ru", "uk", "be", "kk", "en"],
+      "languages": [
+        "ru",
+        "uk",
+        "be",
+        "kk",
+        "en"
+      ],
       "languages_note": "RU (приоритет) + 99 языков Whisper",
       "quality": 5,
       "speed": 4,
       "license": "MIT",
-      "released": "2026",
       "vendor": "Сообщество (fine-tune Whisper)",
       "url": "https://huggingface.co/coriollon/whisper-large-v3-turbo-russian/tree/main/ct2_int16",
       "description": "Та же русская модель, но в 16-битной точности: чуть точнее на сложной речи (шум, дикция, термины) и вдвое тяжелее. Бери, если есть 8+ ГБ RAM или GPU с 4+ ГБ VRAM.",
-      "recommended": false,
       "recommended_for": "Максимальная точность на русском, если память позволяет",
-      "tags": ["русский", "турбо", "float16"],
-      "defaults": {"beam_size": 5, "batched": true}
+      "tags": [
+        "русский",
+        "турбо",
+        "float16"
+      ],
+      "defaults": {
+        "beam_size": 5,
+        "batched": true
+      },
+      "params_b": 0.809,
+      "quantization": "int16",
+      "released_year": 2026
     },
     {
       "id": "ru-turbo-coriollon-codeswitch",
@@ -65,19 +95,30 @@
       "size_bytes": 820000000,
       "ram_mb": 2000,
       "vram_mb": 2200,
-      "languages": ["ru", "en"],
+      "languages": [
+        "ru",
+        "en"
+      ],
       "languages_note": "RU + EN в одной фразе (code-switching)",
       "quality": 5,
       "speed": 4,
       "license": "MIT",
-      "released": "2026",
       "vendor": "Сообщество (fine-tune Whisper)",
       "url": "https://huggingface.co/coriollon/whisper-large-v3-turbo-russian-codeswitch",
       "description": "Вариант для лекций, где русская речь щедро перемешана с английскими терминами («деплой», «gradient descent», «backend»). Жертвует ~2% WER на чисто русском ради того, что не переключается на английский и не коверкает термины.",
-      "recommended": false,
       "recommended_for": "IT/технические лекции с англоязычными терминами",
-      "tags": ["русский", "английский", "code-switch"],
-      "defaults": {"beam_size": 5, "batched": true}
+      "tags": [
+        "русский",
+        "английский",
+        "code-switch"
+      ],
+      "defaults": {
+        "beam_size": 5,
+        "batched": true
+      },
+      "params_b": 0.809,
+      "quantization": "int8_float16",
+      "released_year": 2026
     },
     {
       "id": "ru-turbo-dvislobokov",
@@ -87,19 +128,28 @@
       "size_bytes": 1617884929,
       "ram_mb": 2600,
       "vram_mb": 3000,
-      "languages": ["ru", "en"],
+      "languages": [
+        "ru",
+        "en"
+      ],
       "languages_note": "RU (приоритет), EN сохранён",
       "quality": 4,
       "speed": 4,
       "license": "MIT",
-      "released": "2025",
       "vendor": "Сообщество (fine-tune Whisper)",
       "url": "https://huggingface.co/dvislobokov/faster-whisper-large-v3-turbo-russian",
       "description": "Ещё один русский fine-tune turbo-модели (база: openai/whisper-large-v3-turbo), уже сконвертированный в CTranslate2. Альтернатива coriollon — полезно прогнать обе на своей записи и выбрать лучшую.",
-      "recommended": false,
       "recommended_for": "Вторая русская модель для сравнения",
-      "tags": ["русский", "турбо"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "русский",
+        "турбо"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 0.809,
+      "quantization": "float16",
+      "released_year": 2025
     },
     {
       "id": "whisper-large-v3-turbo",
@@ -109,19 +159,42 @@
       "size_bytes": 1617884929,
       "ram_mb": 2600,
       "vram_mb": 3000,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "ko", "ar", "uk", "kk"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "ko",
+        "ar",
+        "uk",
+        "kk"
+      ],
       "languages_note": "99 языков; сильная десятка: en, zh, de, fr, es, it, ja, ko, hi, pt + хороший ru",
       "quality": 4,
       "speed": 5,
       "license": "MIT",
-      "released": "2024 (обновлён 2026)",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2",
       "description": "Дистиллированная версия Whisper Large v3: 809M параметров вместо 1550M, 4 слоя декодера — в 6–8 раз быстрее large-v3 при почти той же точности. Универсальный выбор, если язык заранее неизвестен или запись многоязычная.",
-      "recommended": true,
       "recommended_for": "Универсальный быстрый вариант для любого языка",
-      "tags": ["мультиязычная", "турбо", "баланс"],
-      "defaults": {"beam_size": 5, "batched": true}
+      "tags": [
+        "мультиязычная",
+        "турбо",
+        "баланс"
+      ],
+      "defaults": {
+        "beam_size": 5,
+        "batched": true
+      },
+      "params_b": 0.809,
+      "quantization": "float16",
+      "released_year": 2024
     },
     {
       "id": "whisper-large-v3",
@@ -131,19 +204,48 @@
       "size_bytes": 3087284237,
       "ram_mb": 4700,
       "vram_mb": 5000,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "ko", "ar", "uk", "kk", "hy", "ka", "az", "uz", "ky", "tg"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "ko",
+        "ar",
+        "uk",
+        "kk",
+        "hy",
+        "ka",
+        "az",
+        "uz",
+        "ky",
+        "tg"
+      ],
       "languages_note": "99 языков, максимальное покрытие",
       "quality": 5,
       "speed": 2,
       "license": "MIT",
-      "released": "2023 (актуален в 2026)",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/Systran/faster-whisper-large-v3",
       "description": "Максимальная точность среди Whisper: 1550M параметров, 3.1 ГБ. Заметно медленнее turbo и склоннее к галлюцинациям на тишине — LocalASR это подавляет (VAD + анти-повторы). Бери, когда качество важнее времени, и есть 6+ ГБ RAM / 5+ ГБ VRAM.",
-      "recommended": false,
       "recommended_for": "Максимальная точность, когда время не критично",
-      "tags": ["мультиязычная", "максимум точности", "тяжёлая"],
-      "defaults": {"beam_size": 5, "batched": true}
+      "tags": [
+        "мультиязычная",
+        "максимум точности",
+        "тяжёлая"
+      ],
+      "defaults": {
+        "beam_size": 5,
+        "batched": true
+      },
+      "params_b": 1.55,
+      "quantization": "float16",
+      "released_year": 2023
     },
     {
       "id": "whisper-medium",
@@ -153,19 +255,39 @@
       "size_bytes": 1527906378,
       "ram_mb": 2600,
       "vram_mb": 3000,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "ko", "ar", "uk"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "ko",
+        "ar",
+        "uk"
+      ],
       "languages_note": "99 языков",
       "quality": 3,
       "speed": 3,
       "license": "MIT",
-      "released": "2022",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/Systran/faster-whisper-medium",
       "description": "769M параметров. По русской речи уступает turbo-моделям (это уже «классика»), но на 8 ГБ RAM идёт заметно быстрее large-v3. Разумный компромисс, если turbo-модели не поставились.",
-      "recommended": false,
       "recommended_for": "Компромисс скорости и качества на 8 ГБ RAM",
-      "tags": ["мультиязычная", "классика"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "мультиязычная",
+        "классика"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 0.769,
+      "quantization": "float16",
+      "released_year": 2022
     },
     {
       "id": "distil-large-v3",
@@ -175,19 +297,28 @@
       "size_bytes": 1512927867,
       "ram_mb": 2600,
       "vram_mb": 3000,
-      "languages": ["en"],
+      "languages": [
+        "en"
+      ],
       "languages_note": "Только английский (дистилляция)",
       "quality": 4,
       "speed": 5,
       "license": "MIT",
-      "released": "2024",
       "vendor": "Hugging Face (Distil-Whisper)",
       "url": "https://huggingface.co/Systran/faster-distil-whisper-large-v3",
       "description": "Дистиллированная English-only модель: точность в пределах 1.5% WER от large-v3 при 6-кратном ускорении. Для русских лекций НЕ подходит — включи, только если расшифровываешь английские доклады.",
-      "recommended": false,
       "recommended_for": "Английские лекции/доклады, максимум скорости",
-      "tags": ["english-only", "дистилляция"],
-      "defaults": {"beam_size": 3, "batched": true}
+      "tags": [
+        "english-only",
+        "дистилляция"
+      ],
+      "defaults": {
+        "beam_size": 3,
+        "batched": true
+      },
+      "params_b": 0.756,
+      "quantization": "float16",
+      "released_year": 2024
     },
     {
       "id": "qwen3-asr-1.7b",
@@ -197,19 +328,48 @@
       "size_bytes": 4700000000,
       "ram_mb": 9600,
       "vram_mb": 5200,
-      "languages": ["ru", "en", "zh", "de", "fr", "es", "pt", "it", "ko", "ja", "tr", "pl", "uk", "ar", "hi", "th", "vi", "nl", "cs", "el"],
+      "languages": [
+        "ru",
+        "en",
+        "zh",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "it",
+        "ko",
+        "ja",
+        "tr",
+        "pl",
+        "uk",
+        "ar",
+        "hi",
+        "th",
+        "vi",
+        "nl",
+        "cs",
+        "el"
+      ],
       "languages_note": "30 языков + 22 диалекта китайского; автоопределение языка",
       "quality": 5,
       "speed": 3,
       "license": "Apache-2.0",
-      "released": "2026",
       "vendor": "Qwen (Alibaba)",
       "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
       "description": "Флагман открытого ASR 2026 года: аудио-энкодер Whisper-типа + языковая модель Qwen3. На бенчмарках обходит открытые Whisper-сборки и конкурирует с коммерческими API. Пунктуация и нормальный текст из коробки, устойчив к шуму и музыке, понимает переключение языков. Требует torch и 10+ ГБ RAM (или GPU с 6+ ГБ VRAM).",
-      "recommended": false,
       "recommended_for": "Максимальная точность на любом языке, если железо позволяет",
-      "tags": ["флагман", "мультиязычная", "пунктуация", "torch"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "флагман",
+        "мультиязычная",
+        "пунктуация",
+        "torch"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 1.7,
+      "quantization": "bfloat16",
+      "released_year": 2026
     },
     {
       "id": "qwen3-asr-0.6b",
@@ -219,19 +379,48 @@
       "size_bytes": 1880000000,
       "ram_mb": 4000,
       "vram_mb": 2200,
-      "languages": ["ru", "en", "zh", "de", "fr", "es", "pt", "it", "ko", "ja", "tr", "pl", "uk", "ar", "hi", "th", "vi", "nl", "cs", "el"],
+      "languages": [
+        "ru",
+        "en",
+        "zh",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "it",
+        "ko",
+        "ja",
+        "tr",
+        "pl",
+        "uk",
+        "ar",
+        "hi",
+        "th",
+        "vi",
+        "nl",
+        "cs",
+        "el"
+      ],
       "languages_note": "30 языков; автоопределение языка",
       "quality": 4,
       "speed": 4,
       "license": "Apache-2.0",
-      "released": "2026",
       "vendor": "Qwen (Alibaba)",
       "url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
       "description": "Младшая модель семейства Qwen3-ASR: баланс точности и скорости, на русском заметно сильнее Whisper-medium и сопоставима с turbo-сборками при меньшем размере. Хороший выбор, если хочется «новое поколение», но 10 ГБ RAM под 1.7B нет.",
-      "recommended": false,
       "recommended_for": "Современная точность при умеренных требованиях (4–8 ГБ RAM)",
-      "tags": ["мультиязычная", "пунктуация", "torch", "баланс"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "мультиязычная",
+        "пунктуация",
+        "torch",
+        "баланс"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 0.6,
+      "quantization": "bfloat16",
+      "released_year": 2026
     },
     {
       "id": "gigaam-v3-e2e-rnnt",
@@ -242,19 +431,30 @@
       "size_bytes": 449000000,
       "ram_mb": 1600,
       "vram_mb": 1200,
-      "languages": ["ru"],
+      "languages": [
+        "ru"
+      ],
       "languages_note": "Только русский, зато best-in-class: пунктуация и нормализация текста",
       "quality": 5,
       "speed": 3,
       "license": "MIT",
-      "released": "2025",
       "vendor": "Sber (GigaAM)",
       "url": "https://huggingface.co/ai-sage/GigaAM-v3",
       "description": "Русская conformer-модель Сбера (220M): на новых доменах (колл-центры, голосовые, музыка) точнее предшественников на 30%, в очном сравнении с Whisper-large-v3 выигрывает 70:30. Версия e2e сразу даёт пунктуацию и нормализованный текст («три миллиона ₽» вместо «три миллиона рублей» наоборот). Всего 449 МБ — SOTA-русский для слабого железа. Требует torch.",
-      "recommended": true,
       "recommended_for": "Лучший русский текст при скромном железе: 449 МБ, пунктуация из коробки",
-      "tags": ["русский", "пунктуация", "флагман", "torch", "лёгкая"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "русский",
+        "пунктуация",
+        "флагман",
+        "torch",
+        "лёгкая"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 0.22,
+      "quantization": "float16",
+      "released_year": 2025
     },
     {
       "id": "gigaam-v3-e2e-ctc",
@@ -265,19 +465,30 @@
       "size_bytes": 442000000,
       "ram_mb": 1600,
       "vram_mb": 1200,
-      "languages": ["ru"],
+      "languages": [
+        "ru"
+      ],
       "languages_note": "Только русский; пунктуация и нормализация текста",
       "quality": 4,
       "speed": 4,
       "license": "MIT",
-      "released": "2025",
       "vendor": "Sber (GigaAM)",
       "url": "https://huggingface.co/ai-sage/GigaAM-v3",
       "description": "Та же русская база GigaAM v3, но с CTC-декодером: быстрее RNNT-версии, точность на десятые процента ниже. Выбирай, если важнее скорость прогона большой папки лекций.",
-      "recommended": false,
       "recommended_for": "Быстрый русский с пунктуацией на слабом железе",
-      "tags": ["русский", "пунктуация", "torch", "лёгкая", "быстрая"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "русский",
+        "пунктуация",
+        "torch",
+        "лёгкая",
+        "быстрая"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 0.22,
+      "quantization": "float16",
+      "released_year": 2025
     },
     {
       "id": "gigaam-multilingual-ctc",
@@ -288,19 +499,39 @@
       "size_bytes": 883000000,
       "ram_mb": 1600,
       "vram_mb": 1200,
-      "languages": ["ru", "kk", "ky", "uz", "en", "de", "fr", "es", "tr", "zh", "uk", "tg"],
+      "languages": [
+        "ru",
+        "kk",
+        "ky",
+        "uz",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "tr",
+        "zh",
+        "uk",
+        "tg"
+      ],
       "languages_note": "70+ языков; сильнее всего на ru, kk, ky, uz; английский — средне",
       "quality": 4,
       "speed": 4,
       "license": "MIT",
-      "released": "2026",
       "vendor": "Sber (GigaAM)",
       "url": "https://huggingface.co/ai-sage/GigaAM-Multilingual",
       "description": "Мультиязычная линия GigaAM (энкодер 220M, препрейнинг на 2 млн часов, 70+ языков): best-in-class WER на русском, казахском, киргизском и узбекском. Без пунктуации (CTC-декорирование посимвольно). Удобна для записей на языках СНГ, которые Whisper знает хуже.",
-      "recommended": false,
       "recommended_for": "Русский + языки СНГ (kk, ky, uz) без требования пунктуации",
-      "tags": ["мультиязычная", "torch", "языки СНГ"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "мультиязычная",
+        "torch",
+        "языки СНГ"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 0.22,
+      "quantization": "float32",
+      "released_year": 2026
     },
     {
       "id": "gigaam-multilingual-large-ctc",
@@ -311,19 +542,40 @@
       "size_bytes": 2342000000,
       "ram_mb": 3200,
       "vram_mb": 2600,
-      "languages": ["ru", "kk", "ky", "uz", "en", "de", "fr", "es", "tr", "zh", "uk", "tg"],
+      "languages": [
+        "ru",
+        "kk",
+        "ky",
+        "uz",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "tr",
+        "zh",
+        "uk",
+        "tg"
+      ],
       "languages_note": "70+ языков; максимальная точность линии Multilingual",
       "quality": 5,
       "speed": 3,
       "license": "MIT",
-      "released": "2026",
       "vendor": "Sber (GigaAM)",
       "url": "https://huggingface.co/ai-sage/GigaAM-Multilingual",
       "description": "Старший энкодер (600M) мультиязычной линии GigaAM: лучшая точность семейства на русском и языках СНГ ценой вдвое большего размера и памяти. Без пунктуации.",
-      "recommended": false,
       "recommended_for": "Максимальная точность на русском/СНГ без Whisper",
-      "tags": ["мультиязычная", "torch", "максимум точности", "языки СНГ"],
-      "defaults": {"beam_size": 1}
+      "tags": [
+        "мультиязычная",
+        "torch",
+        "максимум точности",
+        "языки СНГ"
+      ],
+      "defaults": {
+        "beam_size": 1
+      },
+      "params_b": 0.6,
+      "quantization": "float32",
+      "released_year": 2026
     },
     {
       "id": "ggml-large-v3-turbo-q5_0",
@@ -334,19 +586,39 @@
       "size_bytes": 574000000,
       "ram_mb": 1200,
       "vram_mb": 0,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "uk", "kk"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "uk",
+        "kk"
+      ],
       "languages_note": "99 языков",
       "quality": 4,
       "speed": 4,
       "license": "MIT",
-      "released": "2024",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo-q5_0.bin",
       "description": "Квантованная q5_0 turbo-модель для whisper.cpp: 574 МБ на диске и ~900 МБ RAM при точности, близкой к full turbo. Лучший вариант «большая модель на слабом железе»: работает на CPU, умеет использовать GPU (если pywhispercpp собран с CUDA).",
-      "recommended": true,
       "recommended_for": "Точная расшифровка при 4–8 ГБ RAM без GPU",
-      "tags": ["лёгкая", "квантованная", "whisper.cpp"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "лёгкая",
+        "квантованная",
+        "whisper.cpp"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 0.809,
+      "quantization": "q5_0",
+      "released_year": 2024
     },
     {
       "id": "ggml-large-v3-turbo",
@@ -357,19 +629,37 @@
       "size_bytes": 1624000000,
       "ram_mb": 2600,
       "vram_mb": 0,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "uk"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "uk"
+      ],
       "languages_note": "99 языков",
       "quality": 5,
       "speed": 3,
       "license": "MIT",
-      "released": "2024",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo.bin",
       "description": "Полная (не квантованная) turbo-модель в формате GGML. Точнее q5_0 на несколько десятых процента, но втрое тяжелее по памяти.",
-      "recommended": false,
       "recommended_for": "whisper.cpp с максимальным качеством",
-      "tags": ["whisper.cpp", "турбо"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "whisper.cpp",
+        "турбо"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 0.809,
+      "quantization": "float16",
+      "released_year": 2024
     },
     {
       "id": "ggml-large-v3-q5_0",
@@ -380,19 +670,41 @@
       "size_bytes": 1140000000,
       "ram_mb": 2000,
       "vram_mb": 0,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "uk", "kk", "hy", "ka"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "uk",
+        "kk",
+        "hy",
+        "ka"
+      ],
       "languages_note": "99 языков",
       "quality": 4,
       "speed": 2,
       "license": "MIT",
-      "released": "2023",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-q5_0.bin",
       "description": "Квантованная полная large-v3: 1.1 ГБ вместо 2.9 ГБ. Медленнее turbo (32 слоя декодера), зато максимальное языковое покрытие среди «лёгких» вариантов.",
-      "recommended": false,
       "recommended_for": "Редкие языки при ограниченном RAM",
-      "tags": ["whisper.cpp", "квантованная", "мультиязычная"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "whisper.cpp",
+        "квантованная",
+        "мультиязычная"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 1.55,
+      "quantization": "q5_0",
+      "released_year": 2023
     },
     {
       "id": "ggml-medium",
@@ -403,19 +715,37 @@
       "size_bytes": 1533000000,
       "ram_mb": 2600,
       "vram_mb": 0,
-      "languages": ["ru", "en", "de", "fr", "es", "it", "pl", "tr", "zh", "ja", "uk"],
+      "languages": [
+        "ru",
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pl",
+        "tr",
+        "zh",
+        "ja",
+        "uk"
+      ],
       "languages_note": "99 языков",
       "quality": 3,
       "speed": 2,
       "license": "MIT",
-      "released": "2022",
       "vendor": "OpenAI (Whisper)",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-medium.bin",
       "description": "Средняя модель в GGML. Имеет смысл только если faster-whisper по какой-то причине не работает на твоём железе.",
-      "recommended": false,
       "recommended_for": "Запасной вариант под whisper.cpp",
-      "tags": ["whisper.cpp", "классика"],
-      "defaults": {"beam_size": 5}
+      "tags": [
+        "whisper.cpp",
+        "классика"
+      ],
+      "defaults": {
+        "beam_size": 5
+      },
+      "params_b": 0.769,
+      "quantization": "float16",
+      "released_year": 2022
     },
     {
       "id": "vosk-ru-0.42",
@@ -425,19 +755,29 @@
       "size_bytes": 1900000000,
       "ram_mb": 2500,
       "vram_mb": 0,
-      "languages": ["ru"],
+      "languages": [
+        "ru"
+      ],
       "languages_note": "Только русский",
       "quality": 3,
       "speed": 5,
       "license": "Apache-2.0",
-      "released": "2021 (поддерживается)",
       "vendor": "Alpha Cephei (Vosk)",
       "url": "https://alphacephei.com/vosk/models",
       "description": "Большая русская Kaldi-модель. WER ≈ 4.5% на аудиокнигах и 11–20% на живой речи (YouTube/звонки) — на лекциях с шумом сильно уступает Whisper. Зато расшифровывает быстрее реального времени даже на старом CPU и не требует GPU. Без пунктуации и заглавных букв (LocalASR расставит минимально).",
-      "recommended": false,
       "recommended_for": "Слабый CPU без GPU: быстрее реального времени любой ценой",
-      "tags": ["русский", "лёгкая по CPU", "без пунктуации"],
-      "defaults": {"beam_size": 1, "batched": false}
+      "tags": [
+        "русский",
+        "лёгкая по CPU",
+        "без пунктуации"
+      ],
+      "defaults": {
+        "beam_size": 1,
+        "batched": false
+      },
+      "params_b": null,
+      "quantization": "",
+      "released_year": 2021
     }
   ]
 }

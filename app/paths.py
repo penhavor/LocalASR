@@ -225,6 +225,17 @@ def human_size(num_bytes: Optional[float]) -> str:
     return f"{value:.1f} ТБ"
 
 
+def plural_ru(count: int, one: str, few: str, many: str) -> str:
+    """Русская плюрализация: 1 файл, 2 файла, 5 файлов, 11 файлов, 21 файл."""
+    count = abs(int(count))
+    mod10, mod100 = count % 10, count % 100
+    if mod10 == 1 and mod100 != 11:
+        return one
+    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+        return few
+    return many
+
+
 def free_space(path: Path) -> Optional[int]:
     try:
         return shutil.disk_usage(str(path)).free

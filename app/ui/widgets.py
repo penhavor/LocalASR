@@ -426,8 +426,6 @@ class ModelCard(QFrame):
         self.title.setWordWrap(True)
         top.addWidget(self.title, stretch=1)
 
-        if self.entry.recommended:
-            top.addWidget(chip("★ рекомендуем", "BadgeRecommended"))
         if self.entry.installed:
             top.addWidget(chip("✓ установлена", "BadgeInstalled"))
         root.addLayout(top)
@@ -439,6 +437,22 @@ class ModelCard(QFrame):
         memory = self.entry.memory_text
         if memory != "—":
             chips.addWidget(chip(f"🧠 {memory}", "BadgeEngine"))
+        if self.entry.params_b:
+            params_chip = chip(f"⚖ {self.entry.params_text} параметров", "BadgeEngine")
+            params_chip.setToolTip("Число обучаемых параметров модели")
+            chips.addWidget(params_chip)
+        if self.entry.quantization:
+            quant_chip = chip(f"🗜 {self.entry.quantization_text}", "BadgeEngine")
+            quant_chip.setToolTip(
+                "Формат хранения весов (квантование).\n"
+                "int8/q5_0 — компактнее и быстрее, чуть менее точно;\n"
+                "float16/bfloat16 — полный формат качества."
+            )
+            chips.addWidget(quant_chip)
+        if self.entry.released_year:
+            year_chip = chip(f"📅 {self.entry.released_year}", "BadgeEngine")
+            year_chip.setToolTip("Год выпуска весов модели")
+            chips.addWidget(year_chip)
         for tag in self.entry.tags[:3]:
             chips.addWidget(chip(tag, "BadgeEngine"))
         root.addLayout(chips)

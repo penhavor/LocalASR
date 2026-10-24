@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 #  Структуры
@@ -101,11 +101,38 @@ ASTERISKS = re.compile(r"\*{2,}")
 # --------------------------------------------------------------------------- #
 
 
+def unwrap_repr_container(text: str) -> str:
+    """«('текст', [45, 33, …])» -> «текст».
+
+    Защита второго эшелона: если какой-то движок/версия модели пронесла в вывод
+    repr кортежа/списка (текст + индексы токенов), вытаскиваем строковую часть.
+    Срабатывает ТОЛЬКО когда строка целиком является литералом-контейнером,
+    начинающимся с кавычки, — обычный текст не затрагивается.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(("('", '(\"', "['", '[\"')):
+        return text
+    if not stripped.endswith((")", "]")):
+        return text
+    try:
+        import ast
+
+        obj = ast.literal_eval(stripped)
+    except Exception:  # noqa: BLE001 - не литерал => не трогаем
+        return text
+    if isinstance(obj, (tuple, list)):
+        strings = [part for part in obj if isinstance(part, str)]
+        if strings:
+            return " ".join(strings)
+    return text
+
+
 def clean_text(text: str) -> str:
     """Убирает шум из строки (без анализа повторов между сегментами)."""
     if not text:
         return ""
-    cleaned = unicodedata.normalize("NFC", text)
+    cleaned = unwrap_repr_container(text)
+    cleaned = unicodedata.normalize("NFC", cleaned)
     cleaned = LANGUAGE_TOKEN.sub(" ", cleaned)
     cleaned = NOTES.sub(" ", cleaned)
     cleaned = EMOJI.sub(" ", cleaned)
@@ -150,7 +177,16 @@ def _collapse_repeated_tail(text: str, min_chunk: int = 4, max_repeats: int = 40
 
 
 def squeeze_repeats(text: str) -> str:
-    """«это это это важно» -> «это важно», «фраза фраза фраза» -> «фраза»."""
+    """«это это это важно» -> «это важно», «фраза фраза фраза» -> «фраза».
+
+    Дополнительно снимает декодерные «петли» внутри сегмента (важно для
+    CTC/RNNT-моделей БЕЗ пунктуации, где весь сегмент — одно «предложение»
+    и межпредложенческая дедупликация бессильна):
+      * соседние дубли-прогоны («делаем раствор добавляем усилитель Делаем
+        раствор добавляем усилитель и это все…»);
+      * точные повторы окна в другом месте сегмента;
+      * короткое эхо в хвосте («…финальное взвешивание … финальное взвешивание»).
+    """
     def repl(match: "re.Match") -> str:
         return match.group(1)
 
@@ -161,8 +197,152 @@ def squeeze_repeats(text: str) -> str:
         if current == previous:
             break
         previous = current
+    current = squeeze_adjacent_spans(current)
+    current = drop_repeat_windows(current)
     collapsed = _collapse_repeated_tail(current)
+    collapsed = drop_tail_echo(collapsed)
     return re.sub(r"\s{2,}", " ", collapsed).strip()
+
+
+def _norm_token(token: str) -> str:
+    return re.sub(r"\W+", "", token.lower())
+
+
+def _seq_ratio(a: List[str], b: List[str]) -> float:
+    import difflib
+
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+def squeeze_adjacent_spans(
+    text: str, min_span: int = 5, max_span: int = 40, threshold: float = 0.85
+) -> str:
+    """Схлопывает соседние дубль-прогоны: «X X …» -> «X …».
+
+    X — подряд идущий прогон из >= min_span слов, повторенный сразу же
+    (допускается деградация пары токенов: «…уровень паш в норму» /
+    «…уровень пш в норму» — это петля декодера, а не речь). Легитимные
+    параллельные конструкции под это не попадают: они НЕ смежные и/или
+    отличаются больше, чем на 15% токенов.
+    """
+    tokens = text.split()
+    norms = [_norm_token(t) for t in tokens]
+    changed = True
+    while changed:
+        changed = False
+        n = len(tokens)
+        for size in range(min(max_span, n // 2), min_span - 1, -1):
+            hit = False
+            for i in range(n - 2 * size + 1):
+                a = norms[i:i + size]
+                b = norms[i + size:i + 2 * size]
+                # граничные токены прогонов должны совпадать: иначе «петля»
+                # на самом деле съехавшее окно и удаление склеит чужие слова
+                if a[0] != b[0] or a[-1] != b[-1]:
+                    continue
+                if _seq_ratio(a, b) >= threshold:
+                    del tokens[i + size:i + 2 * size]
+                    del norms[i + size:i + 2 * size]
+                    changed = hit = True
+                    n = len(tokens)
+                    break
+            if hit:
+                break
+    return " ".join(tokens)
+
+
+def drop_repeat_windows(text: str, min_span: int = 4, max_span: int = 40) -> str:
+    """Убирает ТОЧНЫЙ повтор окна слов в другом месте сегмента (второе вхождение).
+
+    «…выглядит в макро Вот так теперь этот коврик выглядит в макро у каждой…»
+    Легитимные повторы коротких фраз (< min_span слов) сохраняются.
+    """
+    tokens = text.split()
+    norms = [_norm_token(t) for t in tokens]
+    removed = [False] * len(tokens)
+    for size in range(max_span, min_span - 1, -1):
+        seen: Dict[tuple, int] = {}
+        for i in range(len(tokens) - size + 1):
+            if any(removed[i:i + size]):
+                continue
+            key = tuple(norms[i:i + size])
+            if not any(key):
+                continue
+            first = seen.get(key)
+            if first is None:
+                seen[key] = i
+            elif i >= first + size:
+                for k in range(i, i + size):
+                    removed[k] = True
+    if not any(removed):
+        return text
+    return " ".join(t for t, r in zip(tokens, removed) if not r)
+
+
+def drop_tail_echo(text: str, min_span: int = 1, max_span: int = 5, min_gap: int = 3) -> str:
+    """Убирает точное эхо в хвосте: «финальное взвешивание … финальное взвешивание».
+
+    Однословное эхо («…съёмки этого видео Клиентка») снимается только при
+    большом отступе, чтобы не резать легитимные короткие концовки.
+    """
+    tokens = text.split()
+    norms = [_norm_token(t) for t in tokens]
+    n = len(tokens)
+    for size in range(max_span, min_span - 1, -1):
+        gap_needed = min_gap + 1 if size == 1 else min_gap
+        if n - 2 * size < gap_needed:
+            continue
+        tail = tuple(norms[n - size:])
+        if not any(tail):
+            continue
+        for i in range(0, n - size - gap_needed + 1):
+            # однословное эхо снимаем только когда слово открывало сегмент
+            # («Клиентка … видео Клиентка»); иное — легитимное последнее слово
+            if size == 1 and i != 0:
+                continue
+            if tuple(norms[i:i + size]) == tail and (n - size) - (i + size) >= gap_needed:
+                return " ".join(tokens[:n - size])
+    return text
+
+
+def trim_echo_prefix(text: str, prev_norms: List[str], min_span: int = 3, max_span: int = 40) -> str:
+    """Срезает начало сегмента, повторяющее конец предыдущего.
+
+    Петля декодера часто рвётся ровно по границе куска: хвост сегмента A и
+    голова сегмента B — один и тот же прогон («…добавляем усилитель» |
+    «Делаем волшебный раствор добавляем усилитель и это все…»). Внутри
+    каждого сегмента повтора при этом нет, поэтому ловим только на стыке.
+    """
+    if not prev_norms:
+        return text
+    tokens = text.split()
+    norms = [_norm_token(t) for t in tokens]
+    n, m = len(norms), len(prev_norms)
+    for size in range(min(max_span, n - 1, m), min_span - 1, -1):
+        a = prev_norms[m - size:]
+        b = norms[:size]
+        if a[0] != b[0] or a[-1] != b[-1]:
+            continue
+        ratio = 1.0 if a == b else _seq_ratio(a, b)
+        threshold = 0.9 if size < 5 else 0.85
+        if ratio >= threshold:
+            return " ".join(tokens[size:])
+    return text
+
+
+def is_echo_fragment(text: str, prev_norms: List[str], max_words: int = 4) -> bool:
+    """Короткий огрызок (<= max_words слов), целиком повторяющий начало или
+    конец предыдущего сегмента («…финальное взвешивание» | «финальное
+    взвешивание»). Раньше такие проходили защитой «предложения короче 3 слов
+    не трогать» — но та защита про реплики диалога («Да.»), а здесь точное
+    совпадение с соседом, т.е. петля."""
+    norms = [_norm_token(t) for t in text.split()]
+    if not (1 <= len(norms) <= max_words) or not prev_norms:
+        return False
+    m = len(prev_norms)
+    if m < len(norms):
+        return False
+    return prev_norms[:len(norms)] == norms or prev_norms[m - len(norms):] == norms
 
 
 def _sentence_norms(text: str) -> List[str]:
@@ -292,8 +472,9 @@ def sanitize_segments(
     Возвращает НОВЫЙ список (исходные сегменты помечаются флагом dropped).
     """
     result: List[Segment] = []
-    recent_texts: List[str] = []
+    recent_texts: List[tuple] = []   # (нормализованный текст, конец сегмента)
     recent_sentences: List[str] = []   # скользящее окно для межсегментных эхо-повторов
+    prev_norms: List[str] = []         # токены предыдущего ПРИНЯТОГО сегмента (стыковые петли)
 
     for segment in segments:
         original = segment.text or ""
@@ -302,6 +483,9 @@ def sanitize_segments(
         if aggressive:
             text = squeeze_repeats(text)
             text = squeeze_duplicate_sentences(text, context=recent_sentences)
+            # петля, рваная по границе кусков: голова сегмента повторяет хвост
+            # предыдущего — срезаем это общее «кольцо»
+            text = trim_echo_prefix(text, prev_norms)
             for sentence_norm in _sentence_norms(text):
                 if len(sentence_norm.split()) >= 3:
                     recent_sentences.append(sentence_norm)
@@ -312,6 +496,11 @@ def sanitize_segments(
         if not text or is_junk_segment(text):
             segment.dropped = True
             segment.drop_reason = "мусор/пусто"
+            continue
+
+        if aggressive and is_echo_fragment(text, prev_norms):
+            segment.dropped = True
+            segment.drop_reason = "огрызок-эхо предыдущего сегмента"
             continue
 
         # технические пороги качества (есть не у всех движков)
@@ -331,10 +520,16 @@ def sanitize_segments(
 
         # повторы между сегментами (типичная петля Whisper/GigaAM на шуме):
         # либо высокая схожесть, либо один текст почти целиком содержится
-        # в другом (короткий «эхо-сегмент» после длинного)
+        # в другом (короткий «эхо-сегмент» после длинного).
+        # ВАЖНО: петля идёт стык-в-стык (gap ~ 0), а легитимные короткие
+        # реплики диалога («Да.» … «Да.») разделены секундами/минутами —
+        # поэтому для сегментов в 1-2 слова требуем временной близости.
         normalized = re.sub(r"\W+", " ", text.lower()).strip()
+        short_segment = len(text.split()) <= 2
         duplicate = False
-        for previous in recent_texts[-window:]:
+        for previous, prev_end in recent_texts[-window:]:
+            if short_segment and (segment.start - prev_end) > SHORT_ECHO_GAP_SECONDS:
+                continue
             if _similarity(normalized, previous) >= duplicate_similarity:
                 duplicate = True
                 break
@@ -354,9 +549,11 @@ def sanitize_segments(
             segment.drop_reason = "повтор предыдущего сегмента"
             continue
 
-        recent_texts.append(normalized)
+        recent_texts.append((normalized, segment.end))
         if len(recent_texts) > window * 3:
             recent_texts = recent_texts[-window * 2:]
+        # запоминаем токены принятого сегмента для стыкового эхо-детектора
+        prev_norms = [_norm_token(t) for t in text.split()][-80:]
         result.append(segment)
 
     return result
@@ -366,6 +563,8 @@ def sanitize_segments(
 #  Сборка текста
 # --------------------------------------------------------------------------- #
 
+SHORT_ECHO_GAP_SECONDS = 2.0    # короткая реплика («Да.») считается петлёй,
+                                # только если прозвучала стык-в-стык с такой же
 PARAGRAPH_GAP_SECONDS = 1.6     # пауза длиннее — новый абзац
 PARAGRAPH_MAX_CHARS = 900       # и по длине тоже режем
 SENTENCE_END = ".!?…"

@@ -1,13 +1,14 @@
-"""Панель моделей: поиск, мощные фильтры, сортировка, карточки моделей."""
+"""Панель моделей: поиск, фильтры (включая числовые диапазоны), сортировка, карточки."""
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSize, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -15,42 +16,48 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from ..constants import ENGINE_LABELS, ENGINES
 from ..core.models_catalog import ModelCatalog, ModelEntry
+from ..settings import Settings
 from . import compat
 from .widgets import ModelCard, make_label
 
-GB = 1024 ** 3
-
-# Весовые категории: (подпись, минимум байт, максимум байт)
-SIZE_CLASSES = [
-    ("", 0, 0),
-    ("до 500 МБ", 0, 500 * 1024 ** 2),
-    ("500 МБ – 1 ГБ", 500 * 1024 ** 2, 1 * GB),
-    ("1 – 2 ГБ", 1 * GB, 2 * GB),
-    ("2 – 4 ГБ", 2 * GB, 4 * GB),
-    ("больше 4 ГБ", 4 * GB, 0),
-]
-
-RAM_CLASSES = [
-    ("", 0, 0),
-    ("до 2 ГБ RAM", 0, 2048),
-    ("2 – 4 ГБ RAM", 2048, 4096),
-    ("4 – 8 ГБ RAM", 4096, 8192),
-    ("больше 8 ГБ RAM", 8192, 0),
-]
-
+# Сортировки: (ключ, подпись). Числовые характеристики sorts поддерживают
+# диапазоны-фильтры (см. _apply_filters), чтобы список не зависел от
+# «зашитых» весовых категорий и оставался гибким в любом году.
 SORTS = [
-    ("recommended", "Сначала рекомендуемые"),
-    ("quality", "По точности"),
+    ("default", "По умолчанию"),
+    ("quality", "По точности (выше → ниже)"),
+    ("speed", "По скорости (быстрее → медленнее)"),
     ("size", "По размеру (меньше → больше)"),
-    ("speed", "По скорости"),
-    ("name", "По названию"),
+    ("ram", "По памяти (меньше → больше)"),
+    ("params", "По числу параметров (больше → меньше)"),
+    ("year", "По году релиза (новые → старые)"),
+    ("name", "По названию (А → Я)"),
 ]
+
+
+def _range_row(label_text: str, tooltip: str, lo_widget, hi_widget, suffix: str) -> QWidget:
+    """Строка фильтра-диапазона: «подпись: [от] — [до]»."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    for widget in (lo_widget, hi_widget):
+        widget.setSpecialValueText("—")
+        widget.setToolTip(tooltip)
+        widget.setSuffix(suffix)
+    layout.addWidget(lo_widget)
+    dash = QLabel("—")
+    dash.setObjectName("Muted")
+    layout.addWidget(dash)
+    layout.addWidget(hi_widget)
+    return row
 
 
 class ModelListPanel(QFrame):
@@ -63,14 +70,27 @@ class ModelListPanel(QFrame):
     customRequested = Signal()
     refreshRequested = Signal()
 
-    def __init__(self, catalog: ModelCatalog, hardware: Optional[dict] = None, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        catalog: ModelCatalog,
+        hardware: Optional[dict] = None,
+        settings: Optional[Settings] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("SidePanel")
         self.catalog = catalog
         self.hardware = hardware or {}
+        self.settings = settings
         self._cards: Dict[str, ModelCard] = {}
+        # дебаунс сохранения состояния фильтров в settings.json
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_filters)
 
         self._build_ui()
+        self._load_filters()
         self.rebuild()
 
     # ------------------------------------------------------------------ #
@@ -81,6 +101,7 @@ class ModelListPanel(QFrame):
 
         header = QHBoxLayout()
         title = make_label("Модели", "H1")
+        title.setToolTip("Каталог моделей распознавания: скачанные и доступные для загрузки")
         header.addWidget(title)
         header.addStretch(1)
 
@@ -89,10 +110,9 @@ class ModelListPanel(QFrame):
         root.addLayout(header)
 
         subtitle = make_label(
-            "По умолчанию ничего не установлено. Скачай модель, затем выбери её — "
-            "кликом по карточке (или в выпадающем списке «Модель» в блоке «3 · Работа»: "
-            "там перечислены ВСЕ скачанные модели, выбрать можно одну). "
-            "Пока модель не выбрана, кнопка «РАБОТАТЬ» неактивна.",
+            "Скачай модель, затем выбери её — кликом по карточке или в списке "
+            "«Модель» в блоке «3 · Работа». Пока модель не выбрана, кнопка "
+            "«РАБОТАТЬ» неактивна.",
             "Dim",
             word_wrap=True,
         )
@@ -137,33 +157,71 @@ class ModelListPanel(QFrame):
         filters_layout.addWidget(self._filter_label("Производитель"), row, 0)
         filters_layout.addWidget(self.vendor_filter, row, 1)
 
-        self.size_filter = QComboBox()
-        self.size_filter.setToolTip(
-            "Весовой класс модели — сколько места займёт скачивание на диске. "
-            "Прикидывай по свободному месту и скорости сети."
-        )
-        self.size_filter.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Размер"), row, 2)
-        filters_layout.addWidget(self.size_filter, row, 3)
-
-        row += 1
         self.quality_filter = QComboBox()
         self.quality_filter.setToolTip(
-            "Минимальная оценка точности (звёзды в карточке). "
+            "Минимальная оценка точности (звёзды в карточке).\n"
             "★★★★ и выше — модели, пригодные для конспекта без вычитки."
         )
         self.quality_filter.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Точность"), row, 0)
-        filters_layout.addWidget(self.quality_filter, row, 1)
+        filters_layout.addWidget(self._filter_label("Точность"), row, 2)
+        filters_layout.addWidget(self.quality_filter, row, 3)
 
-        self.ram_filter = QComboBox()
-        self.ram_filter.setToolTip(
-            "Сколько оперативной памяти модель ест в работе. "
-            "Смотри свою свободную RAM в статус-баре внизу окна."
+        # --- числовые диапазоны (гибкие, не привязаны к «весовым категориям») --- #
+        row += 1
+        self.size_lo = self._spin(0, 1_000_000, " МБ")
+        self.size_hi = self._spin(0, 1_000_000, " МБ")
+        filters_layout.addWidget(self._filter_label("Размер, МБ"), row, 0)
+        filters_layout.addWidget(
+            _range_row(
+                "Размер", 
+                "Диапазон размера файла модели в мегабайтах.\n"
+                "«—» = без ограничения. Например: от 500 до 2000.",
+                self.size_lo, self.size_hi, " МБ",
+            ),
+            row, 1, 1, 3,
         )
-        self.ram_filter.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Память"), row, 2)
-        filters_layout.addWidget(self.ram_filter, row, 3)
+
+        row += 1
+        self.ram_lo = self._spin(0, 200_000, " МБ")
+        self.ram_hi = self._spin(0, 200_000, " МБ")
+        filters_layout.addWidget(self._filter_label("Память, МБ"), row, 0)
+        filters_layout.addWidget(
+            _range_row(
+                "Память",
+                "Диапазон потребления оперативной памяти в работе.\n"
+                "Свою свободную RAM смотри в статус-баре внизу окна.",
+                self.ram_lo, self.ram_hi, " МБ",
+            ),
+            row, 1, 1, 3,
+        )
+
+        row += 1
+        self.year_lo = self._spin(2015, 2100, "")
+        self.year_hi = self._spin(2015, 2100, "")
+        filters_layout.addWidget(self._filter_label("Год релиза"), row, 0)
+        filters_layout.addWidget(
+            _range_row(
+                "Год релиза",
+                "Диапазон годов выпуска весов модели (любые числа).\n"
+                "Модели с неизвестным годом под фильтр не попадут.",
+                self.year_lo, self.year_hi, "",
+            ),
+            row, 1, 1, 3,
+        )
+
+        row += 1
+        self.params_lo = self._dspin(0.0, 100.0, " млрд")
+        self.params_hi = self._dspin(0.0, 100.0, " млрд")
+        filters_layout.addWidget(self._filter_label("Параметры"), row, 0)
+        filters_layout.addWidget(
+            _range_row(
+                "Параметры",
+                "Диапазон числа параметров модели (в миллиардах).\n"
+                "Больше параметров — обычно точнее, но медленнее и прожорливее.",
+                self.params_lo, self.params_hi, " млрд",
+            ),
+            row, 1, 1, 3,
+        )
 
         row += 1
         self.sort_combo = QComboBox()
@@ -175,8 +233,8 @@ class ModelListPanel(QFrame):
         self.reset_button = QPushButton("Сбросить")
         self.reset_button.setObjectName("Ghost")
         self.reset_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.reset_button.setToolTip("Вернуть все фильтры и поиск в исходное состояние")
-        self.reset_button.clicked.connect(self._reset_filters)
+        self.reset_button.setToolTip("Вернуть все фильтры, поиск и сортировку в исходное состояние")
+        self.reset_button.clicked.connect(self.reset_filters_to_defaults)
         filters_layout.addWidget(self.reset_button, row, 3)
 
         row += 1
@@ -238,19 +296,41 @@ class ModelListPanel(QFrame):
 
         self._fill_filter_options()
 
+    # -- конструкторы виджетов диапазонов -------------------------------- #
+    @staticmethod
+    def _spin(minimum: int, maximum: int, suffix: str) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setSuffix(suffix)
+        spin.setValue(minimum)          # минимум = specialValueText «—»
+        spin.setKeyboardTracking(False)
+        spin.setCursor(compat.CURSOR_POINTING_HAND)
+        return spin
+
+    @staticmethod
+    def _dspin(minimum: float, maximum: float, suffix: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.1)
+        spin.setSuffix(suffix)
+        spin.setValue(minimum)
+        spin.setKeyboardTracking(False)
+        spin.setCursor(compat.CURSOR_POINTING_HAND)
+        return spin
+
     @staticmethod
     def _filter_label(text: str) -> QLabel:
         label = make_label(text, "Muted")
         label.setAlignment(compat.ALIGN_RIGHT_VCENTER)
-        # иначе в узкой панелиGridLayout сжимает подпись и она обрезается слева
+        label.setToolTip("Фильтр каталога моделей")
+        # иначе в узкой панели GridLayout сжимает подпись и она обрезается слева
         label.setMinimumWidth(label.sizeHint().width())
         return label
 
     # ------------------------------------------------------------------ #
     def minimumSizeHint(self):
         """Панель может сужаться до 340 px: фильтры и карточки переносятся."""
-        from PySide6.QtCore import QSize
-
         return QSize(340, 420)
 
     def _fill_filter_options(self) -> None:
@@ -262,20 +342,119 @@ class ModelListPanel(QFrame):
         for vendor in vendors:
             self.vendor_filter.addItem(vendor, vendor)
 
-        self.size_filter.addItem("Любой размер", "")
-        for title, _lo, _hi in SIZE_CLASSES[1:]:
-            self.size_filter.addItem(title, title)
-
         self.quality_filter.addItem("Любая точность", 0)
         for stars in (3, 4, 5):
             self.quality_filter.addItem("★" * stars + " и выше", stars)
 
-        self.ram_filter.addItem("Любая память", "")
-        for title, _lo, _hi in RAM_CLASSES[1:]:
-            self.ram_filter.addItem(title, title)
-
         for key, title in SORTS:
             self.sort_combo.addItem(title, key)
+
+        # диапазоны меняются с клавиатуры/стрелок — реагируем на оба события
+        for spin in (self.size_lo, self.size_hi, self.ram_lo, self.ram_hi,
+                     self.year_lo, self.year_hi):
+            spin.valueChanged.connect(self._apply_filters)
+        for spin in (self.params_lo, self.params_hi):
+            spin.valueChanged.connect(self._apply_filters)
+
+    # ------------------------------------------------------------------ #
+    #  Сохранение/восстановление состояния фильтров (settings.json)
+    # ------------------------------------------------------------------ #
+    def _filters_dict(self) -> dict:
+        return {
+            "engine": self.engine_filter.currentData() or "",
+            "vendor": self.vendor_filter.currentData() or "",
+            "sort": self.sort_combo.currentData() or "default",
+            "only_installed": self.only_installed.isChecked(),
+            "only_russian": self.only_russian.isChecked(),
+            "min_quality": int(self.quality_filter.currentData() or 0),
+            "size_mb_lo": int(self.size_lo.value()),
+            "size_mb_hi": int(self.size_hi.value()),
+            "ram_mb_lo": int(self.ram_lo.value()),
+            "ram_mb_hi": int(self.ram_hi.value()),
+            "year_lo": int(self.year_lo.value()),
+            "year_hi": int(self.year_hi.value()),
+            "params_lo": float(self.params_lo.value()),
+            "params_hi": float(self.params_hi.value()),
+        }
+
+    def _load_filters(self) -> None:
+        if self.settings is None:
+            return
+        state = dict(self.settings.catalog_filters or {})
+        for widget, key, setter in (
+            (self.engine_filter, "engine", "data"),
+            (self.vendor_filter, "vendor", "data"),
+            (self.sort_combo, "sort", "data"),
+        ):
+            value = state.get(key)
+            if value:
+                index = widget.findData(value)
+                if index >= 0:
+                    widget.blockSignals(True)
+                    widget.setCurrentIndex(index)
+                    widget.blockSignals(False)
+        for widget, key in (
+            (self.only_installed, "only_installed"),
+            (self.only_russian, "only_russian"),
+        ):
+            if key in state:
+                widget.blockSignals(True)
+                widget.setChecked(bool(state[key]))
+                widget.blockSignals(False)
+        index = self.quality_filter.findData(int(state.get("min_quality") or 0))
+        if index >= 0:
+            self.quality_filter.blockSignals(True)
+            self.quality_filter.setCurrentIndex(index)
+            self.quality_filter.blockSignals(False)
+        for widget, key in (
+            (self.size_lo, "size_mb_lo"), (self.size_hi, "size_mb_hi"),
+            (self.ram_lo, "ram_mb_lo"), (self.ram_hi, "ram_mb_hi"),
+            (self.year_lo, "year_lo"), (self.year_hi, "year_hi"),
+            (self.params_lo, "params_lo"), (self.params_hi, "params_hi"),
+        ):
+            if key in state:
+                widget.blockSignals(True)
+                try:
+                    widget.setValue(type(widget.value())(state[key]))
+                except (TypeError, ValueError):
+                    pass
+                widget.blockSignals(False)
+
+    def _save_filters(self) -> None:
+        if self.settings is None:
+            return
+        self.settings.catalog_filters = self._filters_dict()
+        self.settings.save()
+
+    def _schedule_save_filters(self) -> None:
+        self._save_timer.start()
+
+    def reset_filters_to_defaults(self) -> None:
+        """Сброс фильтров (кнопка «Сбросить» и общий сброс настроек)."""
+        for widget in (
+            self.engine_filter, self.vendor_filter, self.quality_filter, self.sort_combo,
+        ):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(0)
+            widget.blockSignals(False)
+        for widget in (
+            self.size_lo, self.size_hi, self.ram_lo, self.ram_hi,
+            self.year_lo, self.year_hi, self.params_lo, self.params_hi,
+        ):
+            widget.blockSignals(True)
+            widget.setValue(widget.minimum())
+            widget.blockSignals(False)
+        self.only_installed.blockSignals(True)
+        self.only_installed.setChecked(False)
+        self.only_installed.blockSignals(False)
+        self.only_russian.blockSignals(True)
+        self.only_russian.setChecked(True)
+        self.only_russian.blockSignals(False)
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self._apply_filters()
+        self._save_filters()
 
     # ------------------------------------------------------------------ #
     def rebuild(self) -> None:
@@ -320,53 +499,50 @@ class ModelListPanel(QFrame):
         self.hardware = hardware or {}
 
     # ------------------------------------------------------------------ #
-    def _reset_filters(self) -> None:
-        self.search.clear()
-        self.engine_filter.setCurrentIndex(0)
-        self.vendor_filter.setCurrentIndex(0)
-        self.size_filter.setCurrentIndex(0)
-        self.quality_filter.setCurrentIndex(0)
-        self.ram_filter.setCurrentIndex(0)
-        self.sort_combo.setCurrentIndex(0)
-        self.only_installed.setChecked(False)
-        self.only_russian.setChecked(True)
-
     def _sort_key(self, entry: ModelEntry):
-        mode = self.sort_combo.currentData() or "recommended"
+        mode = self.sort_combo.currentData() or "default"
         if mode == "quality":
             return (-entry.quality, -entry.speed, entry.size_bytes or 0)
         if mode == "size":
             return (entry.size_bytes or 0, -entry.quality)
+        if mode == "ram":
+            return (entry.ram_mb or 0, -entry.quality)
+        if mode == "params":
+            return (-(entry.params_b or 0.0), -entry.quality)
+        if mode == "year":
+            return (-entry.released_year, -entry.quality)
         if mode == "speed":
             return (-entry.speed, -entry.quality)
         if mode == "name":
             return (entry.name.lower(),)
         return (
             0 if entry.installed else 1,
-            0 if entry.recommended else 1,
             0 if entry.supports_russian else 1,
             -entry.quality,
             entry.ram_mb or 99_999,
         )
 
     def _apply_filters(self, *_args) -> None:
+        self._schedule_save_filters()
+
         query = self.search.text().strip().lower()
         engine = self.engine_filter.currentData() or ""
         vendor = self.vendor_filter.currentData() or ""
-        size_title = self.size_filter.currentData() or ""
-        ram_title = self.ram_filter.currentData() or ""
         min_quality = int(self.quality_filter.currentData() or 0)
         installed_only = self.only_installed.isChecked()
         russian_only = self.only_russian.isChecked()
 
-        size_lo = size_hi = 0
-        for title, lo, hi in SIZE_CLASSES:
-            if title == size_title:
-                size_lo, size_hi = lo, hi
-        ram_lo = ram_hi = 0
-        for title, lo, hi in RAM_CLASSES:
-            if title == ram_title:
-                ram_lo, ram_hi = lo, hi
+        size_lo_mb = int(self.size_lo.value())
+        size_hi_mb = int(self.size_hi.value())
+        ram_lo_mb = int(self.ram_lo.value())
+        ram_hi_mb = int(self.ram_hi.value())
+        year_lo = int(self.year_lo.value())
+        year_hi = int(self.year_hi.value())
+        params_lo = float(self.params_lo.value())
+        params_hi = float(self.params_hi.value())
+        # у года минимум 2015 — значение «2015..2100» трактуем как диапазон;
+        # если lo == minimum spinbox'а и hi == minimum — фильтр выключен
+        year_active = not (year_lo == self.year_lo.minimum() and year_hi == self.year_lo.minimum())
 
         visible_entries: List[ModelEntry] = []
         for card in self._cards.values():
@@ -382,18 +558,27 @@ class ModelListPanel(QFrame):
                 show = False
             if show and min_quality and entry.quality < min_quality:
                 show = False
-            if show and (size_lo or size_hi):
-                size = entry.size_bytes or 0
-                if size_lo and size < size_lo:
-                    show = False
-                if size_hi and size > size_hi:
-                    show = False
-            if show and (ram_lo or ram_hi):
-                ram = entry.ram_mb or 0
-                if ram_lo and ram < ram_lo:
-                    show = False
-                if ram_hi and ram > ram_hi:
-                    show = False
+            if show and size_lo_mb and (entry.size_bytes or 0) < size_lo_mb * 1024 ** 2:
+                show = False
+            if show and size_hi_mb and (entry.size_bytes or 0) > size_hi_mb * 1024 ** 2:
+                show = False
+            if show and ram_lo_mb and (entry.ram_mb or 0) < ram_lo_mb:
+                show = False
+            if show and ram_hi_mb and (entry.ram_mb or 0) > ram_hi_mb:
+                show = False
+            if show and year_active:
+                year = entry.released_year or 0
+                if not year:
+                    show = False       # год неизвестен — под диапазон не попадает
+                else:
+                    lo = year_lo if year_lo > self.year_lo.minimum() else 0
+                    hi = year_hi if year_hi > self.year_lo.minimum() else 9999
+                    if not (lo <= year <= hi):
+                        show = False
+            if show and params_lo and (entry.params_b or 0.0) < params_lo:
+                show = False
+            if show and params_hi and (entry.params_b or 0.0) > params_hi:
+                show = False
             if show and query:
                 haystack = " ".join(
                     [
@@ -403,6 +588,7 @@ class ModelListPanel(QFrame):
                         entry.vendor,
                         entry.description,
                         entry.languages_text,
+                        entry.quantization or "",
                         " ".join(entry.tags),
                         " ".join(entry.languages),
                     ]
@@ -424,6 +610,6 @@ class ModelListPanel(QFrame):
         if visible == 0:
             self.empty_label.setText(
                 "Под эти фильтры ничего не нашлось.\n"
-                "Попробуй снять галочку «С русским языком», ослабить «Точность» "
-                "или нажать «Сбросить» — в каталоге есть и мультиязычные модели."
+                "Попробуй ослабить условия (например, снять галочку «С русским языком»\n"
+                "или обнулить диапазоны) либо нажать «Сбросить»."
             )

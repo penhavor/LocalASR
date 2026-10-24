@@ -59,6 +59,12 @@ log = get_logger("asr.torch")
 QWEN_CHUNK_SECONDS = 300.0     # Qwen3-ASR умеет длинные окна — режем редко
 GIGAAM_CHUNK_SECONDS = 20.0    # родной transcribe GigaAM ограничен ~25 секундами
 
+# Куски короче этого на модели лучше не подавать: на обрывках <1 с
+# seq2seq-модели галлюцинируют («Спасибо за просмотр»), а CTC/RNNT выдают
+# мусорные токены. Короткий хвост вместо отдельного куска сливается с
+# предыдущим (см. _merge_short_tail) — содержимое при этом не теряется.
+MIN_CHUNK_SECONDS = 1.0
+
 # Батчинг GigaAM: сколько ~20-секундных кусков уходит в один forward энкодера
 GIGAAM_DEFAULT_BATCH = 8
 GIGAAM_MAX_BATCH = 16
@@ -87,6 +93,38 @@ def _moving_energy_min_index(segment: np.ndarray, win: int) -> int:
     return int(np.argmin(sums))
 
 
+def _merge_short_tail(
+    bounds: List[Tuple[int, int]],
+    sample_rate: int,
+    chunk_seconds: float,
+    search_seconds: float,
+) -> List[Tuple[int, int]]:
+    """Сливает короткий хвостовой кусок (<1 с) с предыдущим.
+
+    Последний кусок может оказаться обрывком в пару сотен миллисекунд —
+    ровно тем входом, на котором модели придумывают «спасибо за просмотр»
+    и мусорные токены. Слияние разрешено, пока объединённый кусок не выйдет
+    за безопасный лимит `chunk + search + MIN_CHUNK`:
+      * HF (27 с + 1.5 с)   -> максимум 29.5 с — строго короче 30-секундного
+                               окна Whisper, т.е. short-form режим сохраняется;
+      * GigaAM (20 с + 1 с) -> максимум 22 с при родном лимите ~25 с;
+      * Qwen (300 с + 2 с)  -> жёсткого лимита нет.
+    Если слияние всё же вывело бы за лимит — хвост остаётся отдельным куском
+    (потерять контент хуже, чем рискнуть огрехом на коротком фрагменте).
+    """
+    if len(bounds) < 2:
+        return bounds
+    min_samples = int(MIN_CHUNK_SECONDS * sample_rate)
+    limit_samples = int((chunk_seconds + search_seconds + MIN_CHUNK_SECONDS) * sample_rate)
+    start, end = bounds[-1]
+    if end - start >= min_samples:
+        return bounds
+    prev_start, _prev_end = bounds[-2]
+    if end - prev_start <= limit_samples:
+        return [*bounds[:-2], (prev_start, end)]
+    return bounds
+
+
 def iter_silence_chunks(
     audio: np.ndarray,
     sample_rate: int,
@@ -100,6 +138,7 @@ def iter_silence_chunks(
     if total == 0:
         return
     win = max(1, int(window_seconds * sample_rate))
+    bounds: List[Tuple[int, int]] = []
     start = 0
     while start < total:
         target = start + int(chunk_seconds * sample_rate)
@@ -115,10 +154,9 @@ def iter_silence_chunks(
                     end = lo + idx + win // 2
             if end <= start:
                 end = target
-        yield start, min(end, total)
+        bounds.append((start, min(end, total)))
         start = min(end, total)
-        if start >= total:
-            break
+    yield from _merge_short_tail(bounds, sample_rate, chunk_seconds, search_seconds)
 
 
 def _vad_pause_points(
@@ -187,12 +225,13 @@ def iter_smart_chunks(
     max_len = int(chunk_seconds * sample_rate)
     search = int(search_seconds * sample_rate)
     win = max(1, int(0.4 * sample_rate))
+    bounds: List[Tuple[int, int]] = []
     start = 0
     while start < total:
         target = start + max_len
         if target >= total:
-            yield start, total
-            return
+            bounds.append((start, total))
+            break
         lo = start + max_len // 2
         hi = min(total, target + search)
         index_lo = bisect.bisect_left(points, lo)
@@ -211,8 +250,9 @@ def iter_smart_chunks(
             if end <= start:
                 end = target
         end = max(end, start + 1)
-        yield start, min(end, total)
+        bounds.append((start, min(end, total)))
         start = min(end, total)
+    yield from _merge_short_tail(bounds, sample_rate, chunk_seconds, search_seconds)
 
 
 def _build_gigaam_manual(mod: Any, config: Any, folder: Path) -> Any:
@@ -249,6 +289,23 @@ def _build_gigaam_manual(mod: Any, config: Any, folder: Path) -> Any:
             f"В весах GigaAM не хватает {len(missing)} тензоров (например {missing[:3]})"
         )
     return model
+
+
+def decode_item_text(item: Any) -> str:
+    """Достаёт текст из результата декодера.
+
+    Новые версии modeling_gigaam.py возвращают из CTC/RNNT-декода кортеж
+    ``(text, token_ids, token_frames)``; старые — голую строку. Naive
+    ``str(tuple)`` раньше писал в файл целиком repr кортежа вместе со
+    списками индексов («('текст', [45, 33, …])») — отсюда «мусорный» вывод.
+    Здесь берём первый строковой элемент кортежа/списка, строку — как есть.
+    """
+    if isinstance(item, (tuple, list)):
+        for part in item:
+            if isinstance(part, str):
+                return part
+        return ""
+    return str(item or "")
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
@@ -376,7 +433,8 @@ class QwenASREngine(TorchASREngine):
         except Exception as exc:  # noqa: BLE001
             raise EngineError(
                 f"Не удалось импортировать torch/transformers: {exc}\n"
-                "Установи движок: Сервис → Настройки → Движки → Qwen3-ASR → «Установить»."
+                "Недостающие компоненты программа предложит установить автоматически "
+                "при запуске модели (или: Сервис → Диагностика и восстановление)."
             ) from exc
 
         path = str(model.resolved_path)
@@ -529,7 +587,9 @@ class GigaAMEngine(TorchASREngine):
         "sentencepiece>=0.2.2",
     ]
     import_name = "transformers"
-    import_names = ("torch", "transformers", "torchaudio", "hydra", "omegaconf", "sentencepiece")
+    # soundfile проверяем явно: его импортирует сам код модели
+    # (modeling_gigaam.py), без него загрузка падает ModuleNotFoundError
+    import_names = ("torch", "transformers", "torchaudio", "hydra", "omegaconf", "sentencepiece", "soundfile")
     chunk_seconds = GIGAAM_CHUNK_SECONDS
 
     def __init__(self) -> None:
@@ -545,7 +605,8 @@ class GigaAMEngine(TorchASREngine):
         except Exception as exc:  # noqa: BLE001
             raise EngineError(
                 f"Не удалось импортировать transformers: {exc}\n"
-                "Установи движок: Сервис → Настройки → Движки → GigaAM → «Установить»."
+                "Недостающие компоненты программа предложит установить автоматически "
+                "при запуске модели (или: Сервис → Диагностика и восстановление)."
             ) from exc
 
         # Код GigaAM внутри вызывает ffmpeg из PATH — подскажем ему наш бинарник
@@ -768,7 +829,8 @@ class GigaAMEngine(TorchASREngine):
             texts: List[str] = []
             with torch.inference_mode():
                 for encoded, encoded_len in encoded_items:
-                    texts.extend(str(t or "") for t in inner.decoding.decode(inner.head, encoded, encoded_len))
+                    for item in inner.decoding.decode(inner.head, encoded, encoded_len):
+                        texts.append(decode_item_text(item))
             return texts
 
         decoding = inner.decoding

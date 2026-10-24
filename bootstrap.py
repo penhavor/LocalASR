@@ -77,6 +77,171 @@ EXTRA_REQUIREMENTS: Dict[str, List[Tuple[str, str]]] = {
     ],
 }
 
+# --------------------------------------------------------------------------- #
+#  Целостность проекта: манифест файлов и восстановление с GitHub
+# --------------------------------------------------------------------------- #
+
+REPO_RAW_BASE = "https://raw.githubusercontent.com/penhavor/LocalASR/main"
+
+#: Все файлы проекта, без которых программа неполноценна. Пользовательские
+#: данные (models/, outputs/, logs/, settings/, .venv) сюда НЕ входят — они
+#: создаются автоматически. Список обновляется при изменении структуры проекта.
+PROJECT_FILES: List[str] = [
+    "main.py",
+    "run_app.py",
+    "bootstrap.py",
+    "README.md",
+    "LICENSE",
+    "requirements/base.txt",
+    "requirements/extras.txt",
+    "requirements/gpu.txt",
+    "requirements/engines.json",
+    "resources/models_catalog.json",
+    "app/__init__.py",
+    "app/cli.py",
+    "app/constants.py",
+    "app/logutils.py",
+    "app/paths.py",
+    "app/settings.py",
+    "app/asr/__init__.py",
+    "app/asr/base.py",
+    "app/asr/faster_whisper_engine.py",
+    "app/asr/hf_pipeline_engine.py",
+    "app/asr/registry.py",
+    "app/asr/torch_engines.py",
+    "app/asr/transcriber.py",
+    "app/asr/vosk_engine.py",
+    "app/asr/whispercpp_engine.py",
+    "app/core/__init__.py",
+    "app/core/downloader.py",
+    "app/core/exporters.py",
+    "app/core/ffmpeg.py",
+    "app/core/integrity.py",
+    "app/core/models_catalog.py",
+    "app/core/net.py",
+    "app/core/postprocess.py",
+    "app/core/sysinfo.py",
+    "app/core/winutil.py",
+    "app/ui/__init__.py",
+    "app/ui/compat.py",
+    "app/ui/dialogs.py",
+    "app/ui/main_window.py",
+    "app/ui/models_panel.py",
+    "app/ui/theme.py",
+    "app/ui/widgets.py",
+    "app/ui/workers.py",
+]
+
+
+def check_project_files(root: str) -> List[str]:
+    """Список отсутствующих файлов проекта (пустой = всё на месте)."""
+    missing = []
+    for rel in PROJECT_FILES:
+        if not os.path.isfile(os.path.join(root, rel.replace("/", os.sep))):
+            missing.append(rel)
+    return missing
+
+
+def restore_project_files(root: str, files: Sequence[str], log: "Logger") -> Tuple[List[str], List[str]]:
+    """Скачивает отсутствующие файлы с GitHub (stdlib urllib).
+
+    Возвращает (восстановленные, ошибки). Каждый файл пишется атомарно:
+    сначала .part рядом с целью, потом os.replace.
+    """
+    import urllib.request
+    from urllib.parse import quote
+
+    restored: List[str] = []
+    failed: List[str] = []
+    for rel in files:
+        url = f"{REPO_RAW_BASE}/{quote(rel)}"
+        dest = os.path.join(root, rel.replace("/", os.sep))
+        tmp = dest + ".part"
+        try:
+            os.makedirs(os.path.dirname(dest) or root, exist_ok=True)
+            request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}-repair"})
+            with urllib.request.urlopen(request, timeout=60) as resp, open(tmp, "wb") as fh:
+                while True:
+                    block = resp.read(256 * 1024)
+                    if not block:
+                        break
+                    fh.write(block)
+            os.replace(tmp, dest)
+            restored.append(rel)
+            log(f"Восстановлен файл: {rel}")
+        except Exception as exc:  # noqa: BLE001 - сеть/права могут отказать
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            failed.append(f"{rel}: {exc}")
+            log(f"!! не удалось восстановить {rel}: {exc}")
+    return restored, failed
+
+
+def _offer_restore_files(root: str, missing: List[str], log: "Logger") -> bool:
+    """Спрашивает пользователя и восстанавливает удалённые файлы проекта.
+
+    Возвращает True, если после восстановления файлов не хватает меньше,
+    чем было (можно повторить запуск GUI).
+    """
+    listing = "\n".join("  • " + name for name in missing[:20])
+    if len(missing) > 20:
+        listing += f"\n  … и ещё {len(missing) - 20}"
+    message = (
+        f"В папке программы не хватает {len(missing)} файл(ов):\n{listing}\n\n"
+        "Без них LocalASR не сможет работать полноценно.\n"
+        f"Скачать их заново с GitHub ({REPO_RAW_BASE})?\n"
+        "Файлы весят считаные килобайты, пользовательские данные не затрагиваются."
+    )
+    answer = _ask_yes_no("LocalASR — отсутствуют файлы программы", message)
+    if not answer:
+        return False
+    restored, failed = restore_project_files(root, missing, log)
+    if failed:
+        _show_error(
+            "Часть файлов не удалось восстановить:\n\n" + "\n".join(failed[:10]) +
+            "\n\nПроверь интернет-соединение и запусти программу ещё раз.",
+            log,
+        )
+    return bool(restored)
+
+
+def _ask_yes_no(title: str, message: str) -> bool:
+    """Tkinter-вопрос да/нет; если Tk недоступен — спрашиваем в консоли."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        result = messagebox.askyesno(title, message, parent=root)
+        root.destroy()
+        return bool(result)
+    except Exception:
+        pass
+    print(f"\n[{APP_NAME}] {title}\n{message}")
+    try:
+        return input("\nВосстановить? [д/н]: ").strip().lower() in ("д", "да", "y", "yes")
+    except (EOFError, KeyboardInterrupt, OSError, ValueError):
+        return False
+
+
+def repair_missing_files(root: str, log: Optional["Logger"] = None) -> List[str]:
+    """Проверяет манифест и (с согласия пользователя) восстанавливает файлы.
+
+    Возвращает список файлов, которых по-прежнему не хватает.
+    Используется и при запуске (bootstrap/run_app), и из GUI-диагностики.
+    """
+    log = log or Logger(log_path(root), echo=False)
+    missing = check_project_files(root)
+    if not missing:
+        return []
+    if _offer_restore_files(root, missing, log):
+        missing = check_project_files(root)
+    return missing
+
 PIP_TIMEOUT_SECONDS = 60
 
 
@@ -480,7 +645,7 @@ def _write_stamp(root: str, fingerprint: str, extras: Sequence[str]) -> None:
         "extras": sorted(extras),
         "python": sys.executable,
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "app_version": "1.0.0",
+        "app_version": "1.3.0",
     }
     try:
         os.makedirs(os.path.dirname(stamp_path(root)), exist_ok=True)
@@ -1022,11 +1187,36 @@ def _run_gui_inprocess(root: str, argv: Sequence[str], log: Logger) -> int:
         from app import cli  # локальный импорт: к этому моменту зависимости уже есть
     except Exception as exc:  # noqa: BLE001
         log(f"Не удалось импортировать приложение: {exc!r}")
+        # Частая причина — пользователь случайно удалил файлы самой программы.
+        # Проверяем манифест и предлагаем восстановить их с GitHub.
+        missing = check_project_files(root)
+        if missing and _offer_restore_files(root, missing, log):
+            for name in list(sys.modules):
+                if name == "app" or name.startswith("app."):
+                    del sys.modules[name]
+            try:
+                from app import cli  # noqa: F811 - повторная попытка после восстановления
+            except Exception as exc2:  # noqa: BLE001
+                log(f"Импорт после восстановления не удался: {exc2!r}")
+                _show_error(
+                    "Файлы восстановлены, но приложение по-прежнему не загружается:\n\n"
+                    f"{type(exc2).__name__}: {exc2}\n\n"
+                    f"Лог: {log.path}",
+                    log,
+                )
+                return 1
+            return cli.main(argv)
         _show_error(
             "Не удалось загрузить модули приложения.\n\n"
             f"{type(exc).__name__}: {exc}\n\n"
-            "Попробуй удалить папку .venv и запустить main.py заново — "
-            "окружение пересоздастся автоматически.\n\n"
+            + (
+                "В папке программы не хватает файлов (список выше) — восстанови их "
+                "или скачай проект заново с GitHub.\n\n"
+                if missing
+                else ""
+            )
+            + "Если файлы на месте — попробуй удалить папку .venv и запустить main.py "
+            "заново: окружение пересоздастся автоматически.\n\n"
             f"Лог: {log.path}",
             log,
         )

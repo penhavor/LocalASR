@@ -45,7 +45,7 @@ def venv_python() -> str:
 
 
 class PackageInstaller(QThread):
-    """Ставит pip-пакеты строго в виртуальное окружение проекта."""
+    """Ставит (или удаляет — mode="uninstall") pip-пакеты строго в .venv проекта."""
 
     outputLine = Signal(str)
     progress = Signal(float, str)
@@ -57,10 +57,12 @@ class PackageInstaller(QThread):
         title: str = "",
         parent=None,
         pre_uninstall: Optional[Sequence[str]] = None,
+        mode: str = "install",
     ) -> None:
         super().__init__(parent)
         self.packages = list(packages)
-        self.title = title or "Установка пакетов"
+        self.title = title or ("Удаление пакетов" if mode == "uninstall" else "Установка пакетов")
+        self.mode = mode
         self._cancel = False
         # что удалить ПЕРЕД установкой (например, CPU-сборку torch перед
         # CUDA-сборкой: иначе pip скажет «already satisfied» и ничего не поставит)
@@ -85,6 +87,21 @@ class PackageInstaller(QThread):
         env["PYTHONUTF8"] = "1"
         env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
 
+        if self.mode == "uninstall":
+            cmd = [python, "-m", "pip", "uninstall", "-y", *self.packages]
+            self.progress.emit(0.05, "Удаляю пакеты…")
+            self.outputLine.emit("$ " + " ".join(cmd))
+            code = self._stream(cmd, env)
+            if self._cancel:
+                self.finishedWith.emit(False, "Удаление отменено")
+                return
+            if code != 0:
+                self.finishedWith.emit(False, f"pip uninstall завершился с ошибкой (код {code})")
+                return
+            self.progress.emit(1.0, "Готово")
+            self.finishedWith.emit(True, f"Удалено за {time.time() - started:.0f} с")
+            return
+
         requirements_file = next((p for p in self.packages if p.startswith("-r ")), "")
         if requirements_file and not any(p.startswith("-") is False for p in self.packages):
             cmd = [python, "-m", "pip", "install", *self.packages]
@@ -92,6 +109,13 @@ class PackageInstaller(QThread):
             uv = self._find_uv(python)
             if uv and not requirements_file:
                 cmd = [uv, "pip", "install", "--python", python, *self.packages]
+                # uv по умолчанию берёт пакет из ПЕРВОГО индекса, где тот есть
+                # (first-index): с дополнительным CUDA-индексом PyTorch он взял
+                # бы CPU-сборку torch с PyPI. unsafe-best-match заставляет
+                # сравнить версии во всех индексах — и выбрать +cu126, которая
+                # по PEP 440 старше чистой версии. pip в этом не нуждается.
+                if "--extra-index-url" in self.packages:
+                    cmd += ["--index-strategy", "unsafe-best-match"]
             else:
                 cmd = [
                     python, "-m", "pip", "install",
@@ -261,6 +285,74 @@ class CatalogRefreshWorker(QThread):
 
 
 # --------------------------------------------------------------------------- #
+#  Диагностика целостности (файлы проекта + аудит .venv)
+# --------------------------------------------------------------------------- #
+
+
+class EnvAuditWorker(QThread):
+    """Проверяет файлы проекта, папки и пакеты .venv (см. core/integrity.py)."""
+
+    finishedWith = Signal(object)   # dict-отчёт
+
+    def run(self) -> None:  # noqa: D102
+        from ..core import integrity
+
+        try:
+            report = integrity.full_audit()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Сбой диагностики: %s\n%s", exc, traceback.format_exc())
+            report = {
+                "python": "",
+                "missing_files": [],
+                "folders": [],
+                "base_missing": [],
+                "extra_packages": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        self.finishedWith.emit(report)
+
+
+class FileRestoreWorker(QThread):
+    """Скачивает отсутствующие файлы программы с GitHub."""
+
+    outputLine = Signal(str)
+    progress = Signal(float, str)
+    finishedWith = Signal(bool, str)
+
+    def __init__(self, files: Sequence[str], parent=None) -> None:
+        super().__init__(parent)
+        self.files = list(files)
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:  # noqa: D102
+        from ..core import integrity
+
+        if not self.files:
+            self.finishedWith.emit(True, "Восстанавливать нечего — все файлы на месте")
+            return
+        self.progress.emit(0.0, f"Восстановление {len(self.files)} файл(ов) с GitHub…")
+        restored, failed = integrity.restore_files(
+            self.files,
+            progress=lambda fraction, status: (
+                self.progress.emit(fraction, status),
+                self.outputLine.emit(status),
+            )[0],
+            cancel=lambda: self._cancel,
+        )
+        if failed:
+            self.finishedWith.emit(
+                False,
+                f"Восстановлено: {len(restored)}, с ошибкой: {len(failed)}\n" + "\n".join(failed[:8]),
+            )
+        else:
+            self.progress.emit(1.0, "Готово")
+            self.finishedWith.emit(True, f"Восстановлено файлов: {len(restored)}")
+
+
+# --------------------------------------------------------------------------- #
 #  Зонд: видит ли torch из .venv CUDA (в отдельном процессе!)
 # --------------------------------------------------------------------------- #
 
@@ -357,6 +449,8 @@ class TranscribeWorker(QThread):
         self.options = options
         self.settings = settings
         self._cancel = threading.Event()
+        #: движку не хватило библиотек — GUI покажет диалог установки и повторит
+        self.engine_missing = False
 
     # ------------------------------------------------------------------ #
     def cancel(self) -> None:
@@ -450,15 +544,22 @@ class TranscribeWorker(QThread):
                 self.logLine.emit(f"✗ {source.name}: {decode_error}")
                 continue
 
-            engine = registry.get(
-                self.options.model,
-                {
-                    "device": self.options.device,
-                    "compute_type": self.options.compute_type,
-                    "cpu_threads": self.options.cpu_threads,
-                    "gpu_index": self.options.gpu_index,
-                },
-            )
+            try:
+                engine = registry.get(
+                    self.options.model,
+                    {
+                        "device": self.options.device,
+                        "compute_type": self.options.compute_type,
+                        "cpu_threads": self.options.cpu_threads,
+                        "gpu_index": self.options.gpu_index,
+                    },
+                )
+            except EngineNotInstalled as exc:
+                # Коду модели не хватило библиотеки: не стектрейс, а диалог
+                # установки с автопродолжением задачи после установки.
+                self.engine_missing = True
+                self.engineMissing.emit(exc.engine, list(exc.packages))
+                break
             result = self._process_one(index, source, audio, duration, engine)
             del audio
             ok += int(result.ok)
@@ -497,15 +598,20 @@ class TranscribeWorker(QThread):
         def handle(index: int, source: Path) -> FileResult:
             if self.cancelled:
                 return FileResult(source=source, error="отменено")
-            engine = thread_engine(
-                self.options.model,
-                {
-                    "device": self.options.device,
-                    "compute_type": self.options.compute_type,
-                    "cpu_threads": self.options.cpu_threads,
-                    "gpu_index": self.options.gpu_index,
-                },
-            )
+            try:
+                engine = thread_engine(
+                    self.options.model,
+                    {
+                        "device": self.options.device,
+                        "compute_type": self.options.compute_type,
+                        "cpu_threads": self.options.cpu_threads,
+                        "gpu_index": self.options.gpu_index,
+                    },
+                )
+            except EngineNotInstalled as exc:
+                self.engine_missing = True
+                self.engineMissing.emit(exc.engine, list(exc.packages))
+                return FileResult(source=source, error="не хватает компонентов движка")
             return self._process_one(index, source, None, 0.0, engine)
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="asr") as pool:

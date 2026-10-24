@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -60,11 +61,12 @@ class ModelEntry:
     license: str = ""
     description: str = ""
     vendor: str = ""                          # кто сделал модель (OpenAI, Qwen, Sber…)
-    recommended: bool = False
-    recommended_for: str = ""
+    params_b: Optional[float] = None          # число параметров, млрд (None = неизвестно)
+    quantization: str = ""                    # формат весов: int8 / float16 / q5_0 / …
+    released_year: int = 0                    # год релиза весов (число; 0 = неизвестно)
+    recommended_for: str = ""                 # короткая приписка «кому подходит»
     defaults: Dict[str, Any] = field(default_factory=dict)
     url: str = ""                             # страница модели (кнопка «Открыть»)
-    released: str = ""
 
     # --- состояние (не относится к каталогу, заполняется при сканировании) -- #
     installed: bool = False
@@ -106,6 +108,23 @@ class ModelEntry:
             parts.append(f"VRAM ≈ {self.vram_mb / 1024:.1f} ГБ".replace(".0 ГБ", " ГБ"))
         return " · ".join(parts) or "—"
 
+    @property
+    def params_text(self) -> str:
+        """Человекочитаемое число параметров: «809 млн», «1.55 млрд»."""
+        if not self.params_b:
+            return "—"
+        if self.params_b >= 1:
+            return f"{self.params_b:g} млрд"
+        return f"{int(round(self.params_b * 1000))} млн"
+
+    @property
+    def quantization_text(self) -> str:
+        return self.quantization or "—"
+
+    @property
+    def released_year_text(self) -> str:
+        return str(self.released_year) if self.released_year else "—"
+
     def fits_ram(self, available_mb: int) -> bool:
         if not self.ram_mb:
             return True
@@ -120,6 +139,16 @@ class ModelEntry:
     def from_dict(cls, data: Dict[str, Any]) -> "ModelEntry":
         known = set(cls.__dataclass_fields__)  # type: ignore[attr-defined]
         payload = {k: v for k, v in data.items() if k in known}
+        # Старые каталоги/кэши хранили релиз строкой («2023 (актуален в 2026)») —
+        # вытаскиваем оттуда число, чтобы тип поля всегда оставался int.
+        if not payload.get("released_year") and data.get("released"):
+            match = re.search(r"(?:19|20)\d{2}", str(data["released"]))
+            if match:
+                payload["released_year"] = int(match.group(0))
+        try:
+            payload["released_year"] = int(payload.get("released_year") or 0)
+        except (TypeError, ValueError):
+            payload["released_year"] = 0
         entry = cls(**payload)
         if entry.install_dir:
             entry.install_dir = Path(str(entry.install_dir))
@@ -451,7 +480,6 @@ class ModelCatalog:
         def key(entry: ModelEntry) -> tuple:
             return (
                 0 if entry.installed else 1,
-                0 if entry.recommended else 1,
                 0 if entry.supports_russian else 1,
                 -entry.quality,
                 entry.ram_mb or 99_999,
@@ -459,45 +487,6 @@ class ModelCatalog:
             )
 
         return sorted(items, key=key)
-
-    def recommendation(self, hardware: Any = None) -> Optional[ModelEntry]:
-        """Главная рекомендация под железо (приоритет — русский язык)."""
-        candidates = [e for e in self.entries.values() if not e.installed] or self.all()
-        if not candidates:
-            return None
-
-        limit_bytes: Optional[int] = None
-        if hardware is not None:
-            try:
-                from .sysinfo import max_model_size_mb
-
-                limit_bytes = max_model_size_mb(hardware) * 1024 * 1024
-            except Exception as exc:  # noqa: BLE001
-                # молча «проглотить» ошибку здесь = дать невыполнимый совет,
-                # поэтому обязательно пишем в лог
-                log.warning("Не удалось оценить лимит памяти под модель: %s", exc)
-                limit_bytes = None
-
-        def score(entry: ModelEntry) -> tuple:
-            size = entry.size_bytes or 0
-            fits = True if limit_bytes is None else size <= limit_bytes
-            return (
-                0 if fits else 1,
-                0 if entry.recommended else 1,
-                0 if entry.supports_russian else 1,
-                -(entry.quality * 2 + entry.speed),
-                size,
-            )
-
-        ranked = sorted(candidates, key=score)
-        best = ranked[0]
-
-        # если под доступную память не влезает ничего — берём самое лёгкое
-        # (и в первую очередь русскоязычное), иначе совет будет невыполним
-        if limit_bytes is not None and (best.size_bytes or 0) > limit_bytes:
-            light = [e for e in ranked if e.supports_russian] or ranked
-            best = min(light, key=lambda e: (e.size_bytes or 0, -e.quality))
-        return best
 
     def add_custom_entry(self, entry: ModelEntry) -> None:
         self.entries[entry.id] = entry
