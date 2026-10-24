@@ -39,6 +39,34 @@ def venv_python() -> str:
     return sys.executable or str(paths.venv_dir() / "Scripts" / "python.exe")
 
 
+def stop_worker(worker: Optional[QThread], wait_ms: int = 4000, label: str = "") -> None:
+    """Гарантированно останавливает QThread (используется при закрытии окна).
+
+    Порядок: cancel() (если есть) → wait → terminate. Без terminate() поток,
+    застрявший в сетевом ретрае или subprocess, доживал до «QThread: Destroyed
+    while thread is still running» в момент удаления объектов Qt.
+    """
+    if worker is None:
+        return
+    try:
+        if not worker.isRunning():
+            return
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        if worker.wait(wait_ms):
+            return
+        log.warning("Воркер %s не остановился за %d мс — завершаю принудительно",
+                    label or type(worker).__name__, wait_ms)
+        worker.terminate()
+        worker.wait(2000)
+    except RuntimeError:
+        pass    # C++-объект уже удалён
+
+
 # --------------------------------------------------------------------------- #
 #  Установка пакетов в .venv
 # --------------------------------------------------------------------------- #
@@ -64,12 +92,21 @@ class PackageInstaller(QThread):
         self.title = title or ("Удаление пакетов" if mode == "uninstall" else "Установка пакетов")
         self.mode = mode
         self._cancel = False
+        self._proc: Optional[subprocess.Popen] = None
         # что удалить ПЕРЕД установкой (например, CPU-сборку torch перед
         # CUDA-сборкой: иначе pip скажет «already satisfied» и ничего не поставит)
         self.pre_uninstall = list(pre_uninstall or [])
 
     def cancel(self) -> None:
         self._cancel = True
+        # убиваем дочерний pip/uv сразу: иначе поток висит на чтении stdout,
+        # пока пакетник молчит (резолвит зависимости), и окно не закрывается
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------ #
     def run(self) -> None:  # noqa: D102
@@ -146,14 +183,31 @@ class PackageInstaller(QThread):
                     env,
                 )
             if code != 0:
+                from .. import logutils
+
+                current = logutils.current_log_file()
+                log_hint = str(current) if current else str(paths.logs_dir())
                 self.finishedWith.emit(
                     False,
                     f"Установка завершилась с ошибкой (код {code}).\n"
-                    f"Лог: {paths.logs_dir() / 'localasr.log'}",
+                    f"Подробности: {log_hint}\n"
+                    "(подробный лог включается в Сервис → Настройки → «Журнал и диагностика»)",
                 )
                 return
 
         self.progress.emit(1.0, "Готово")
+        # если transformers уже импортирован в этом процессе (например, до этого
+        # грузили GigaAM), его lru-кеши доступности устарели: только что
+        # установленные пакеты (accelerate и т.п.) ими «не видны». Сбрасываем —
+        # следующий запуск модели подхватит свежие пакеты БЕЗ перезапуска.
+        try:
+            if "transformers" in sys.modules:
+                from ..asr.torch_engines import reset_transformers_caches
+
+                cleared = reset_transformers_caches()
+                log.debug("После установки пакетов сброшено lru-кэшей transformers: %d", cleared)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось сбросить кэши transformers после установки: %s", exc)
         self.finishedWith.emit(True, f"Установлено за {time.time() - started:.0f} с")
 
     # ------------------------------------------------------------------ #
@@ -176,19 +230,24 @@ class PackageInstaller(QThread):
             self.outputLine.emit(f"!! не удалось запустить: {exc}")
             return 127
 
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            if self._cancel:
-                proc.kill()
-                break
-            text = line.rstrip()
-            if text:
-                self.outputLine.emit(text)
-                low = text.lower()
-                if "downloading" in low or "collecting" in low:
-                    self.progress.emit(-1.0, text[:160])
-        proc.wait()
-        return proc.returncode
+        self._proc = proc
+        log.debug("PackageInstaller subprocess: %s", " ".join(cmd))
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if self._cancel:
+                    proc.kill()
+                    break
+                text = line.rstrip()
+                if text:
+                    self.outputLine.emit(text)
+                    low = text.lower()
+                    if "downloading" in low or "collecting" in low:
+                        self.progress.emit(-1.0, text[:160])
+            proc.wait()
+            return proc.returncode
+        finally:
+            self._proc = None
 
     @staticmethod
     def _find_uv(python: str) -> Optional[str]:
@@ -222,6 +281,8 @@ class ModelDownloadWorker(QThread):
 
     def run(self) -> None:  # noqa: D102
         name = self.entry.name
+        log.debug("ModelDownloadWorker запущен: %s (source=%s, root=%s)",
+                  self.entry.id, self.entry.source, self.root)
         self.progress.emit(0.0, f"Подготовка к скачиванию: {name}")
         self.outputLine.emit(f"Модель: {name} ({self.entry.id})")
         self.outputLine.emit(f"Источник: {self.entry.source}")
@@ -381,20 +442,40 @@ class TorchCudaProbeWorker(QThread):
         "'cuda_ver': torch.version.cuda or ''}))\n"
     )
 
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
     def run(self) -> None:  # noqa: D102
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        proc: Optional[subprocess.Popen] = None
         try:
-            out = subprocess.run(
+            proc = subprocess.Popen(
                 [venv_python(), "-c", self._SCRIPT],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=180,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            for line in reversed((out.stdout or "").splitlines()):
+            # ждём кусочками по 0.5 с: закрытие окна не должно ждать весь таймаут
+            deadline = time.time() + 180
+            out_text, err_text = "", ""
+            while time.time() < deadline:
+                if self._cancel:
+                    proc.kill()
+                    return
+                try:
+                    out_text, err_text = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            for line in reversed((out_text or "").splitlines()):
                 if line.startswith("PROBE"):
                     data = json.loads(line[len("PROBE"):])
                     detail = str(data.get("version") or "")
@@ -405,10 +486,16 @@ class TorchCudaProbeWorker(QThread):
                     )
                     return
             log.debug("Зонд torch не дал результата: rc=%s stderr=%s",
-                      out.returncode, (out.stderr or "")[-300:])
+                      proc.returncode if proc else "?", (err_text or "")[-300:])
         except Exception as exc:  # noqa: BLE001
             log.debug("Зонд torch не запустился: %s", exc)
-        self.probed.emit(False, False, "")
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        if not self._cancel:
+            self.probed.emit(False, False, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -463,6 +550,11 @@ class TranscribeWorker(QThread):
     # ------------------------------------------------------------------ #
     def run(self) -> None:  # noqa: D102
         started = time.time()
+        log.debug(
+            "TranscribeWorker запущен: файлов=%d, модель=%s, движок=%s, parallel=%s",
+            len(self.files), self.options.model.name, self.options.model.engine,
+            self.settings.parallel_files,
+        )
         try:
             if not self.files:
                 self.finishedWith.emit(0, 0, 0.0)
@@ -479,7 +571,23 @@ class TranscribeWorker(QThread):
                 self.engineMissing.emit(exc.engine, list(exc.packages))
                 return
 
+            # Пакеты движка могли установить ПРЯМО ВО ВРЕМЯ работы программы
+            # (штатный сценарий «установка по требованию»). transformers кэширует
+            # проверки доступности (lru_cache): без сброса он продолжит считать
+            # свежеустановленный accelerate отсутствующим, и загрузка модели
+            # упадёт с «requires accelerate». Сброс безопасен и дёшев.
+            try:
+                if "transformers" in sys.modules:
+                    from ..asr.torch_engines import reset_transformers_caches
+
+                    cleared = reset_transformers_caches()
+                    if cleared:
+                        log.debug("Перед загрузкой движка сброшено lru-кэшей transformers: %d", cleared)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Сброс кэшей transformers не выполнен: %s", exc)
+
             hardware = registry.hardware()
+            log.debug("Железо для задачи: %s", hardware.get("summary", "").replace("\n", " | "))
             self.logLine.emit(hardware.get("summary", "").replace("\n", " | "))
             ffmpeg = find_ffmpeg()
             self.logLine.emit(f"ffmpeg: {ffmpeg or 'НЕ НАЙДЕН (будет использован PyAV)'}")
@@ -490,10 +598,15 @@ class TranscribeWorker(QThread):
             else:
                 ok, fail = self._run_parallel(parallel)
 
+            log.debug(
+                "TranscribeWorker завершён за %.1f с: ok=%d fail=%d cancel=%s",
+                time.time() - started, ok, fail, self.cancelled,
+            )
             self.finishedWith.emit(ok, fail, time.time() - started)
         except Exception as exc:  # noqa: BLE001
+            # полный стектрейс — в лог; пользователю показываем только суть
             log.error("Сбой воркера: %s\n%s", exc, traceback.format_exc())
-            self.failed.emit(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=6)}")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             try:
                 release_thread_engines()

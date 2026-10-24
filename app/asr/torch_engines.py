@@ -33,6 +33,7 @@ import os
 import sys
 import tempfile
 import time
+import types
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -56,7 +57,11 @@ from .base import (
 log = get_logger("asr.torch")
 
 # Максимальная длина куска для каждого движка (секунды)
-QWEN_CHUNK_SECONDS = 300.0     # Qwen3-ASR умеет длинные окна — режем редко
+QWEN_CHUNK_SECONDS = 120.0     # Qwen3-ASR умеет длинные окна, но 120 с —
+#                                безопасный потолок для потребительских GPU
+#                                (6 ГБ VRAM): при нехватке памяти кусок
+#                                автоматически делится пополам (см. _infer_qwen)
+QWEN_SPLIT_FLOOR_SECONDS = 5.0 # предел OOM-деления: куски короче не режем
 GIGAAM_CHUNK_SECONDS = 20.0    # родной transcribe GigaAM ограничен ~25 секундами
 
 # Куски короче этого на модели лучше не подавать: на обрывках <1 с
@@ -319,6 +324,93 @@ def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
         fh.writeframes(data.tobytes())
 
 
+def missing_files_hint(exc: BaseException) -> str:
+    """Подсказка к ошибкам «в папке модели нет такого-то файла».
+
+    Типичная причина — прерванное скачивание (сеть моргнула, установку отменили).
+    Вместо голого стектрейса объясняем пользователю, что делать.
+    """
+    low = str(exc).lower()
+    markers = (
+        "preprocessor_config.json", "config.json", "tokenizer", "does not appear to have a file named",
+        "can't load", "cannot load", "is not a local folder", "no such file or directory",
+        "feature extractor", "processor_config.json",
+    )
+    if any(marker in low for marker in markers):
+        return (
+            "\n\nПохоже, файлы модели скачаны не полностью или папка повреждена "
+            "(такое случается при обрыве сети во время установки).\n"
+            "Что делать: удали модель (карточка модели → «Удалить») и установи заново — "
+            "целые файлы будут пропущены, докачается только недостающее."
+        )
+    return ""
+
+
+def transformers_version_hint(exc: BaseException, model_kind: str, min_version: str) -> str:
+    """Подсказка, если установленный transformers слишком старый для модели."""
+    low = str(exc).lower()
+    if any(marker in low for marker in (
+        "unrecognized", "not recognized", "unknown model", "keyerror", "does not support",
+        "has no attribute", "invalid model type",
+    )):
+        return (
+            f"\n\nУстановленный transformers не знает «{model_kind}» — нужен transformers>={min_version}.\n"
+            "Обнови его: программа сама предложит установку при следующем запуске модели "
+            "(или: Сервис → Диагностика и восстановление).\n"
+            "ВАЖНО: если новая версия transformers была установлена только что, ПЕРЕЗАПУСТИ "
+            "программу — уже импортированная старая версия остаётся в памяти процесса до перезапуска."
+        )
+    return ""
+
+
+def reset_transformers_caches() -> int:
+    """Сбрасывает lru-кеши проверок «пакет доступен?» внутри transformers.
+
+    transformers кэширует результаты is_accelerate_available()/is_torch_available()
+    и подобных проверок (lru_cache на всю жизнь процесса). Если пакет установили
+    ПРЯМО ВО ВРЕМЯ работы программы (штатный сценарий: движок ставится по
+    требованию), кэш продолжает отвечать «недоступно» — загрузка Qwen3-ASR падала
+    с «requires `accelerate`» на свежеустановленный accelerate. Сброс кэшей во
+    всех загруженных модулях transformers возвращает проверки в актуальное
+    состояние БЕЗ перезапуска программы. Возвращает число сброшенных кэшей.
+    """
+    cleared = 0
+    seen: set = set()
+    for name, module in list(sys.modules.items()):
+        if module is None:
+            continue
+        if not (name == "transformers" or name.startswith("transformers.")):
+            continue
+        try:
+            attributes = list(vars(module).values())
+        except TypeError:
+            continue
+        for attr in attributes:
+            # Классы и модули не трогаем: ленивые объекты transformers при
+            # ЛЮБОМ getattr пытаются импортировать бэкенды и строят сообщения
+            # requires_backends (секунды на атрибут). Все нужные lru_cache —
+            # функции; обход без них занимает ~0.1 с.
+            if isinstance(attr, (type, types.ModuleType)):
+                continue
+            try:
+                if id(attr) in seen:
+                    continue
+                cache_clear = getattr(attr, "cache_clear", None)
+                if cache_clear is None or not callable(getattr(attr, "cache_info", None)):
+                    continue    # это не lru_cache-обёртка
+            except Exception:  # noqa: BLE001
+                continue
+            seen.add(id(attr))
+            try:
+                cache_clear()
+                cleared += 1
+            except Exception:  # noqa: BLE001
+                continue
+    if cleared:
+        log.debug("transformers: сброшено lru-кэшей доступности: %d", cleared)
+    return cleared
+
+
 def read_wav_mono(path: Path, sample_rate: int):
     """Читает WAV s16le в torch-тензор float32 (без ffmpeg и subprocess)."""
     import torch
@@ -420,10 +512,82 @@ class TorchASREngine(ASREngine):
 
 class QwenASREngine(TorchASREngine):
     name = ENGINE_QWEN_ASR
-    packages = ["torch>=2.6", "transformers>=5.0", "accelerate>=1.0", "soundfile>=0.12"]
+    # qwen3_asr появился в transformers 5.13.0 (2026-07-03) — более ранние
+    # 5.x модель НЕ знают, поэтому пин строгий
+    packages = ["torch>=2.6", "transformers>=5.13", "accelerate>=1.0", "soundfile>=0.12"]
     import_name = "transformers"
     import_names = ("torch", "transformers", "accelerate")
     chunk_seconds = QWEN_CHUNK_SECONDS
+    MIN_TRANSFORMERS = (5, 13)
+
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def is_available(cls) -> bool:
+        """Доступность = пакеты на месте И transformers знает qwen3_asr.
+
+        Версию проверяем через метаданные (importlib.metadata) — БЕЗ импорта
+        transformers: импорт тяжёлый, а is_available() дёргается из GUI
+        (вкладка «Движки», кнопка «РАБОТАТЬ») и не должна подвешивать окно.
+        """
+        if not super().is_available():
+            return False
+        try:
+            from importlib.metadata import version as pkg_version
+
+            raw = pkg_version("transformers")
+        except Exception:  # noqa: BLE001
+            return False
+        parts = []
+        for chunk in raw.split(".")[:2]:
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 2:
+            parts.append(0)
+        return tuple(parts) >= cls.MIN_TRANSFORMERS
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _from_pretrained_dtype(auto_cls: Any, path: str, dtype: Any, **kwargs: Any) -> Any:
+        """from_pretrained с учётом переименования torch_dtype -> dtype в 5.10+."""
+        try:
+            return auto_cls.from_pretrained(path, dtype=dtype, **kwargs)
+        except TypeError:
+            # transformers < 5.10: аргумент назывался torch_dtype
+            return auto_cls.from_pretrained(path, torch_dtype=dtype, **kwargs)
+
+    def _load_qwen_model(self, auto_cls: Any, path: str, dtype: Any, device: str) -> Any:
+        """Загрузка весов с тройной страховкой от «accelerate-казусов».
+
+        Каскад:
+          1. device_map=device (быстрый путь, нужен accelerate);
+          2. при «requires accelerate» — сброс lru-кэшей transformers
+             (пакет могли установить только что, прямо во время работы
+             программы, а кэш помнит старое «нет») и повтор;
+          3. если accelerate реально нет/невидим — загрузка БЕЗ device_map
+             и обычный .to(device): для одной видеокарты результат тот же.
+        """
+        if importlib.util.find_spec("accelerate") is not None:
+            try:
+                return self._from_pretrained_dtype(auto_cls, path, dtype, device_map=device)
+            except ValueError as exc:
+                if "accelerate" not in str(exc).lower():
+                    raise
+                cleared = reset_transformers_caches()
+                log.warning(
+                    "transformers не увидел установленный accelerate (устаревший lru_cache, "
+                    "сброшено кэшей: %d) — повторяю загрузку", cleared,
+                )
+                try:
+                    return self._from_pretrained_dtype(auto_cls, path, dtype, device_map=device)
+                except ValueError as exc2:
+                    if "accelerate" not in str(exc2).lower():
+                        raise
+                    log.warning("accelerate по-прежнему недоступен — гружу без device_map (.to(%s))", device)
+        else:
+            log.info("accelerate не установлен — гружу Qwen3-ASR без device_map (.to(%s))", device)
+        # запасной путь БЕЗ accelerate: загрузка на CPU и перенос на устройство
+        model = self._from_pretrained_dtype(auto_cls, path, dtype)
+        return model.to(device)
 
     # ------------------------------------------------------------------ #
     def load(self, model: ModelRef, hardware: Dict[str, Any]) -> None:
@@ -439,22 +603,132 @@ class QwenASREngine(TorchASREngine):
 
         path = str(model.resolved_path)
         device, dtype = self._pick_device(hardware)
+        log.debug("Qwen3-ASR: загружаю %s (device=%s, dtype=%s)", path, device, dtype)
+        started = time.time()
         try:
             self._processor = AutoProcessor.from_pretrained(path)
-            try:
-                self._model = AutoModelForMultimodalLM.from_pretrained(
-                    path, dtype=dtype, device_map=device
-                )
-            except TypeError:
-                # transformers < 5.10: аргумент назывался torch_dtype
-                self._model = AutoModelForMultimodalLM.from_pretrained(
-                    path, torch_dtype=dtype, device_map=device
-                )
+            self._model = self._load_qwen_model(AutoModelForMultimodalLM, path, dtype, device)
             self._model.eval()
         except Exception as exc:  # noqa: BLE001
-            raise EngineError(f"Не удалось загрузить Qwen3-ASR из {path}: {exc}") from exc
+            hint = missing_files_hint(exc) or transformers_version_hint(exc, "Qwen3-ASR", "5.13")
+            log.error("Qwen3-ASR не загрузился из %s: %s", path, exc, exc_info=True)
+            raise EngineError(f"Не удалось загрузить Qwen3-ASR из {path}: {exc}{hint}") from exc
         self.loaded_model_id = model.model_id
-        log.info("Qwen3-ASR загружен: %s (%s, %s)", model.model_id, device, self.compute_type)
+        log.info(
+            "Qwen3-ASR загружен: %s (%s, %s) за %.1f с",
+            model.model_id, device, self.compute_type, time.time() - started,
+        )
+
+    # ------------------------------------------------------------------ #
+    def _qwen_inputs(self, chunk: np.ndarray, language: Optional[str], prompt: Optional[str]) -> Any:
+        """Готовит входы модели через apply_transcription_request.
+
+        ВАЖНО: аудио передаётся МАССИВОМ 16 кГц (именно это принимает
+        transformers 5.x — make_list_of_audio ждёт numpy/torch-массив, путь
+        или URL). Вариант «кортеж (массив, sample_rate)» из старых примеров
+        приводит к «Invalid input type. Must be a single audio…» — этот баг
+        здесь исправлен.
+        """
+        apply = getattr(self._processor, "apply_transcription_request", None)
+        if apply is None:
+            raise EngineError(
+                "Установленный transformers не поддерживает apply_transcription_request "
+                "для Qwen3-ASR — обнови transformers (нужен >= 5.13)."
+            )
+        try:
+            return apply(audio=chunk, language=language, prompt=prompt)
+        except TypeError as exc:
+            # страховка от смены сигнатуры между версиями transformers
+            text = str(exc)
+            if "prompt" in text:
+                log.debug("apply_transcription_request без prompt: %s", exc)
+                return apply(audio=chunk, language=language)
+            if "language" in text:
+                log.debug("apply_transcription_request без language: %s", exc)
+                return apply(audio=chunk)
+            raise
+
+    def _infer_qwen_once(
+        self, model: Any, chunk: np.ndarray, language: Optional[str], prompt: Optional[str],
+    ) -> Tuple[str, str]:
+        """Один forward+generate на кусок. Возвращает (текст, язык)."""
+        import torch
+
+        inputs = self._qwen_inputs(chunk, language, prompt)
+        inputs = inputs.to(model.device, model.dtype)
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, max_new_tokens=2048)
+        generated = output_ids[:, inputs["input_ids"].shape[1]:]
+        decode = getattr(self._processor, "decode", None)
+        if decode is None:
+            raise EngineError("Процессор Qwen3-ASR без decode() — обнови transformers (>= 5.13)")
+        try:
+            parsed = decode(generated, return_format="parsed")[0]
+        except (TypeError, ValueError):
+            # совсем старые/новые варианты API: декодируем «сыро» и чистим маркеры
+            raw = decode(generated, skip_special_tokens=True)
+            text = raw[0] if isinstance(raw, (list, tuple)) else str(raw)
+            parsed = {"transcription": text, "language": ""}
+        if isinstance(parsed, (list, tuple)):
+            parsed = parsed[0] if parsed else {}
+        if not isinstance(parsed, dict):
+            parsed = {"transcription": str(parsed), "language": ""}
+        return str(parsed.get("transcription") or "").strip(), str(parsed.get("language") or "")
+
+    @staticmethod
+    def _is_cuda_oom(exc: BaseException) -> bool:
+        try:
+            import torch
+
+            oom_class = getattr(torch.cuda, "OutOfMemoryError", None)
+            if oom_class is not None and isinstance(exc, oom_class):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+    def _infer_qwen(
+        self,
+        model: Any,
+        chunk: np.ndarray,
+        language: Optional[str],
+        prompt: Optional[str],
+        offset_seconds: float,
+    ) -> Tuple[str, str]:
+        """Распознаёт кусок; при нехватке VRAM делит его пополам (рекурсивно).
+
+        Потребительские GPU (6 ГБ VRAM) не всегда тянут 120-секундное окно
+        энкодера Qwen3-ASR — вместо падения «CUDA out of memory» кусок
+        режется пополам и половинки считаются по отдельности (тексты
+        склеиваются). Предел деления — QWEN_SPLIT_FLOOR_SECONDS.
+        """
+        import torch
+
+        try:
+            return self._infer_qwen_once(model, chunk, language, prompt)
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_cuda_oom(exc):
+                raise
+            floor_samples = int(QWEN_SPLIT_FLOOR_SECONDS * SAMPLE_RATE)
+            if len(chunk) < floor_samples * 2:
+                raise
+            try:
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+            mid = len(chunk) // 2
+            log.warning(
+                "Qwen3-ASR: не хватило VRAM на кусок %.1f с (около %.1f с) — делю пополам и повторяю",
+                len(chunk) / SAMPLE_RATE, offset_seconds,
+            )
+            left = self._infer_qwen(model, np.ascontiguousarray(chunk[:mid]), language, prompt, offset_seconds)
+            right = self._infer_qwen(
+                model, np.ascontiguousarray(chunk[mid:]), language, prompt,
+                offset_seconds + mid / SAMPLE_RATE,
+            )
+            text = (left[0] + (" " if left[0] and right[0] else "") + right[0]).strip()
+            detected = left[1] or right[1]
+            return text, detected
 
     # ------------------------------------------------------------------ #
     def transcribe(
@@ -467,40 +741,59 @@ class QwenASREngine(TorchASREngine):
         on_segment: Optional[SegmentCallback] = None,
         cancel: Optional[CancelToken] = None,
     ) -> TranscriptResult:
-        import torch
-
         model = self._ensure_model()
         started = time.time()
-        audio = np.asarray(audio, dtype=np.float32)
+        audio = np.ascontiguousarray(np.asarray(audio, dtype=np.float32))
         total = len(audio) or 1
 
         language = (options.get("language") or "").strip() or None
         prompt_parts = [options.get("initial_prompt") or "", options.get("hotwords") or ""]
         prompt = " ".join(part.strip() for part in prompt_parts if part.strip()) or None
 
+        # нарезка по паузам (VAD, как у остальных движков): куски не режут
+        # слова посередине, а короткие хвосты сливаются с предыдущим куском
+        bounds = list(
+            iter_smart_chunks(
+                audio, SAMPLE_RATE, self.chunk_seconds, search_seconds=2.0,
+                use_vad=bool(options.get("vad", True)),
+            )
+        )
+        log.debug(
+            "Qwen3-ASR: %d кусков (язык=%s, prompt=%s, аудио %.1f с)",
+            len(bounds), language or "авто", bool(prompt), duration,
+        )
+
         segments: List[Segment] = []
         language_detected = ""
         warnings: List[str] = []
 
-        for start, end in iter_silence_chunks(audio, SAMPLE_RATE, self.chunk_seconds):
+        for start, end in bounds:
             if cancel and cancel():
                 warnings.append("Распознавание остановлено пользователем")
                 break
             chunk = audio[start:end]
+            chunk_started = time.time()
             try:
-                inputs = self._processor.apply_transcription_request(
-                    audio=(chunk, SAMPLE_RATE), language=language, prompt=prompt
-                )
-                inputs = inputs.to(model.device, model.dtype)
-                with torch.no_grad():
-                    output_ids = model.generate(**inputs, max_new_tokens=2048)
-                generated = output_ids[:, inputs["input_ids"].shape[1]:]
-                parsed = self._processor.decode(generated, return_format="parsed")[0]
+                text, detected = self._infer_qwen(model, chunk, language, prompt, start / SAMPLE_RATE)
             except Exception as exc:  # noqa: BLE001
-                raise EngineError(f"Qwen3-ASR не смог распознать фрагмент: {exc}") from exc
+                hint = ""
+                if self._is_cuda_oom(exc):
+                    hint = (
+                        "\n\nНе хватило видеопамяти даже на минимальный кусок. "
+                        "Попробуй модель Qwen3-ASR 0.6B или другое устройство "
+                        "(Сервис → Настройки → «Скорость и железо»)."
+                    )
+                log.error(
+                    "Qwen3-ASR сбой на куске %.1f–%.1f с: %s",
+                    start / SAMPLE_RATE, end / SAMPLE_RATE, exc, exc_info=True,
+                )
+                raise EngineError(f"Qwen3-ASR не смог распознать фрагмент: {exc}{hint}") from exc
 
-            text = str(parsed.get("transcription") or "").strip()
-            language_detected = str(parsed.get("language") or language_detected)
+            language_detected = detected or language_detected
+            log.debug(
+                "Qwen3-ASR: кусок %.1f–%.1f с -> %d симв. за %.1f с",
+                start / SAMPLE_RATE, end / SAMPLE_RATE, len(text), time.time() - chunk_started,
+            )
             if text:
                 segment = Segment(start=start / SAMPLE_RATE, end=end / SAMPLE_RATE, text=text)
                 segments.append(segment)
@@ -642,9 +935,11 @@ class GigaAMEngine(TorchASREngine):
             try:
                 loaded = self._load_direct(path, dtype)
             except Exception as direct_exc:  # noqa: BLE001
+                log.error("GigaAM не загрузился из %s: %s / %s", path, exc, direct_exc, exc_info=True)
                 raise EngineError(
                     f"Не удалось загрузить GigaAM из {path}: {exc} / {direct_exc}\n"
                     "Нужны пакеты: torch, torchaudio, transformers, hydra-core, omegaconf, sentencepiece."
+                    + missing_files_hint(direct_exc)
                 ) from exc
         try:
             loaded = loaded.to(device)

@@ -117,10 +117,14 @@ class HFPipelineEngine(TorchASREngine):
             if self._pipe is not None:
                 break
         if self._pipe is None:
+            from .torch_engines import missing_files_hint
+
+            log.error("HF-pipeline не собрался для %s: %s", path, last_error, exc_info=last_error)
             raise EngineError(
                 f"Не удалось загрузить модель «{model.name}» через transformers: {last_error}\n\n"
                 "Возможно, это не ASR-модель, либо она требует редкие зависимости — "
                 "смотри текст ошибки выше."
+                + missing_files_hint(last_error or EngineError(""))
             ) from last_error
 
         # Некоторые модели несут в generation_config return_timestamps=True —

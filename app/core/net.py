@@ -112,8 +112,12 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
     params = {"recursive": "true"} if recursive else {}
 
     files: List[RemoteFile] = []
-    for _ in range(20):  # защита от бесконечной пагинации
-        resp = sess.get(url, params=params, timeout=HTTP_TIMEOUT)
+    for page in range(20):  # защита от бесконечной пагинации
+        log.debug("hf_tree: GET %s (params=%s, страница %d)", url, params, page + 1)
+        try:
+            resp = sess.get(url, params=params, timeout=HTTP_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - requests и его зависимости
+            raise NetworkError(f"Не удалось получить список файлов {repo_id}: {exc}") from exc
         if resp.status_code == 404:
             raise NetworkError(f"Репозиторий или папка не найдены: {repo_id}/{subfolder}")
         if resp.status_code == 401:
@@ -149,6 +153,10 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
             break
         url = match.group(1)
         params = {}
+    log.debug("hf_tree: %s/%s — файлов: %d, байт: %d",
+              repo_id, subfolder or "main",
+              sum(1 for f in files if not f.is_dir),
+              sum(f.size for f in files if not f.is_dir))
     return files
 
 
@@ -174,6 +182,19 @@ def hf_read_json(repo_id: str, filename: str, revision: str = "main", subfolder:
 # --------------------------------------------------------------------------- #
 
 
+def _sleep_cancelable(seconds: float, cancel: Optional[CancelToken] = None) -> None:
+    """Спит мелкими порциями, чтобы отмена срабатывала мгновенно.
+
+    Без этого закрытие окна во время паузы ретрая (до 20 с) оставляло поток
+    живым — отсюда «QThread: Destroyed while thread is still running».
+    """
+    deadline = time.time() + max(0.0, seconds)
+    while time.time() < deadline:
+        if cancel is not None and cancel():
+            raise DownloadCancelled("Скачивание отменено")
+        time.sleep(min(0.2, max(0.0, deadline - time.time())))
+
+
 def download_file(
     url: str,
     dest: Path,
@@ -181,10 +202,15 @@ def download_file(
     cancel: Optional[CancelToken] = None,
     resume: bool = True,
     timeout: int = 120,
+    max_attempts: int = 5,
+    backoff_cap: int = 20,
 ) -> Path:
     """Качает файл с доозагрузкой (Range), прогрессом и отменой.
 
     Пишет в `dest.part`, по успеху переименовывает — «половинок» в models/ не будет.
+    После скачивания сверяет размер с Content-Length: «тихо обрезанный» файл
+    (сервер закрыл соединение без ошибки) докачивается заново, а не сохраняется.
+    Паузы между попытками слушают отмену — закрыть окно можно в любой момент.
     """
     requests = _requests()
     dest = Path(dest)
@@ -193,6 +219,10 @@ def download_file(
 
     existing = part.stat().st_size if (resume and part.exists()) else 0
     headers = {"Range": f"bytes={existing}-"} if existing else {}
+    log.debug("download_file: %s -> %s (доозагрузка с %d байт)", url, dest, existing)
+
+    class _IncompleteError(RuntimeError):
+        """Размер не совпал с Content-Length — файл оборван."""
 
     attempt = 0
     while True:
@@ -213,6 +243,10 @@ def download_file(
                             "«Agree and access», либо используй открытый зеркальный репозиторий."
                         )
                     raise NetworkError(f"HTTP {resp.status_code} при скачивании {url}{hint}")
+                log.debug(
+                    "download_file: HTTP %s, content-length=%s, попытка %d",
+                    resp.status_code, resp.headers.get("Content-Length"), attempt,
+                )
 
                 if resp.status_code == 200 and existing:
                     # сервер не поддержал Range — качаем заново
@@ -242,15 +276,26 @@ def download_file(
                             speed = (done - existing) / elapsed
                             progress(done, total, speed, dest.name)
                             last_report = now
+
+                # верификация: оборванное соединение может закрыть поток без
+                # исключения — сверяем фактический размер с заявленным
+                actual = part.stat().st_size if part.exists() else 0
+                if total and actual != total:
+                    raise _IncompleteError(f"получено {actual} из {total} байт")
             break
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
-            if attempt >= 5:
-                raise NetworkError(f"Не удалось скачать {url} после {attempt} попыток: {exc}") from exc
-            wait = min(2 ** attempt, 20)
-            log.warning("Сеть моргнула (%s), повтор через %d с…", exc.__class__.__name__, wait)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+            _IncompleteError,
+        ) as exc:
             if cancel is not None and cancel():
                 raise DownloadCancelled("Скачивание отменено") from exc
-            time.sleep(wait)
+            if attempt >= max_attempts:
+                raise NetworkError(f"Не удалось скачать {url} после {attempt} попыток: {exc}") from exc
+            wait = min(2 ** attempt, backoff_cap)
+            log.warning("Сеть моргнула (%s), повтор через %d с…", exc.__class__.__name__, wait)
+            _sleep_cancelable(wait, cancel)
             # пересчитываем смещение для доозагрузки
             existing = part.stat().st_size if part.exists() else 0
             headers = {"Range": f"bytes={existing}-"} if existing else {}
@@ -261,7 +306,13 @@ def download_file(
     if not part.exists() or part.stat().st_size == 0:
         raise NetworkError(f"Пустой файл после скачивания: {url}")
 
+    final_size = part.stat().st_size
+    elapsed = max(time.time() - started, 1e-6)
     os.replace(part, dest)
+    log.debug(
+        "download_file: готово %s (%s за %.1f с, %.1f МБ/с)",
+        dest.name, f"{final_size} байт", elapsed, final_size / elapsed / (1024 * 1024),
+    )
     return dest
 
 

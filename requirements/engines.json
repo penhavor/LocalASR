@@ -29,12 +29,12 @@
     "title": "Qwen3-ASR (transformers + PyTorch)",
     "pip": [
       "torch>=2.6",
-      "transformers>=5.0",
+      "transformers>=5.13",
       "accelerate>=1.0",
       "soundfile>=0.12"
     ],
     "import": "transformers",
-    "note": "Ставится автоматически при первом запуске модели Qwen3-ASR (один раз; повторные запуски ничего не качают).",
+    "note": "Ставится автоматически при первом запуске модели Qwen3-ASR (один раз; повторные запуски ничего не качают). Нужен именно transformers 5.13+ — в более ранних версиях нет поддержки Qwen3-ASR.",
     "install_size_text": "~0.2–1 ГБ (основной вес — PyTorch; зависит от системы)"
   },
   "gigaam": {

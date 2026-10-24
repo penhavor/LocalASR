@@ -133,10 +133,17 @@ def export_all_formats(
 ) -> List[Path]:
     """Экспорт сразу в несколько форматов.
 
-    Имена: «<stem>.txt», «<stem>.srt», …; если у двух форматов одно расширение
-    (txt и txt-time), к имени добавляется метка из `labels` — «<stem> (таймкоды).txt».
-    Существующие файлы не перезаписываются (если overwrite=False) — вместо этого
-    добавляется номер: «<stem> (2).txt».
+    Именование (единое правило для всех результатов):
+      * ВСЕГДА «<имя оригинала> <ГГГГ-ММ-ДД ЧЧ-ММ-СС>.txt» — дата и время в
+        имени делают каждый запуск уникальным: файлы разных прогонов никогда
+        не перетираются и легко отличить, где чей результат;
+      * несколько форматов одного запуска делят ОДНУ метку времени:
+        «лекция 1 2026-10-24 15-30-05.txt», «лекция 1 2026-10-24 15-30-05.srt»;
+      * у двух форматов одно расширение (txt и txt-time) -> добавляется метка
+        из `labels`: «лекция 1 (таймкоды) 2026-10-24 15-30-05.txt»;
+      * редчайшая коллизия (два экспорта в одну секунду) -> счётчик «(2)»;
+      * overwrite=True (CLI --overwrite) -> чистое имя «<stem>.txt» и
+        перезапись: для тех, кому нужен детерминированный путь.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -144,6 +151,8 @@ def export_all_formats(
     unique_formats = list(dict.fromkeys(formats))
     written: List[Path] = []
     taken: set[str] = set()
+    # одна метка времени на весь вызов: файлы одного прогона группируются
+    stamp = paths.datetime_stamp()
 
     for fmt in unique_formats:
         suffix = paths.output_suffix(fmt)
@@ -152,13 +161,16 @@ def export_all_formats(
         if len(same_suffix) > 1 and labels.get(fmt):
             stem_variant = f"{stem} ({labels[fmt]})"
 
-        name = f"{stem_variant}{suffix}"
-        counter = 2
-        while name.lower() in taken or (not overwrite and (directory / name).exists()):
-            name = f"{stem_variant} ({counter}){suffix}"
-            counter += 1
-            if counter > 999:
-                break
+        if overwrite:
+            name = f"{stem_variant}{suffix}"
+        else:
+            name = f"{stem_variant} {stamp}{suffix}"
+            counter = 2
+            while name.lower() in taken or (directory / name).exists():
+                name = f"{stem_variant} {stamp} ({counter}){suffix}"
+                counter += 1
+                if counter > 999:
+                    break
 
         target = directory / name
         taken.add(name.lower())

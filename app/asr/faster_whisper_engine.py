@@ -208,6 +208,13 @@ class FasterWhisperEngine(ASREngine):
                 options.get("hallucination_silence_threshold", 1.5)
             )
 
+        log.debug(
+            "faster-whisper: язык=%s task=%s beam=%s vad=%s words=%s batched=%s batch=%s "
+            "prompt=%r hotwords=%r",
+            language, task, common["beam_size"], use_vad, word_timestamps,
+            use_batched, batch_size, bool(options.get("initial_prompt")), bool(options.get("hotwords")),
+        )
+
         started = time.time()
         info = None
         segments_iter = None

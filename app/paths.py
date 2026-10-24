@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -147,19 +148,36 @@ def sanitize_stem(name: str) -> str:
     return stem or "transcript"
 
 
+def datetime_stamp(when: Optional[float] = None) -> str:
+    """Метка «дата и время» для имён файлов: 2026-10-24 15-30-05.
+
+    Двоеточия в имени заменены на дефисы — иначе Windows не даст создать файл.
+    """
+    return time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(when if when is not None else time.time()))
+
+
 def unique_path(directory: Path, stem: str, suffix: str, overwrite: bool = False) -> Path:
-    """Путь результата: `лекция 1.txt`; при коллизии — `лекция 1 (2).txt`."""
+    """Путь результата: `лекция 1.txt`.
+
+    При коллизии и выключенной перезаписи файл НЕ затирается: имя получает
+    хвост «дата и время» — `лекция 1 2026-10-24 15-30-05.txt`. Если и такое
+    имя уже занято (два запуска в одну секунду), добавляется счётчик.
+    """
     directory = Path(directory)
     _ensure(directory)
     target = directory / f"{stem}{suffix}"
-    if overwrite:
+    if overwrite or not target.exists():
+        return target
+    target = directory / f"{stem} {datetime_stamp()}{suffix}"
+    if not target.exists():
         return target
     counter = 2
+    base = f"{stem} {datetime_stamp()}"
     while target.exists():
-        target = directory / f"{stem} ({counter}){suffix}"
+        target = directory / f"{base} ({counter}){suffix}"
         counter += 1
         if counter > 999:  # защита от бесконечного цикла
-            target = directory / f"{stem}-{hashlib.md5(str(target).encode()).hexdigest()[:6]}{suffix}"
+            target = directory / f"{base}-{hashlib.md5(str(target).encode()).hexdigest()[:6]}{suffix}"
             break
     return target
 

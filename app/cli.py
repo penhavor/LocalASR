@@ -181,6 +181,15 @@ def run_gui(argv: Sequence[str]) -> int:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_NAME)
 
+    # колёсико мыши над комбо/спинбоксом больше НЕ меняет значение — только
+    # прокручивает страницу (случайные смены значений при скролле раздражали)
+    try:
+        from .ui.wheelguard import install_wheel_guard
+
+        install_wheel_guard(app)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Wheel guard не установлен: %s", exc)
+
     from .ui import theme
     from .ui.main_window import MainWindow, app_icon
     from .settings import Settings
@@ -199,7 +208,9 @@ def run_gui(argv: Sequence[str]) -> int:
             None,
             f"{APP_NAME} — ошибка интерфейса",
             f"Не удалось создать главное окно:\n\n{type(exc).__name__}: {exc}\n\n"
-            f"Подробности: {paths.logs_dir() / 'localasr.log'}\n\n"
+            f"Папка логов: {paths.logs_dir()}\n"
+            "(подробный лог-файл включается в Настройки → «Журнал и диагностика»"
+            " или переменной LOCALASR_LOG=1)\n\n"
             "Что можно попробовать:\n"
             "  1. Сервис → «Проверить и починить окружение».\n"
             "  2. Удалить папку settings/ и запустить заново.\n"
@@ -214,6 +225,11 @@ def run_gui(argv: Sequence[str]) -> int:
         window.show()
     else:
         window.showMaximized()
+
+    # Программа успешно стартовала (окно создано и показано) — установочный
+    # лог bootstrap.log больше не нужен и удаляется. При любой ошибке запуска
+    # выполнение сюда не доходит, и лог остаётся для диагностики.
+    cleanup_bootstrap_log()
 
     def _global_exception(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
@@ -238,7 +254,10 @@ def _print_fatal(title: str, message: str) -> None:
     print(text, file=sys.stderr, flush=True)
     log.critical(text)
     try:
-        log_path = paths.logs_dir() / "localasr.log"
+        from . import logutils
+
+        current = logutils.current_log_file()
+        log_path = current or paths.logs_dir()
         print(f"\nЛог: {log_path}", file=sys.stderr, flush=True)
     except Exception:  # noqa: BLE001
         pass
@@ -505,6 +524,7 @@ def _inside_venv() -> bool:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     setup_logging()
+    _configure_file_logging()
 
     # argparse не знает про наши «глобальные» флаги до разбора
     parser = build_parser()
@@ -534,6 +554,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log.critical("Критическая ошибка:\n%s", traceback.format_exc())
         _print_fatal("Критическая ошибка", f"{type(exc).__name__}: {exc}")
         return 1
+
+
+def _configure_file_logging() -> None:
+    """Файловый лог по настройкам (по умолчанию выключен).
+
+    Приоритет: LOCALASR_LOG=1/0 → settings.file_logging → выключен.
+    Каждый запуск с включённым логом создаёт новый файл в logs/.
+    """
+    from . import logutils
+
+    enabled = False
+    try:
+        from .settings import Settings
+
+        enabled = bool(Settings.load().file_logging)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Не удалось прочитать настройку логирования: %s", exc)
+    logutils.configure_file_logging(enabled)
+
+
+def cleanup_bootstrap_log() -> bool:
+    """Удаляет logs/bootstrap.log после УСПЕШНОГО запуска программы.
+
+    Лог подготовки окружения нужен только пока программа не стартовала:
+    при ошибке выполнение до сюда не доходит и файл остаётся для диагностики,
+    а при успешном старте (окно создано и показано) — удаляется, чтобы logs/
+    не засорялась. True, если файл был удалён.
+    """
+    try:
+        bootstrap_log = paths.logs_dir() / "bootstrap.log"
+        if bootstrap_log.is_file():
+            bootstrap_log.unlink()
+            log.debug("bootstrap.log удалён: программа успешно запущена")
+            return True
+    except OSError as exc:
+        log.debug("Не удалось удалить bootstrap.log: %s", exc)
+    return False
 
 
 if __name__ == "__main__":

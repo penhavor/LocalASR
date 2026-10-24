@@ -106,11 +106,20 @@ def main() -> int:
     settings.beam_size = 9
     settings.advanced_open = True
     settings.save()
+    # файловое логирование включено — сброс до заводских обязан его выключить
+    from pathlib import Path as _Path
+    from app import logutils
+    logutils.enable_file_logging(root=_Path(tmp))
+    settings.file_logging = True
+    settings.save()
+    check(logutils.current_log_file() is not None, "лог-файл активен до сброса")
     # реальный поток: диалог сначала сбрасывает объект настроек, затем зовёт колбэк окна
     settings.reset_to_defaults()
     win._reset_settings_to_defaults()
     app.processEvents()
     check(settings.language == "ru", "после сброса язык = ru")
+    check(settings.file_logging is False, "после сброса файловое логирование выключено")
+    check(logutils.current_log_file() is None, "лог немедленно отключён (без перезапуска)")
     check(settings.beam_size == 5, "после сброса beam = 5")
     check(not settings.advanced_open, "после сброса расширенные настройки свёрнуты")
     check(not win.advanced_frame.isVisible(), "панель расширенных настроек скрыта после сброса")

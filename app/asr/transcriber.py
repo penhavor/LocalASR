@@ -205,6 +205,12 @@ def transcribe_file(
     # ------------------------------------------------------------------ #
     report(0.01, f"Читаю {source.name}")
     info = probe(source)
+    log.debug(
+        "probe(%s): длительность=%.1f с, аудио-потоков=%d, видео-потоков=%d, "
+        "кодек=%s, sample_rate=%d, каналов=%d, ошибка=%r",
+        source.name, info.duration, info.audio_streams, info.video_streams,
+        info.codec, info.sample_rate, info.channels, info.error,
+    )
     if info.audio_streams == 0 and info.error:
         result.error = info.error
         return result
@@ -266,6 +272,12 @@ def transcribe_file(
     # звук больше не нужен — освобождаем память до постобработки
     del audio
 
+    log.debug(
+        "ASR(%s): сегментов=%d, язык=%s, warnings=%s, %.1f с",
+        source.name, len(transcript.segments), transcript.language or "—",
+        transcript.warnings or "—", transcript.elapsed_seconds,
+    )
+
     result.language = transcript.language or (options.language or "")
     result.warnings.extend(transcript.warnings)
     if transcript.audio_duration:
@@ -279,6 +291,10 @@ def transcribe_file(
     if options.suppress_hallucinations:
         cleaned = sanitize_segments(segments, aggressive=True)
         result.dropped = len(segments) - len(cleaned)
+        log.debug(
+            "Постобработка(%s): сегментов %d -> %d (отброшено %d)",
+            source.name, len(segments), len(cleaned), result.dropped,
+        )
         segments = cleaned
     else:
         segments = [segment for segment in segments if segment.text.strip()]
@@ -340,6 +356,7 @@ def transcribe_file(
         paragraphs=options.paragraphs,
         overwrite=options.overwrite,
     )
+    log.debug("Экспорт(%s): %s", source.name, ", ".join(str(p) for p in written))
 
     result.outputs = written
     result.ok = True

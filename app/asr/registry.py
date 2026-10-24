@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from ..constants import (
@@ -133,6 +134,7 @@ class EngineRegistry:
         with self._lock:
             self._hardware_cache = data
             self._hardware_raw = info
+        log.debug("Железо определено: %s", data)
         return dict(data)
 
     def hardware_info(self) -> Any:
@@ -156,6 +158,7 @@ class EngineRegistry:
                 and self._engine_model_id == ref.model_id
                 and self._engine.name == ref.engine
             ):
+                log.debug("Реестр: %s уже загружена — переиспользую движок %s", ref.name, ref.engine)
                 return self._engine
 
         with self._load_lock:
@@ -191,6 +194,12 @@ class EngineRegistry:
                 }
             )
             log.info("Загружаю движок %s для модели %s", ref.engine, ref.name)
+            log.debug(
+                "Параметры загрузки: path=%s subfolder=%r device=%s compute=%s threads=%s gpu_index=%s",
+                ref.path, ref.subfolder, hardware.get("device"), hardware.get("compute_type"),
+                hardware.get("cpu_threads"), hardware.get("gpu_index"),
+            )
+            load_started = time.time()
             try:
                 engine.load(ref, hardware)
             except EngineNotInstalled:
@@ -203,6 +212,7 @@ class EngineRegistry:
                     log.warning("Движку %s не хватает модуля: %s", ref.engine, exc)
                     raise converted from exc
                 raise
+            log.debug("Движок %s загружен за %.1f с", ref.engine, time.time() - load_started)
             with self._lock:
                 self._engine = engine
                 self._engine_model_id = ref.model_id

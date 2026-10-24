@@ -399,6 +399,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._scroll_wrap(self._tab_quality()), "Качество текста")
         self.tabs.addTab(self._scroll_wrap(self._tab_speed()), "Скорость и железо")
         self.tabs.addTab(self._scroll_wrap(self._tab_engines()), "Движки")
+        self.tabs.addTab(self._scroll_wrap(self._tab_logging()), "Журнал и диагностика")
         self.tabs.addTab(self._scroll_wrap(self._tab_about()), "О программе")
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Save", "Cancel"))
@@ -748,6 +749,121 @@ class SettingsDialog(QDialog):
         else:
             QMessageBox.information(self, "Движки", "Установить пакеты можно из главного окна программы.")
 
+    # -- вкладка журнала (файловые логи) ---------------------------------- #
+    def _tab_logging(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        from .. import logutils
+
+        layout.addWidget(make_label("Подробный лог-файл", "H2"))
+        layout.addWidget(
+            make_label(
+                "По умолчанию программа НЕ пишет лог-файлы — папка logs/ остаётся пустой.\n"
+                "Когда логирование включено:\n"
+                "  • каждый запуск создаёт ОТДЕЛЬНЫЙ файл logs/localasr_ГГГГ-ММ-ДД_ЧЧ-ММ-СС.log;\n"
+                "  • в него попадает исчерпывающая информация обо всём, что происходит:\n"
+                "    параметры запуска, железо, сетевые запросы, стадии обработки файлов,\n"
+                "    тайминги, ошибки с полными стектрейсами — этого достаточно, чтобы\n"
+                "    воспроизвести и починить любой баг;\n"
+                "  • старые файлы подчищаются автоматически (хранится 30 последних).\n\n"
+                "Переключатель действует СРАЗУ — перезапускать программу не нужно.",
+                "Dim",
+                word_wrap=True,
+            )
+        )
+
+        self.file_logging_check = QCheckBox("Вести подробный лог-файл (logs/)")
+        self.file_logging_check.setChecked(bool(logutils.file_logging_enabled() or self.settings.file_logging))
+        self.file_logging_check.setToolTip(
+            "Включить/выключить запись подробного лога. Применяется мгновенно:\n"
+            "при включении файл в logs/ появляется сразу, при выключении — запись прекращается."
+        )
+        self.file_logging_check.toggled.connect(self._on_file_logging_toggled)
+        layout.addWidget(self.file_logging_check)
+
+        self.log_path_label = make_label("", "Muted", word_wrap=True)
+        self.log_path_label.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
+        layout.addWidget(self.log_path_label)
+
+        buttons = QHBoxLayout()
+        open_logs = QPushButton("Открыть папку логов")
+        open_logs.setObjectName("Ghost")
+        open_logs.setCursor(compat.CURSOR_POINTING_HAND)
+        open_logs.setToolTip("Показать папку logs/ в проводнике")
+        open_logs.clicked.connect(lambda: self._open_logs_folder())
+        buttons.addWidget(open_logs)
+        copy_path = QPushButton("Скопировать путь к текущему логу")
+        copy_path.setObjectName("Ghost")
+        copy_path.setCursor(compat.CURSOR_POINTING_HAND)
+        copy_path.setToolTip("Скопировать путь к активному лог-файлу в буфер обмена (удобно вставлять в issue)")
+        copy_path.clicked.connect(self._copy_log_path)
+        buttons.addWidget(copy_path)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        layout.addWidget(
+            make_label(
+                "Совет: если что-то пошло не так — включи логирование, повтори проблему\n"
+                "и приложи свежий файл из logs/ к описанию (Справка → «Сообщить о проблеме»).\n"
+                "Журнал событий в главном окне показывается всегда, независимо от этой настройки.",
+                "Muted",
+                word_wrap=True,
+            )
+        )
+        layout.addStretch(1)
+        self._refresh_log_path_label()
+        return page
+
+    def _on_file_logging_toggled(self, checked: bool) -> None:
+        """Применяет переключатель лога МГНОВЕННО (без «Сохранить»/перезапуска)."""
+        from .. import logutils
+
+        path = logutils.set_file_logging(bool(checked))
+        self.settings.file_logging = bool(checked)
+        self.settings.save()
+        self._refresh_log_path_label()
+        if checked and path:
+            self.log_path_label.setText(f"Лог пишется: {path}")
+
+    def _refresh_log_path_label(self) -> None:
+        from .. import logutils
+
+        current = logutils.current_log_file()
+        if current:
+            self.log_path_label.setText(f"Текущий лог-файл: {current}")
+        else:
+            files = logutils.list_log_files()
+            if files:
+                self.log_path_label.setText(
+                    f"Логирование выключено. Последний лог: {files[0]}"
+                )
+            else:
+                self.log_path_label.setText("Логирование выключено — файлов в logs/ нет.")
+
+    def _open_logs_folder(self) -> None:
+        from .widgets import open_in_file_manager
+
+        open_in_file_manager(paths.logs_dir())
+
+    def _copy_log_path(self) -> None:
+        from .. import logutils
+
+        current = logutils.current_log_file()
+        files = logutils.list_log_files()
+        target = current or (files[0] if files else None)
+        if target is None:
+            QMessageBox.information(self, "Журнал", "Лог-файлов пока нет — включи логирование.")
+            return
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(str(target))
+        except Exception:  # noqa: BLE001
+            pass
+
     def _tab_about(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1042,6 +1158,18 @@ class DiagnosticsDialog(QDialog):
         outer.addLayout(buttons)
 
     # ------------------------------------------------------------------ #
+    def done(self, result: int) -> None:
+        """Перед закрытием (крестик/Esc/«Закрыть») глушим все свои потоки."""
+        from .workers import stop_worker
+
+        stop_worker(self.audit_worker, 3000, "EnvAuditWorker")
+        stop_worker(self.restore_worker, 3000, "FileRestoreWorker")
+        stop_worker(self.package_worker, 3000, "PackageInstaller")
+        self.audit_worker = None
+        self.restore_worker = None
+        self.package_worker = None
+        super().done(result)
+
     def _start_audit(self) -> None:
         if self.audit_worker is not None and self.audit_worker.isRunning():
             return

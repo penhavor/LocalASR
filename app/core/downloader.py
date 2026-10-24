@@ -44,6 +44,13 @@ log = get_logger("downloader")
 ProgressCallback = Callable[[float, str], None]  # (доля 0..1, текст статуса)
 CancelToken = Callable[[], bool]
 
+#: маркер НЕЗАВЕРШЁННОЙ установки: создаётся в начале скачивания и удаляется
+#: только после полной верификации. Пока он на месте (и нет installed.json),
+#: каталог НЕ считает модель установленной — именно из-за отсутствия такой
+#: защиты прерванное сетью скачивание оставляло «полумодель», которую GUI
+#: показывал как готовую, а загрузка падала (нет preprocessor_config.json и т.п.)
+PARTIAL_MARKER = ".localasr-partial.json"
+
 # Файлы, которые не нужны для запуска (экономят гигабайты трафика)
 SKIP_ALWAYS = (
     re.compile(r"\.gitattributes$", re.I),
@@ -239,13 +246,63 @@ def _plan_local(local: Path, entry: ModelEntry) -> Dict:
 # --------------------------------------------------------------------------- #
 
 
+def _write_partial_marker(target_dir: Path, entry: ModelEntry, plan: Dict) -> None:
+    """Помечает папку как «установка не завершена» (см. PARTIAL_MARKER)."""
+    try:
+        payload = {
+            "id": entry.id,
+            "name": entry.name,
+            "source": entry.source,
+            "kind": plan.get("kind"),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "app_version": APP_VERSION,
+            "files": [rel for rel, _url, _size in plan.get("files") or []][:200],
+        }
+        net.write_json(target_dir / PARTIAL_MARKER, payload)
+        log.debug("Маркер частичной установки записан: %s", target_dir / PARTIAL_MARKER)
+    except OSError as exc:
+        log.debug("Не удалось записать маркер частичной установки: %s", exc)
+
+
+def _remove_partial_marker(target_dir: Path) -> None:
+    try:
+        (target_dir / PARTIAL_MARKER).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _verify_plan(target_dir: Path, files: List[Tuple[str, str, int]]) -> List[str]:
+    """Сверяет скачанное с планом: список расхождений (пустой = всё цело)."""
+    problems: List[str] = []
+    for rel, _url, size in files:
+        dest = target_dir / rel
+        if not dest.is_file():
+            problems.append(f"{rel}: отсутствует")
+            continue
+        actual = dest.stat().st_size
+        if size > 0 and actual != size:
+            problems.append(
+                f"{rel}: размер {actual} != ожидаемый {size}"
+            )
+    return problems
+
+
 def install_model(
     entry: ModelEntry,
     root: Optional[Path] = None,
     progress: Optional[ProgressCallback] = None,
     cancel: Optional[CancelToken] = None,
 ) -> InstallResult:
-    """Скачивает модель в models/<id>/ и пишет installed.json."""
+    """Скачивает модель в models/<id>/ и пишет installed.json.
+
+    Устойчивость к обрывам:
+      * на старте ставится маркер PARTIAL_MARKER — пока он на месте, каталог
+        НЕ считает модель установленной (никаких «полумоделей» в списке);
+      * уже скачанные целиком файлы при повторной установке пропускаются
+        (продолжение после обрыва сети стоит считаные секунды);
+      * в конце каждый файл сверяется с планом по размеру: обрезанный файл —
+        это ошибка установки, а не «модель установлена».
+    """
     started = time.time()
     root = Path(root) if root else paths.ROOT_DIR
     models_root = root / MODELS_DIRNAME
@@ -254,6 +311,13 @@ def install_model(
     plan = resolve_source(entry)
     files: List[Tuple[str, str, int]] = plan["files"]
     total_bytes = plan.get("total_bytes") or sum(size for _, _, size in files) or entry.size_bytes or 0
+    log.debug(
+        "install_model: %s | kind=%s repo=%s subfolder=%r revision=%s | файлов: %d | объём: %s",
+        entry.id, plan["kind"], plan.get("repo", "—"), plan.get("subfolder", ""),
+        plan.get("revision", "—"), len(files), paths.human_size(total_bytes),
+    )
+    for rel, _url, size in files[:80]:
+        log.debug("  план: %s (%s)", rel, paths.human_size(size))
 
     target_dir = models_root / sanitize_id(entry.id)
     if plan["kind"] == "local" and Path(plan["local"]).is_dir():
@@ -268,6 +332,9 @@ def install_model(
         progress(0.0, f"Подготовка: {entry.name} ({paths.human_size(total_bytes)})")
 
     target_dir.mkdir(parents=True, exist_ok=True)
+    is_local_source = plan["kind"] == "local"
+    if not is_local_source:
+        _write_partial_marker(target_dir, entry, plan)
     downloaded = 0
     skipped: List[str] = []
     done_bytes = 0
@@ -308,8 +375,27 @@ def install_model(
                     raise net.DownloadCancelled("Установка отменена")
                 dest = target_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # продолжение прерванной установки: целый файл не перекачиваем
+                if size > 0 and dest.is_file() and dest.stat().st_size == size:
+                    downloaded += size
+                    skipped.append(rel)
+                    log.debug("install_model: пропускаю уже скачанный %s (%s)", rel, paths.human_size(size))
+                    if progress and total_bytes:
+                        progress(min(0.999, downloaded / total_bytes), f"Уже скачан: {rel}")
+                    continue
                 net.download_file(url, dest, progress=report, cancel=cancel)
                 downloaded += size
+
+            # верификация: каждый файл плана на месте и правильного размера
+            problems = _verify_plan(target_dir, files)
+            if problems:
+                listing = "\n".join("  • " + p for p in problems[:10])
+                raise InstallError(
+                    f"Скачивание «{entry.name}» не завершилось корректно — "
+                    f"{len(problems)} файл(ов) повреждены или недокачаны:\n{listing}\n\n"
+                    "Скорее всего, оборвалась сеть. Запусти установку ещё раз — "
+                    "целые файлы будут пропущены, докачаются только недостающие."
+                )
 
         engine = detect_engine(target_dir) or entry.engine
         if not engine:
@@ -345,17 +431,24 @@ def install_model(
             "app_version": APP_VERSION,
             "custom": bool(entry.custom),
             "subdir": ct2_subfolder(target_dir),
+            "files": [rel for rel, _url, _size in files][:200],
         }
         net.write_json(target_dir / META_FILENAME, meta)
+        # установка завершена и проверена — маркер «недокачки» больше не нужен
+        _remove_partial_marker(target_dir)
 
     except net.DownloadCancelled:
         _cleanup_partial(target_dir)
+        log.warning("Установка %s отменена пользователем (папка помечена как неполная)", entry.id)
         raise
     except InstallError:
+        log.error("Установка %s не завершена: папка осталась помечена как неполная", entry.id)
         raise
     except net.NetworkError as exc:
+        log.error("Установка %s прервана сетевой ошибкой: %s", entry.id, exc)
         raise InstallError(f"Ошибка сети: {exc}") from exc
     except OSError as exc:
+        log.error("Установка %s прервана ошибкой диска: %s", entry.id, exc)
         raise InstallError(f"Ошибка диска: {exc}") from exc
 
     duration = time.time() - started

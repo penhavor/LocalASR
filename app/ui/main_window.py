@@ -67,7 +67,7 @@ from .dialogs import (
     SettingsDialog,
 )
 from .models_panel import ModelListPanel
-from .widgets import FileListWidget, FlowLayout, make_label, open_in_file_manager
+from .widgets import FileListWidget, FlowLayout, ToolTipMenu, make_label, open_in_file_manager
 from .workers import (
     CatalogRefreshWorker,
     FileRestoreWorker,
@@ -682,11 +682,14 @@ class MainWindow(QMainWindow):
         self.log_dock.setFeatures(compat.DOCK_CLOSABLE | compat.DOCK_MOVABLE)
 
         self.log_view = QPlainTextEdit()
-        self.log_view.setToolTip("Журнал событий программы (скрыть/показать — крестик на панели «Журнал»)")
+        # подсказка журналу не нужна: и так понятно, что это лог событий,
+        # а всплывающее окно при наведении только отвлекает при прокрутке
+        self.log_view.setToolTip("")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         self.log_view.setPlaceholderText("Журнал событий…")
         self.log_dock.setWidget(self.log_view)
+        self.log_dock.setToolTip("")
         self.addDockWidget(compat.BOTTOM_DOCK_AREA, self.log_dock)
         self.log_dock.setVisible(bool(self.settings.show_log_panel))
         self.log_dock.visibilityChanged.connect(lambda *_: self._schedule_geometry_save())
@@ -695,7 +698,12 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         bar = self.menuBar()
 
-        file_menu = bar.addMenu("Файлы")
+        file_menu = ToolTipMenu("Файлы", self)
+        bar.addMenu(file_menu)
+        file_menu.menuAction().setToolTip(
+            "Работа с файлами: добавить аудио/видео (или целую папку),\n"
+            "открыть результаты, показать таблицу обработанных файлов, выйти."
+        )
         self._add_action(file_menu, "Добавить файлы…", self.on_add_files, "Ctrl+O",
                          tip="Выбрать аудио/видео файлы для распознавания (можно несколько сразу)")
         self._add_action(file_menu, "Добавить папку…", self.on_add_folder, "Ctrl+Shift+O",
@@ -707,9 +715,15 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, "Показать результаты", self.on_show_results,
                          tip="Таблица обработанных файлов: статусы, имена результатов, скорость")
         file_menu.addSeparator()
-        self._add_action(file_menu, "Выход", self.close, "Ctrl+Q")
+        self._add_action(file_menu, "Выход", self.close, "Ctrl+Q",
+                         tip="Закрыть программу (идущая обработка будет остановлена после подтверждения)")
 
-        models_menu = bar.addMenu("Модели")
+        models_menu = ToolTipMenu("Модели", self)
+        bar.addMenu(models_menu)
+        models_menu.menuAction().setToolTip(
+            "Модели распознавания: добавить свою (ссылка/путь), обновить каталог,\n"
+            "открыть папку models/, выгрузить загруженную модель из памяти."
+        )
         self._add_action(models_menu, "Добавить свою модель (ссылка/путь)…", self.on_add_custom_model,
                          tip="Модель не из каталога: репозиторий Hugging Face, прямая ссылка или папка на диске")
         self._add_action(models_menu, "Обновить каталог из сети", self.on_refresh_catalog,
@@ -726,9 +740,14 @@ class MainWindow(QMainWindow):
         )
         self.unload_action.setEnabled(False)
 
-        service_menu = bar.addMenu("Сервис")
+        service_menu = ToolTipMenu("Сервис", self)
+        bar.addMenu(service_menu)
+        service_menu.menuAction().setToolTip(
+            "Сервисные инструменты: настройки программы, сведения о железе,\n"
+            "диагностика и восстановление, журналы (лог запуска, папка логов)."
+        )
         self._add_action(service_menu, "Настройки…", self.on_open_settings, "Ctrl+,",
-                         tip="Качество текста, устройство (CPU/GPU), сброс настроек по умолчанию")
+                         tip="Качество текста, устройство (CPU/GPU), журнал (лог-файлы), сброс настроек по умолчанию")
         self._add_action(service_menu, "Железо и окружение…", self.on_show_hardware,
                          tip="Что видит программа: процессор, память, видеокарта, ffmpeg")
         service_menu.addSeparator()
@@ -736,19 +755,26 @@ class MainWindow(QMainWindow):
                          tip="Проверить файлы программы, папки и библиотеки в .venv;\n"
                              "восстановить удалённое, починить окружение, убрать лишние пакеты")
         self._add_action(service_menu, "Открыть лог запуска", self.on_open_bootstrap_log,
-                         tip="Журнал подготовки окружения (создаётся при первом запуске main.py)")
+                         tip="Журнал подготовки окружения (main.py). При успешном запуске\n"
+                             "удаляется автоматически — остаётся только в случае ошибок")
         self._add_action(service_menu, "Открыть папку логов",
                          lambda: open_in_file_manager(paths.logs_dir()),
-                         tip="Журналы работы программы: localasr.log и лог установки")
+                         tip="Журналы работы программы: лог установки и подробные логи запусков\n"
+                             "(файл-лог включается в Настройки → «Журнал и диагностика»)")
 
-        help_menu = bar.addMenu("Справка")
+        help_menu = ToolTipMenu("Справка", self)
+        bar.addMenu(help_menu)
+        help_menu.menuAction().setToolTip(
+            "Справка: документация проекта, сообщение о проблеме, сведения о программе."
+        )
         self._add_action(help_menu, "README (GitHub)", lambda: QDesktopServices.openUrl(QUrl(REPO_URL)),
                          tip="Открыть страницу проекта с документацией в браузере")
         self._add_action(help_menu, "Сообщить о проблеме",
                          lambda: QDesktopServices.openUrl(QUrl(f"{REPO_URL}/issues/new")),
                          tip="Открыть форму создания issue на GitHub (нужен аккаунт)")
         help_menu.addSeparator()
-        self._add_action(help_menu, f"О программе ({APP_VERSION})", self.on_about)
+        self._add_action(help_menu, f"О программе ({APP_VERSION})", self.on_about,
+                         tip="Версия, движки, интерпретатор Python и путь к папке проекта")
 
     def _add_action(self, menu: QMenu, text: str, slot, shortcut: str = "", tip: str = "") -> QAction:
         action = QAction(text, self)
@@ -785,6 +811,7 @@ class MainWindow(QMainWindow):
             log.warning("Не удалось собрать информацию о железе: %s", exc)
             self.hardware = {}
 
+        log.debug("Железо при старте: %s", self.hardware)
         self.models_panel.set_hardware(self.hardware)
         self.models_panel.rebuild()
         self._refresh_gpu_button()
@@ -834,7 +861,9 @@ class MainWindow(QMainWindow):
         start_dir = self.settings.last_open_dir or str(Path.home())
         picked, _ = QFileDialog.getOpenFileNames(self, "Выбери аудио или видео", start_dir, MEDIA_FILTER)
         if not picked:
+            log.debug("Добавление файлов: диалог закрыт без выбора")
             return
+        log.debug("Добавление файлов: выбрано %d (%s)", len(picked), "; ".join(picked[:6]))
         self.settings.last_open_dir = str(Path(picked[0]).parent)
         self.settings.save()
         added = self.file_list.add_paths(picked)
@@ -928,6 +957,10 @@ class MainWindow(QMainWindow):
             self._select_model(entry)
 
     def _select_model(self, entry: ModelEntry, save: bool = True) -> None:
+        log.debug(
+            "Выбор модели: id=%s name=%s engine=%s installed=%s dir=%s save=%s",
+            entry.id, entry.name, entry.engine, entry.installed, entry.install_dir, save,
+        )
         self.selected_model = entry
         self.models_panel.set_selected(entry.id)
         index = self.model_combo.findData(entry.id)
@@ -948,6 +981,7 @@ class MainWindow(QMainWindow):
         self._update_work_button()
 
     def on_download_model(self, entry: ModelEntry) -> None:
+        log.debug("Запрошена установка модели: %s (source=%s)", entry.id, entry.source)
         if self.download_worker is not None and self.download_worker.isRunning():
             QMessageBox.information(self, "Идёт загрузка", "Дождись окончания текущего скачивания.")
             return
@@ -1043,6 +1077,7 @@ class MainWindow(QMainWindow):
         from ..core.downloader import uninstall_model
 
         if uninstall_model(entry, root=self.catalog.root):
+            log.debug("Модель удалена с диска: %s (%s)", entry.id, entry.install_dir)
             self._log(f"Модель удалена: {entry.name}")
         else:
             QMessageBox.warning(
@@ -1098,6 +1133,7 @@ class MainWindow(QMainWindow):
                 "Модель сейчас используется — выгрузить можно после завершения работы.",
             )
             return
+        log.debug("Выгрузка модели из памяти по запросу пользователя")
         registry.unload()
         self._log("Модель выгружена из оперативной памяти")
         self._sync_runtime_actions()
@@ -1212,6 +1248,18 @@ class MainWindow(QMainWindow):
         options = JobOptions.from_settings(entry, self.settings, output_dir)
         if self.timestamps_check.isChecked() and options.formats == ["txt"]:
             options.formats = ["txt-time"]
+        log.debug(
+            "on_work: файлы=%s | модель=%s (engine=%s, dir=%s) | output=%s | язык=%s | "
+            "beam=%s vad=%s clean=%s paragraphs=%s timestamps=%s words=%s batched=%s batch=%s | "
+            "device=%s compute=%s threads=%s gpu_index=%s parallel=%s overwrite=%s",
+            [str(f) for f in files], entry.id, entry.engine, entry.install_dir,
+            options.output_dir, options.language or "авто",
+            options.beam_size, options.use_vad, options.suppress_hallucinations,
+            options.paragraphs, self.settings.add_timestamps_to_txt,
+            options.word_timestamps, options.batched, options.batch_size,
+            options.device, options.compute_type, options.cpu_threads, options.gpu_index,
+            self.settings.parallel_files, options.overwrite,
+        )
 
         self.results = {}
         self.job_started_at = time.time()
@@ -1285,6 +1333,7 @@ class MainWindow(QMainWindow):
         self.results_button.setEnabled(bool(self.results))
 
     def _on_job_finished(self, ok: int, fail: int, seconds: float) -> None:
+        log.debug("Задача завершена: ok=%d fail=%d seconds=%.1f", ok, fail, seconds)
         cancelled = self.worker is not None and self.worker.cancelled
         engine_missing = bool(getattr(self.worker, "engine_missing", False))
         total = self._job_total_files
@@ -1385,6 +1434,7 @@ class MainWindow(QMainWindow):
         probe.start()
 
     def _on_torch_probed(self, installed: bool, cuda: bool, detail: str) -> None:
+        log.debug("Зонд PyTorch: installed=%s cuda=%s detail=%r", installed, cuda, detail)
         self.gpu_state = {"probed": True, "installed": installed, "cuda": cuda, "detail": detail}
         probe, self.torch_probe = self.torch_probe, None
         if probe is not None:
@@ -1753,7 +1803,13 @@ class MainWindow(QMainWindow):
         error_log = paths.ROOT_DIR / "logs" / "bootstrap_error.log"
         target = log_file if log_file.is_file() else error_log
         if not target.is_file():
-            QMessageBox.information(self, "Логи", "Лог установки ещё не создан.")
+            QMessageBox.information(
+                self, "Логи",
+                "Лога запуска нет — и это хорошая новость.\n\n"
+                "bootstrap.log ведётся только во время подготовки окружения и\n"
+                "автоматически удаляется при успешном запуске программы.\n"
+                "Он остаётся на диске, только если запуск завершился ошибкой.",
+            )
             return
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
@@ -1779,6 +1835,7 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == compat.dialog_accepted():
             self._apply_settings_to_ui()
+            log.debug("Настройки применены из диалога: %s", self.settings.to_dict())
             self._log("Настройки сохранены")
 
     def _reset_settings_to_defaults(self) -> None:
@@ -1806,6 +1863,13 @@ class MainWindow(QMainWindow):
             self.models_panel.reset_filters_to_defaults()
         except Exception as exc:  # noqa: BLE001
             log.debug("Не удалось сбросить фильтры: %s", exc)
+        # файловый лог — к стандартному состоянию (по умолчанию выключен)
+        try:
+            from .. import logutils
+
+            logutils.set_file_logging(bool(self.settings.file_logging))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось применить состояние логирования: %s", exc)
         self._update_output_hint()
         self._log("Настройки сброшены к стандартным")
         self._toast("Настройки сброшены к стандартным")
@@ -1842,7 +1906,16 @@ class MainWindow(QMainWindow):
         self.settings.language = self.language_combo.currentData() or ""
         # результат всегда в txt: отдельной настройки формата больше нет
         self.settings.output_format = "txt"
-        self.settings.output_dir = self.output_edit.text().strip()
+        # ВАЖНО: значение по умолчанию («outputs/ внутри проекта») НЕ
+        # сохраняется абсолютным путём — иначе после переноса папки проекта
+        # результаты продолжали бы уезжать по СТАРОМУ пути (баг «создал
+        # LocalASR/outputs на рабочем столе»). Пустая строка = «по умолчанию».
+        output_text = self.output_edit.text().strip()
+        default_text = str(paths.outputs_dir())
+        if not output_text or os.path.normcase(output_text) == os.path.normcase(default_text):
+            self.settings.output_dir = ""
+        else:
+            self.settings.output_dir = output_text
         self.settings.use_vad = self.vad_check.isChecked()
         self.settings.suppress_hallucinations = self.clean_check.isChecked()
         self.settings.paragraphs = self.paragraph_check.isChecked()
@@ -1902,9 +1975,19 @@ class MainWindow(QMainWindow):
         fmt = "txt-time" if self.timestamps_check.isChecked() else "txt"
         sample = paths.sanitize_stem("лекция 1.mp4")
         suffix = paths.output_suffix(fmt)
+        sample_name = f"{sample} {paths.datetime_stamp()}{suffix}"
+        note = (
+            "(имя оригинала + дата и время — результаты разных запусков\n"
+            "никогда не перетираются)"
+        )
+        try:
+            outside = paths.ROOT_DIR.resolve() not in output_dir.resolve().parents
+        except OSError:
+            outside = False
+        if outside:
+            note = "⚠ папка ВНЕ проекта — проверь, что выбрал её намеренно.\n" + note
         self.output_hint.setText(
-            f"Результат: {paths.short_path(output_dir, 46)} / «{sample}{suffix}» "
-            f"(имя файла = имени оригинала)"
+            f"Результат: {paths.short_path(output_dir, 46)} / «{sample_name}» {note}"
         )
 
     def _log(self, message: str) -> None:
@@ -1930,6 +2013,7 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event) -> None:  # noqa: N802
         urls = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
+        log.debug("Drag&drop: %d объект(ов): %s", len(urls), "; ".join(urls[:6]))
         if urls:
             added = self.file_list.add_paths(urls)
             self._log(f"Перетаскиванием добавлено: {added}")
@@ -2000,19 +2084,29 @@ class MainWindow(QMainWindow):
             if answer != compat.message_box_yes():
                 event.ignore()
                 return
-            self.worker.cancel()
-            self.worker.wait(5000)
 
-        for worker in (self.download_worker, self.package_worker, self.restore_worker):
-            if worker is not None and worker.isRunning():
-                worker.cancel()
-                worker.wait(3000)
+        # Все фоновые потоки останавливаются ГАРАНТИРОВАННО (cancel → wait →
+        # terminate). Иначе Qt на выходе пишет «QThread: Destroyed while thread
+        # is still running», а сетевые ретраи/pip могут пережить окно.
+        from .workers import stop_worker
+
+        log.debug("closeEvent: останавливаю фоновые потоки")
+        stop_worker(self.worker, 6000, "TranscribeWorker")
+        for name, worker in (
+            ("download", self.download_worker),
+            ("package", self.package_worker),
+            ("restore", self.restore_worker),
+            ("catalog", self.catalog_worker),
+            ("torch_probe", self.torch_probe),
+        ):
+            stop_worker(worker, 4000, name)
 
         self._collect_settings()
         self._save_geometry_now()
 
         detach_qt_sink(self.log_handler)
         registry.unload()
+        log.debug("closeEvent: завершение корректно")
         event.accept()
 
 

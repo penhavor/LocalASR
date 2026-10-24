@@ -171,7 +171,7 @@ def engine_packages(engine: str) -> List[str]:
         ENGINE_FASTER_WHISPER: [],
         ENGINE_WHISPERCPP: ["pywhispercpp>=1.4.0"],
         ENGINE_VOSK: ["vosk>=0.3.45"],
-        ENGINE_QWEN_ASR: ["torch>=2.6", "transformers>=5.0", "accelerate>=1.0", "soundfile"],
+        ENGINE_QWEN_ASR: ["torch>=2.6", "transformers>=5.13", "accelerate>=1.0", "soundfile"],
         ENGINE_GIGAAM: [
             "torch>=2.6", "torchaudio>=2.6", "transformers>=4.52",
             "hydra-core>=1.3,<2", "omegaconf>=2.3,<3", "sentencepiece>=0.2.2",

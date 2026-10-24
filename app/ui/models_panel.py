@@ -23,9 +23,12 @@ from PySide6.QtWidgets import (
 
 from ..constants import ENGINE_LABELS, ENGINES
 from ..core.models_catalog import ModelCatalog, ModelEntry
+from ..logutils import get_logger
 from ..settings import Settings
 from . import compat
 from .widgets import ModelCard, make_label
+
+log = get_logger("ui.models")
 
 # Сортировки: (ключ, подпись). Числовые характеристики sorts поддерживают
 # диапазоны-фильтры (см. _apply_filters), чтобы список не зависел от
@@ -107,6 +110,20 @@ class ModelListPanel(QFrame):
 
         self.count_label = make_label("", "Muted")
         header.addWidget(self.count_label)
+
+        # --- переключатель «свернуть/показать фильтры» ----------------------- #
+        # По умолчанию фильтры РАСКРЫТЫ. Когда они мешают (хочется видеть
+        # больше карточек моделей за раз) — сворачиваются одним кликом;
+        # состояние сохраняется в settings.json (catalog_filters.collapsed).
+        self.filters_toggle = QPushButton("▾ Фильтры")
+        self.filters_toggle.setObjectName("Link")
+        self.filters_toggle.setCursor(compat.CURSOR_POINTING_HAND)
+        self.filters_toggle.setToolTip(
+            "Свернуть/показать панель фильтров каталога.\n"
+            "В свёрнутом виде в списке помещается больше моделей."
+        )
+        self.filters_toggle.clicked.connect(self._toggle_filters)
+        header.addWidget(self.filters_toggle)
         root.addLayout(header)
 
         subtitle = make_label(
@@ -120,6 +137,8 @@ class ModelListPanel(QFrame):
 
         # --- фильтры ------------------------------------------------------ #
         filters = QFrame()
+        filters.setObjectName("FiltersFrame")
+        self.filters_frame = filters
         filters_layout = QGridLayout(filters)
         filters_layout.setContentsMargins(0, 0, 0, 0)
         filters_layout.setSpacing(8)
@@ -375,12 +394,65 @@ class ModelListPanel(QFrame):
             "year_hi": int(self.year_hi.value()),
             "params_lo": float(self.params_lo.value()),
             "params_hi": float(self.params_hi.value()),
+            "collapsed": self.filters_frame.isHidden(),
         }
+
+    # ------------------------------------------------------------------ #
+    #  Сворачивание панели фильтров
+    # ------------------------------------------------------------------ #
+    def _active_filter_count(self) -> int:
+        """Сколько фильтров отличается от значений по умолчанию."""
+        count = 0
+        if self.search.text().strip():
+            count += 1
+        if self.engine_filter.currentData():
+            count += 1
+        if self.vendor_filter.currentData():
+            count += 1
+        if int(self.quality_filter.currentData() or 0):
+            count += 1
+        if (self.sort_combo.currentData() or "default") != "default":
+            count += 1
+        if self.only_installed.isChecked():
+            count += 1
+        if not self.only_russian.isChecked():
+            count += 1
+        for spin in (self.size_lo, self.size_hi, self.ram_lo, self.ram_hi,
+                     self.year_lo, self.year_hi, self.params_lo, self.params_hi):
+            if spin.value() != spin.minimum():
+                count += 1
+        return count
+
+    def _apply_filters_visibility(self, visible: bool, save: bool = True) -> None:
+        self.filters_frame.setVisible(visible)
+        active = self._active_filter_count()
+        if visible:
+            self.filters_toggle.setText("▾ Фильтры")
+            self.filters_toggle.setToolTip(
+                "Свернуть панель фильтров каталога.\n"
+                "В свёрнутом виде в списке помещается больше моделей."
+            )
+        else:
+            self.filters_toggle.setText(f"▸ Фильтры ({active})" if active else "▸ Фильтры")
+            self.filters_toggle.setToolTip(
+                "Показать панель фильтров каталога."
+                + (f"\nСейчас активно фильтров: {active} — они продолжают работать в свёрнутом виде."
+                   if active else "")
+            )
+        if save:
+            self._save_filters()
+
+    def _toggle_filters(self) -> None:
+        # isHidden(), а не isVisible(): isVisible() у детей ещё не показанной
+        # панели всегда False, и логика переключения переворачивалась
+        self._apply_filters_visibility(self.filters_frame.isHidden())
 
     def _load_filters(self) -> None:
         if self.settings is None:
             return
         state = dict(self.settings.catalog_filters or {})
+        collapsed = bool(state.get("collapsed", False))
+        self._apply_filters_visibility(not collapsed, save=False)
         for widget, key, setter in (
             (self.engine_filter, "engine", "data"),
             (self.vendor_filter, "vendor", "data"),
@@ -486,6 +558,7 @@ class ModelListPanel(QFrame):
         self.count_label.setText(
             f"{len(entries)} в каталоге · {installed_count} установлено"
         )
+        log.debug("Панель моделей пересобрана: карточек %d, установлено %d", len(entries), installed_count)
         self._apply_filters()
 
     def card(self, model_id: str) -> Optional[ModelCard]:
@@ -613,3 +686,10 @@ class ModelListPanel(QFrame):
                 "Попробуй ослабить условия (например, снять галочку «С русским языком»\n"
                 "или обнулить диапазоны) либо нажать «Сбросить»."
             )
+        # свёрнутая панель фильтров: держим счётчик активных фильтров на кнопке
+        if self.filters_frame.isHidden():
+            self._apply_filters_visibility(False, save=False)
+        log.debug(
+            "Фильтры каталога: видно %d из %d | состояние=%s",
+            visible, len(self._cards), self._filters_dict(),
+        )

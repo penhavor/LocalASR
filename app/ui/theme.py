@@ -309,6 +309,34 @@ QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
     border-color: {ACCENT};
 }}
 
+QCheckBox:disabled, QRadioButton:disabled {{
+    color: #4d566b;
+}}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    border-color: {BORDER};
+    background-color: #12151d;
+}}
+
+QCheckBox::indicator:checked:disabled {{
+    background-color: #2a3854;
+    border-color: #2a3854;
+}}
+
+QToolButton {{
+    color: {TEXT};
+}}
+
+QToolButton:disabled {{
+    color: #4d566b;
+}}
+
+QPushButton#Ghost:disabled, QPushButton#Link:disabled, QPushButton#Danger:disabled {{
+    color: #4d566b;
+    border-color: {BORDER};
+    background-color: transparent;
+}}
+
 /* ---------------- списки ---------------- */
 QListWidget, QTreeView, QTableView {{
     background-color: {BG_INPUT};
@@ -476,6 +504,22 @@ QMenu::item {{
 QMenu::item:selected {{
     background-color: {ACCENT};
     color: #07101f;
+}}
+
+/* Неактивный пункт меню ОБЯЗАН выглядеть неактивным (серым) — иначе
+   «Выгрузить модель из памяти» неотличима от рабочих пунктов */
+QMenu::item:disabled {{
+    color: #4d566b;
+    background-color: transparent;
+}}
+
+QMenu::item:disabled:selected {{
+    background-color: transparent;
+    color: #4d566b;
+}}
+
+QMenuBar::item:disabled {{
+    color: #4d566b;
 }}
 
 QMenu::separator {{

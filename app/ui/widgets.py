@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QProgressBar,
     QPushButton,
     QToolButton,
@@ -45,6 +46,31 @@ def open_in_file_manager(path: Path | str) -> None:
     path = Path(path)
     target = path if path.is_dir() else path.parent
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+
+class ToolTipMenu(QMenu):
+    """Меню, у которого подсказки пунктов показываются при наведении курсора.
+
+    Штатный Qt показывает toolTip пункта меню не на всех платформах/стилях —
+    здесь делаем это явно, чтобы наведение на «Диагностика и восстановление…»
+    или «Выгрузить модель из памяти» всегда давало пояснение.
+    """
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        super().mouseMoveEvent(event)
+        try:
+            from PySide6.QtWidgets import QToolTip
+
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            action = self.actionAt(pos)
+            tip = action.toolTip() if action is not None else ""
+            if tip:
+                global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+                QToolTip.showText(global_pos, tip, self)
+            else:
+                QToolTip.hideText()
+        except (RuntimeError, AttributeError):
+            pass
 
 
 def open_url(url: str) -> None:

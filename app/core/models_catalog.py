@@ -399,9 +399,27 @@ class ModelCatalog:
                         meta = loaded
                 except (OSError, ValueError) as exc:
                     log.warning("Битый %s в %s: %s", META_FILENAME, child.name, exc)
+                # установка когда-то завершилась, но маркер снять не удалось —
+                # чистим, чтобы не смущать ни каталог, ни пользователя
+                try:
+                    (child / ".localasr-partial.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            # незавершённая установка (обрыв сети/отмена): маркер есть, а
+            # installed.json нет — такая папка НЕ считается установленной,
+            # иначе GUI предложил бы работать с «полумоделью» без части файлов
+            if not meta and (child / ".localasr-partial.json").is_file():
+                log.warning(
+                    "Пропускаю недокачанную модель %s: установка не была завершена "
+                    "(повторная установка докачает недостающие файлы)",
+                    child.name,
+                )
+                continue
 
             engine = str(meta.get("engine") or detect_engine(child))
             if not engine:
+                log.debug("Папка %s не похожа на модель — пропускаю", child.name)
                 continue  # папка не похожа на модель — игнорируем
 
             model_id = str(meta.get("id") or child.name)

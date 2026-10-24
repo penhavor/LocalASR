@@ -128,6 +128,7 @@ PROJECT_FILES: List[str] = [
     "app/ui/main_window.py",
     "app/ui/models_panel.py",
     "app/ui/theme.py",
+    "app/ui/wheelguard.py",
     "app/ui/widgets.py",
     "app/ui/workers.py",
 ]
@@ -1147,7 +1148,7 @@ def run(root: Optional[str] = None, argv: Optional[Sequence[str]] = None) -> int
         if code != 0:
             raise BootstrapError(
                 f"Приложение не запустилось (код {code}).\n"
-                f"Лог запуска: {os.path.join(root, 'logs', 'localasr.log')}\n"
+                f"Логи запуска: {os.path.join(root, 'logs')}\n"
                 f"Лог установки: {log.path}"
             )
         return 0

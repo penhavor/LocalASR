@@ -323,6 +323,7 @@ def _decode_with_ffmpeg(
     ]
 
     log.info("Декодирую звук: %s", path.name)
+    log.debug("ffmpeg cmd: %s", " ".join(cmd))
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,

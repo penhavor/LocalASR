@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import paths
-from .constants import DEFAULT_LANGUAGE, DEFAULT_OUTPUT_FORMAT, SETTINGS_FILENAME
+from .constants import (
+    DEFAULT_LANGUAGE,
+    DEFAULT_OUTPUT_FORMAT,
+    OUTPUTS_DIRNAME,
+    SETTINGS_FILENAME,
+)
+from .logutils import get_logger
+
+log = get_logger("settings")
 
 
 @dataclass
@@ -62,6 +70,7 @@ class Settings:
         "year_hi": 0,
         "params_lo": 0.0,
         "params_hi": 0.0,
+        "collapsed": False,       # свёрнута ли панель фильтров каталога
     })
 
     # --- интерфейс --------------------------------------------------------- #
@@ -72,6 +81,12 @@ class Settings:
     advanced_open: bool = False           # раскрыта ли панель «Расширенные настройки»
     theme: str = "dark"
     gpu_boost_offered: bool = False       # предложение «ускорить GPU» показано один раз
+
+    # --- диагностика --------------------------------------------------------- #
+    #: подробный файл-лог в logs/ (новый файл на каждый запуск).
+    #: По умолчанию ВЫКЛЮЧЕН, чтобы не засорять папку; включается в
+    #: «Сервис → Настройки → Журнал и диагностика» (сразу, без перезапуска).
+    file_logging: bool = False
 
     # ------------------------------------------------------------------ #
     # Корень, из которого настройки были загружены (None = корень проекта).
@@ -135,7 +150,52 @@ class Settings:
         if settings.output_format not in ("txt", "txt-time", "srt", "vtt", "json", "md"):
             settings.output_format = DEFAULT_OUTPUT_FORMAT
         settings._root = Path(root) if root else None
+        settings._migrate_stale_output_dir()
+        log.debug(
+            "Настройки загружены из %s: output_dir=%r, формат=%s, язык=%s, модель=%s, "
+            "device=%s, file_logging=%s",
+            path, settings.output_dir, settings.output_format, settings.language or "авто",
+            settings.selected_model_id or "—", settings.device, settings.file_logging,
+        )
         return settings
+
+    # ------------------------------------------------------------------ #
+    def _migrate_stale_output_dir(self) -> None:
+        """Лечит «переехавший» проект: outputs/ от СТАРОГО расположения.
+
+        Раньше значение по умолчанию («<проект>/outputs») сохранялось в
+        settings.json абсолютным путём. Если папку проекта переносили
+        (например, с рабочего стола в C:\\Projects), результаты продолжали
+        уезжать по старому пути — да ещё и воссоздавали старую папку.
+        Правило миграции: путь, который заканчивается именем штатной папки
+        результатов (outputs) и НЕ лежит внутри текущего проекта, — это
+        устаревший дефолт. Сбрасываем его на «по умолчанию» (outputs/
+        текущего проекта). Намеренно выбранная пользователем папка с другим
+        именем не затрагивается.
+        """
+        raw = (self.output_dir or "").strip()
+        if not raw:
+            return
+        base = self._root or paths.ROOT_DIR
+        try:
+            target = Path(raw).expanduser()
+            if target.name.lower() != OUTPUTS_DIRNAME.lower():
+                return
+            resolved_target = target.resolve()
+            resolved_base = Path(base).resolve()
+            try:
+                resolved_target.relative_to(resolved_base)
+                return      # это outputs текущего проекта — всё нормально
+            except ValueError:
+                pass
+            log.warning(
+                "Папка результатов %s указывает на старое расположение проекта — "
+                "сбрасываю на outputs/ текущего проекта (%s)",
+                raw, resolved_base / OUTPUTS_DIRNAME,
+            )
+            self.output_dir = ""
+        except (OSError, ValueError) as exc:
+            log.debug("Миграция output_dir не выполнена для %r: %s", raw, exc)
 
     def save(self, root: Optional[Path] = None) -> None:
         path = self.file_path(root if root is not None else getattr(self, "_root", None))
@@ -146,20 +206,30 @@ class Settings:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, ensure_ascii=False)
             os.replace(tmp, path)
-        except OSError:
-            pass  # не смогли сохранить — не смертельно
+            log.debug("Настройки сохранены: %s", path)
+        except OSError as exc:
+            log.warning("Не удалось сохранить настройки %s: %s", path, exc)
 
     # ------------------------------------------------------------------ #
     def resolved_output_dir(self) -> Path:
+        """Куда сохранять результаты. Пустой output_dir = outputs/ проекта.
+
+        Если сохранённая папка недоступна (диск отключён, нет прав, проект
+        переехал) — НЕ создаём мусор в случайных местах, а откатываемся на
+        outputs/ текущего проекта и сообщаем об этом в лог.
+        """
         if self.output_dir:
             path = Path(self.output_dir).expanduser()
-        else:
-            path = paths.outputs_dir()
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            path = paths.outputs_dir()
-        return path
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError as exc:
+                fallback = paths.outputs_dir(self._root)
+                log.warning(
+                    "Папка результатов %s недоступна (%s) — использую %s", path, exc, fallback
+                )
+                return fallback
+        return paths.outputs_dir(self._root)
 
     def to_dict(self) -> Dict[str, Any]:
         return copy.deepcopy(asdict(self))

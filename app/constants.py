@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 APP_NAME = "LocalASR"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 ORG_NAME = "LocalASR"
 
 # --- папки внутри проекта -------------------------------------------------- #
