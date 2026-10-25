@@ -346,7 +346,10 @@ def _decode_with_ffmpeg(
 
         timeout = max(120, int((duration or 3600) / 3600 * DECODER_TIMEOUT_PER_HOUR))
         try:
-            _, stderr = proc.communicate(timeout=timeout)
+            # NB: never unpack into `_` here — it would shadow the i18n `_()`
+            # for the WHOLE function and every earlier `_()` call would raise
+            # UnboundLocalError (regression test: tests/test_ffmpeg_decode.py).
+            _stdout_tail, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             proc.kill()
             raise AudioError(_("ffmpeg did not finish in {t} s (file corrupted?)").format(t=timeout)) from exc

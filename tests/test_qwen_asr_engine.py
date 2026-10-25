@@ -16,13 +16,14 @@ Covers:
   * the weight-loading cascade: device_map -> cache reset -> the
     accelerate-free path (load + .to(device)) when accelerate is absent.
 
-Only transformers is required (torch for the OOM branch; without it those
-steps skip).
+Only transformers is required (torch for the OOM branch, accelerate for the
+full "installed while running" coverage; without them those steps skip).
 
 Run:  cd <project root> && python tests/test_qwen_asr_engine.py
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 import types
@@ -47,6 +48,11 @@ from app.asr.torch_engines import (  # noqa: E402
 from app.constants import SAMPLE_RATE  # noqa: E402
 
 failures: list[str] = []
+
+#: The "package installed WHILE the app runs" steps can only be verified for
+#: real when accelerate is actually present (the app installs it together with
+#: the engine). Without it those steps SKIP instead of failing the module.
+HAS_ACCELERATE = importlib.util.find_spec("accelerate") is not None
 
 
 def check(cond: bool, message: str) -> None:
@@ -286,9 +292,12 @@ def test_transformers_cache_reset() -> None:
     check(still_stale is False, "without a reset the cache keeps returning the stale False")
     cleared = reset_transformers_caches()
     check(cleared >= 1, f"reset_transformers_caches cleared caches ({cleared})")
-    fresh = fn()
-    check(fresh is True,
-          "after the reset transformers 'sees' the freshly installed accelerate (True)")
+    if HAS_ACCELERATE:
+        fresh = fn()
+        check(fresh is True,
+              "after the reset transformers 'sees' the freshly installed accelerate (True)")
+    else:
+        skip("accelerate is not installed — the 'freshly installed' transition is not verified")
 
 
 def test_load_cascade_accelerate() -> None:
@@ -317,8 +326,13 @@ def test_load_cascade_accelerate() -> None:
             return FakeModel()
 
     model = engine._load_qwen_model(FakeAuto, "fake/path", None, "cuda")
-    check(calls.count(("from_pretrained", "cuda")) == 2,
-          "two attempts with device_map (initial and after the cache reset)")
+    if HAS_ACCELERATE:
+        check(calls.count(("from_pretrained", "cuda")) == 2,
+              "two attempts with device_map (initial and after the cache reset)")
+    else:
+        check(calls.count(("from_pretrained", "cuda")) == 0,
+              "without accelerate device_map is not tried at all")
+        skip("accelerate is not installed — the device_map retry cascade is not verified")
     check(("from_pretrained", None) in calls, "fallback: load without device_map")
     check(("to", "cuda") in calls, "the fallback ends with .to(device)")
     check(model is not None, "the model eventually loads despite the cache")
@@ -376,6 +390,9 @@ def test_check_and_set_device_map_recovery() -> None:
     # 3) reset the caches (what the app does after installing packages) — and
     #    the same call passes: accelerate is "seen" without a restart
     reset_transformers_caches()
+    if not HAS_ACCELERATE:
+        skip("accelerate is not installed — the post-reset recovery is not verified")
+        return
     try:
         result = check_and_set_device_map("cuda")
         check(True, f"after the cache reset device_map works: {result}")

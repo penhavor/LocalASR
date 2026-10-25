@@ -70,7 +70,7 @@
       "speed": 4,
       "license": "MIT",
       "vendor": "Community (Whisper fine-tune)",
-      "url": "https://huggingface.co/coriollon/whisper-large-v3-turbo-russian/tree/main/ct2_int16",
+      "url": "https://huggingface.co/coriollon/whisper-large-v3-turbo-russian/tree/main/ct2-int16",
       "description": "The same Russian model in 16-bit precision: slightly more accurate on hard speech (noise, diction, terms) and twice as heavy. Pick it with 8+ GB RAM or a GPU with 4+ GB VRAM.",
       "recommended_for": "Maximum accuracy for Russian when memory allows",
       "tags": [
