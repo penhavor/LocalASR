@@ -7,8 +7,10 @@ The program must work with any models, not just one:
   * a GigaAM of UNKNOWN structure (no decoding/head) falls back to the stock
     model.transcribe() path instead of the fast one — future generations safe;
   * the universal HF engine on a REAL model (openai/whisper-tiny): long audio
-    is chunked, segments tile, texts are strings. (Skipped without
-    network/transformers: the other steps are self-contained.)
+    is chunked, segments tile, texts are strings. The audio fixture is
+    committed (tests/fixtures/hf_chunk_test.wav, 42 s of speech), so the test
+    runs in CI too. (Skipped without network/transformers: the other steps
+    are self-contained.)
 
 Run:  cd <project root> && python tests/test_engines_universal.py
 """
@@ -305,9 +307,9 @@ def test_hf_engine_real_model() -> None:
     if _ram_gb() < 0.9:
         print("  - SKIP: not enough RAM for real inference in the sandbox")
         return
-    audio_path = Path(ROOT).parent / "audio" / "hf_chunk_test.wav"
+    audio_path = Path(ROOT) / "tests" / "fixtures" / "hf_chunk_test.wav"
     if not audio_path.is_file():
-        print("  - SKIP: no audio/hf_chunk_test.wav")
+        print("  - SKIP: no tests/fixtures/hf_chunk_test.wav")
         return
 
     # decode via the program's OWN path (ffmpeg or the PyAV fallback)

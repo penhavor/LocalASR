@@ -303,7 +303,9 @@ class FasterWhisperEngine(ASREngine):
                         elapsed = max(now - started, 1e-6)
                         fraction = min(1.0, segment.end / total_audio) if total_audio else 0.0
                         speed = segment.end / elapsed
-                        eta = (total_audio - segment.end) / speed if speed > 0 else 0.0
+                        # segment.end may overshoot total_audio (VAD padding) —
+                        # clamp so the ETA never shows a negative "time left"
+                        eta = max(0.0, (total_audio - segment.end) / speed) if speed > 0 else 0.0
                         progress(
                             fraction,
                             _("{pos} / {total} · {speed:.1f}× · ~{eta} left").format(

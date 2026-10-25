@@ -184,6 +184,22 @@ models/ outputs/ logs/ settings/   создаются программой по 
 
 MIT — см. [LICENSE](LICENSE).
 
+**Примечание о весах моделей.** Лицензия MIT покрывает только исходный код
+LocalASR. Модели распознавания скачиваются напрямую с Hugging Face /
+alphacephei.com и в этом репозитории не распространяются; на них действуют
+их собственные лицензии (указаны в карточке каждой модели внутри программы):
+
+- OpenAI Whisper и конвертации (Systran CT2, GGML whisper.cpp) — MIT;
+- русские fine-tune Whisper (coriollon) — Apache-2.0; (dvislobokov) — MIT;
+- Vosk / Kaldi — Apache-2.0;
+- Qwen3-ASR — Apache-2.0;
+- GigaAM (зеркала ai-sage на Hugging Face, откуда их берёт программа) — MIT
+  согласно карточкам репозиториев;
+- NVIDIA NeMo (при добавлении вручную) — CC-BY-4.0.
+
+Перед использованием конкретной модели в коммерческих продуктах сверяйтесь
+с её карточкой на Hugging Face — первоисточником лицензии является она.
+
 Благодарности: [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp),
 [Vosk](https://alphacephei.com/vosk), [Qwen3-ASR](https://huggingface.co/Qwen),

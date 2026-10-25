@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON MODEL WEIGHTS
-
-This license covers the LocalASR source code only. Speech recognition models
-downloaded by the application remain under their own licenses:
-
-  * OpenAI Whisper and its derivatives (including faster-whisper conversions,
-    whisper.cpp GGML files and community fine-tunes) - MIT License
-  * Vosk / Kaldi models - Apache License 2.0
-  * NVIDIA NeMo models (if added manually) - CC-BY-4.0
-
-Model files are fetched directly from Hugging Face / alphacephei.com and are
-never redistributed in this repository.
