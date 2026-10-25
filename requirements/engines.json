@@ -1,11 +1,11 @@
 {
-  "_comment": "Карта движок -> pip-пакеты. Движок устанавливается ПО ТРЕБОВАНИЮ: когда пользователь запускает модель, которой он нужен (строго в .venv). install_size_text показывается в диалоге установки.",
+  "_comment": "Engine -> pip packages map. Engines install ON DEMAND: when the user starts a model that needs one (strictly into the project environment). install_size_text is shown in the install dialog.",
   "faster-whisper": {
     "title": "faster-whisper (CTranslate2)",
     "pip": [],
     "import": "faster_whisper",
-    "note": "Уже входит в базовую установку.",
-    "install_size_text": "входит в базовую установку"
+    "note": "Already part of the base installation.",
+    "install_size_text": "part of the base installation"
   },
   "whispercpp": {
     "title": "whisper.cpp (pywhispercpp)",
@@ -13,8 +13,8 @@
       "pywhispercpp>=1.4.0"
     ],
     "import": "pywhispercpp",
-    "note": "Ставится автоматически, когда ты запускаешь GGML-модель (whisper.cpp).",
-    "install_size_text": "~5 МБ (один пакет pywhispercpp)"
+    "note": "Installed automatically when you start a GGML model (whisper.cpp).",
+    "install_size_text": "~5 MB (a single pywhispercpp package)"
   },
   "vosk": {
     "title": "Vosk (Kaldi)",
@@ -22,8 +22,8 @@
       "vosk>=0.3.45"
     ],
     "import": "vosk",
-    "note": "Ставится автоматически, когда ты запускаешь Vosk-модель.",
-    "install_size_text": "~50 МБ (один пакет vosk)"
+    "note": "Installed automatically when you start a Vosk model.",
+    "install_size_text": "~50 MB (a single vosk package)"
   },
   "qwen-asr": {
     "title": "Qwen3-ASR (transformers + PyTorch)",
@@ -34,8 +34,8 @@
       "soundfile>=0.12"
     ],
     "import": "transformers",
-    "note": "Ставится автоматически при первом запуске модели Qwen3-ASR (один раз; повторные запуски ничего не качают). Нужен именно transformers 5.13+ — в более ранних версиях нет поддержки Qwen3-ASR.",
-    "install_size_text": "~0.2–1 ГБ (основной вес — PyTorch; зависит от системы)"
+    "note": "Installed automatically on the first run of a Qwen3-ASR model (once; later runs download nothing). Requires transformers 5.13+ — earlier versions do not support Qwen3-ASR.",
+    "install_size_text": "~0.2–1 GB (most of it is PyTorch; depends on the system)"
   },
   "gigaam": {
     "title": "GigaAM (Sber, transformers + PyTorch)",
@@ -49,8 +49,8 @@
       "soundfile>=0.12"
     ],
     "import": "transformers",
-    "note": "Нужен для русских моделей GigaAM (Sber) и мультиязычной линии. Ставится по требованию, ОДИН РАЗ: самое тяжёлое — PyTorch (~120–200 МБ в CPU-варианте или CUDA-сборка при наличии GPU NVIDIA), остальное мелко. soundfile обязателен: его импортирует сам код модели (modeling_gigaam.py). Повторные запуски ничего не качают.",
-    "install_size_text": "~0.2–1 ГБ (основной вес — PyTorch; зависит от системы)"
+    "note": "Needed for the Russian GigaAM (Sber) models and the multilingual line. Installed ON DEMAND, ONCE: the heaviest part is PyTorch (~120–200 MB for the CPU build or a CUDA build with an NVIDIA GPU), the rest is small. soundfile is required: the model code itself (modeling_gigaam.py) imports it. Later runs download nothing.",
+    "install_size_text": "~0.2–1 GB (most of it is PyTorch; depends on the system)"
   },
   "hf-transformers": {
     "title": "Transformers (любая ASR-модель Hugging Face)",
@@ -61,8 +61,8 @@
       "soundfile>=0.12"
     ],
     "import": "transformers",
-    "note": "Ставится автоматически при первом запуске HF-модели (один раз).",
-    "install_size_text": "~0.2–1 ГБ (основной вес — PyTorch; зависит от системы)"
+    "note": "Installed automatically on the first run of an HF model (once).",
+    "install_size_text": "~0.2–1 GB (most of it is PyTorch; depends on the system)"
   },
   "cuda": {
     "title": "NVIDIA CUDA 12 (cuBLAS + cuDNN 9)",
@@ -72,7 +72,7 @@
     ],
     "import": null,
     "requirements_file": "gpu.txt",
-    "note": "Предлагается автоматически, когда выбираешь GPU-устройство. На Windows дополнительно нужны системные DLL cuDNN9/cuBLAS (см. requirements/gpu.txt).",
-    "install_size_text": "~1 ГБ (cuBLAS + cuDNN для NVIDIA GPU)"
+    "note": "Offered automatically when you pick a GPU device. On Windows the system cuDNN9/cuBLAS DLLs are additionally required (see requirements/gpu.txt).",
+    "install_size_text": "~1 GB (cuBLAS + cuDNN for an NVIDIA GPU)"
   }
 }

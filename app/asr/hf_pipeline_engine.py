@@ -1,19 +1,15 @@
-"""Универсальный движок: ЛЮБАЯ ASR-модель Hugging Face через transformers.pipeline.
+"""Generic engine: ANY Hugging Face ASR model via transformers.pipeline.
 
-Закрывает модели, которые не относятся к faster-whisper/whisper.cpp/Vosk/
-Qwen3-ASR/GigaAM: оригинальные сборки Whisper (openai/whisper-*), wav2vec2,
-HuBERT, Data2Vec, MMS, Seamless-M4T, Parakeet/Canary (NVIDIA), Distil-Whisper
-и тысячи других репозиториев с pipeline_tag=automatic-speech-recognition.
+Covers models outside faster-whisper/whisper.cpp/Vosk/Qwen3-ASR/GigaAM:
+original Whisper builds, wav2vec2, HuBERT, Data2Vec, MMS, Seamless-M4T,
+Parakeet/Canary, Distil-Whisper and thousands of other repos with
+pipeline_tag=automatic-speech-recognition.
 
-Как это работает:
-  * модель грузится стандартным ``pipeline("automatic-speech-recognition", …)``
-    — transformers сам определяет архитектуру (seq2seq / CTC / …);
-  * длинное аудио режется по тишине на куски ~27–28.5 секунд (строго короче
-    30-секундного окна Whisper-подобных моделей), куски считаются батчами
-    (на GPU — заметный выигрыш);
-  * язык/перевод передаются в generate_kwargs, если модель их понимает
-    (не понимает — тихо повторяем вызов без них);
-  * прогресс и отмена — как у остальных движков (между кусками/батчами).
+How it works: the model is loaded with the standard pipeline(); long audio
+is split on silence into ~27-28.5 s chunks (strictly shorter than the 30 s
+window of Whisper-like models) processed in batches; language/translation
+go into generate_kwargs when the model accepts them; progress and cancel
+behave like the other engines.
 """
 
 from __future__ import annotations
@@ -25,6 +21,7 @@ import numpy as np
 
 from ..constants import ENGINE_HF, SAMPLE_RATE
 from ..core.postprocess import Segment
+from ..i18n import _
 from ..logutils import get_logger
 from .base import (
     CancelToken,
@@ -38,13 +35,13 @@ from .torch_engines import TorchASREngine, iter_smart_chunks
 
 log = get_logger("asr.hf")
 
-# Куски СТРОГО короче 30 секунд: у Whisper-подобных seq2seq-моделей вход
-# длиннее 3000 mel-кадров переключает generate() в long-form режим, который
-# ОБЯЗАТЕЛЬНО требует таймкоды (и падает на моделях без no_timestamps_token_id).
-# 27 с + до 1.5 с поиска границы тишины = максимум ~28.5 с — всегда short-form.
+# Chunks STRICTLY shorter than 30 s: for Whisper-like seq2seq models an input
+# longer than 3000 mel frames switches generate() to long-form mode which
+# REQUIRES timestamps (and crashes models without no_timestamps_token_id).
+# 27 s + up to 1.5 s of silence-boundary search = ~28.5 s max — always short-form.
 HF_CHUNK_SECONDS = 27.0
 HF_SEARCH_SECONDS = 1.5
-# сколько кусков отправляем в pipeline одним батчем
+# chunks sent to the pipeline per batch
 HF_BATCH_CUDA = 8
 HF_BATCH_CPU = 2
 
@@ -64,12 +61,12 @@ class HFPipelineEngine(TorchASREngine):
     def __init__(self) -> None:
         super().__init__()
         self._pipe: Any = None
-        # ключ аудио-входа pipeline: в старых transformers «array», в новых «raw»
+        # pipeline audio input key: "array" in old transformers, "raw" in new
         self._input_key: str = "array"
-        # новые transformers по умолчанию просят таймкоды — некоторым моделям
-        # для них не хватает настроек generation_config; нам таймкоды pipeline
-        # не нужны (сегменты = границы кусков), поэтому отключаем — но ТОЛЬКО
-        # для seq2seq: CTC-ветка на return_timestamps=False отвечает ошибкой
+        # new transformers request timestamps by default — some models lack the
+        # generation_config settings for them; we do not need pipeline
+        # timestamps (segments = chunk bounds), so disable — but ONLY for
+        # seq2seq: the CTC branch errors on return_timestamps=False
         self._return_timestamps_supported: bool = True
         self._pass_no_timestamps: bool = False
 
@@ -80,11 +77,11 @@ class HFPipelineEngine(TorchASREngine):
             import torch
             from transformers import pipeline as hf_pipeline
         except Exception as exc:  # noqa: BLE001
-            raise EngineError(
-                f"Не удалось импортировать torch/transformers: {exc}\n"
-                "Недостающие компоненты программа предложит установить автоматически "
-                "при запуске модели (или: Сервис → Диагностика и восстановление)."
-            ) from exc
+            raise EngineError(_(
+                "Failed to import torch/transformers: {exc}\n"
+                "Missing components are offered for automatic installation when a model "
+                "is started (or: Tools → Diagnostics & recovery)."
+            ).format(exc=exc)) from exc
 
         path = str(model.resolved_path)
         device, dtype = self._pick_device(hardware)
@@ -92,7 +89,7 @@ class HFPipelineEngine(TorchASREngine):
 
         last_error: Optional[Exception] = None
         for attempt_dtype in (dtype, torch.float32):
-            # transformers 4.x принимает torch_dtype, 5.x переименовал в dtype
+            # transformers 4.x takes torch_dtype, 5.x renamed it to dtype
             for dtype_kwarg in ("torch_dtype", "dtype"):
                 try:
                     self._pipe = hf_pipeline(
@@ -109,29 +106,30 @@ class HFPipelineEngine(TorchASREngine):
                         last_error = exc
                         break
                     last_error = exc
-                    log.debug("pipeline не принял %s: %s", dtype_kwarg, exc)
+                    log.debug("pipeline rejected %s: %s", dtype_kwarg, exc)
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
-                    log.warning("pipeline(%s) не собрался с %s: %s", path, attempt_dtype, exc)
+                    log.warning("pipeline(%s) failed to build with %s: %s", path, attempt_dtype, exc)
                     break
             if self._pipe is not None:
                 break
         if self._pipe is None:
             from .torch_engines import missing_files_hint
 
-            log.error("HF-pipeline не собрался для %s: %s", path, last_error, exc_info=last_error)
-            raise EngineError(
-                f"Не удалось загрузить модель «{model.name}» через transformers: {last_error}\n\n"
-                "Возможно, это не ASR-модель, либо она требует редкие зависимости — "
-                "смотри текст ошибки выше."
+            log.error("HF-pipeline failed to build for %s: %s", path, last_error, exc_info=last_error)
+            raise EngineError(_(
+                "Failed to load model \"{name}\" via transformers: {err}\n\n"
+                "It may not be an ASR model, or it needs rare dependencies — "
+                "see the error text above."
+            ).format(name=model.name, err=last_error)
                 + missing_files_hint(last_error or EngineError(""))
             ) from last_error
 
-        # Некоторые модели несут в generation_config return_timestamps=True —
-        # transformers делает `return_timestamps or config.return_timestamps`,
-        # т.е. наш False перебивается, и на моделях без no_timestamps_token_id
-        # декодирование падает. Таймкоды pipeline нам не нужны (сегменты =
-        # границы кусков), поэтому гасим флаг прямо в конфиге.
+        # Some models carry return_timestamps=True in generation_config —
+        # transformers computes `return_timestamps or config.return_timestamps`,
+        # so our False is overridden and decoding crashes on models without
+        # no_timestamps_token_id. We do not need pipeline timestamps, so
+        # suppress the flag right in the config.
         try:
             gen_cfg = getattr(self._pipe, "generation_config", None)
             if gen_cfg is not None and getattr(gen_cfg, "return_timestamps", False):
@@ -144,7 +142,7 @@ class HFPipelineEngine(TorchASREngine):
         self._pass_no_timestamps = pipe_type in ("seq2seq_whisper", "seq2seq")
         self.loaded_model_id = model.model_id
         log.info(
-            "HF-pipeline загружен: %s (%s, %s) за %.1f с",
+            _("HF-pipeline loaded: %s (%s, %s) in %.1f s"),
             model.model_id, device, self.compute_type, time.time() - started,
         )
 
@@ -161,10 +159,10 @@ class HFPipelineEngine(TorchASREngine):
             kwargs["language"] = language
         if options.get("translate"):
             kwargs["task"] = "translate"
-        # Beam search вместо жадного декодирования: без этого pipeline
-        # генерирует с num_beams=1, и потенциал весов модели используется
-        # не полностью. Если конкретная модель параметр не примет — каскад
-        # откатов в _call повторит вызов без generate_kwargs.
+        # Beam search instead of greedy decoding: without it the pipeline
+        # generates with num_beams=1, underusing the model weights. If a model
+        # rejects the parameter, the _call fallback cascade retries without
+        # generate_kwargs.
         try:
             beam = int(options.get("beam_size") or 0)
         except (TypeError, ValueError):
@@ -174,14 +172,10 @@ class HFPipelineEngine(TorchASREngine):
         return kwargs
 
     def _call(self, pieces: List[np.ndarray], generate_kwargs: Dict[str, Any]) -> List[str]:
-        """Вызов pipeline c каскадом откатов (универсальность важнее скорости).
+        """Pipeline call with a fallback cascade (universality over speed).
 
-        Порядок попыток:
-          1. батч кусков одним вызовом (быстро на GPU);
-          2. то же с другим ключом входа («array» <-> «raw» в разных версиях);
-          3. поштучно (батчинг в pipeline капризен: разные наборы ключей у
-             последнего элемента, модели без поддержки batch и т.п.);
-          4. поштучно без language/task (модель может их не понимать).
+        Attempts: batched call -> batched with the other input key
+        ("array" <-> "raw") -> one by one -> one by one without language/task.
         """
 
         def one_call(items: Any, batch_size: Optional[int], gk: Dict[str, Any]) -> List[Dict]:
@@ -197,7 +191,7 @@ class HFPipelineEngine(TorchASREngine):
                     result = self._pipe(items, **kwargs)
                     break
                 except TypeError as exc:
-                    # старая версия pipeline не знает return_timestamps
+                    # an old pipeline version does not know return_timestamps
                     if attempt == 0 and "return_timestamps" in str(exc):
                         self._return_timestamps_supported = False
                         continue
@@ -229,13 +223,13 @@ class HFPipelineEngine(TorchASREngine):
             try:
                 outputs = attempt()
                 if index == 1:
-                    self._input_key = other_key   # запоминаем рабочий ключ
+                    self._input_key = other_key   # remember the working key
                 break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                log.debug("pipeline-попытка %d не удалась: %s", index + 1, exc)
+                log.debug("pipeline attempt %d failed: %s", index + 1, exc)
         else:
-            raise EngineError(f"Transformers-pipeline не смог распознать фрагмент: {last_error}")
+            raise EngineError(_("Transformers pipeline could not recognize the chunk: {err}").format(err=last_error))
 
         texts: List[str] = []
         for output in outputs:
@@ -258,7 +252,7 @@ class HFPipelineEngine(TorchASREngine):
     ) -> TranscriptResult:
         self._ensure_model()
         if self._pipe is None:
-            raise EngineError("HF-pipeline не загружен")
+            raise EngineError(_("HF-pipeline is not loaded"))
         started = time.time()
         audio = np.ascontiguousarray(np.asarray(audio, dtype=np.float32))
         total = len(audio) or 1
@@ -284,16 +278,16 @@ class HFPipelineEngine(TorchASREngine):
         count = len(bounds)
         while index < count:
             if cancel and cancel():
-                warnings.append("Распознавание остановлено пользователем")
+                warnings.append(_("Recognition stopped by user"))
                 break
             batch_bounds = bounds[index: index + batch_size]
             pieces = [audio[start:end] for start, end in batch_bounds]
             try:
                 texts = self._call(pieces, dict(generate_kwargs))
             except Exception as exc:  # noqa: BLE001
-                raise EngineError(
-                    f"Transformers-pipeline не смог распознать фрагмент: {exc}"
-                ) from exc
+                raise EngineError(_(
+                    "Transformers pipeline could not recognize the chunk: {err}"
+                ).format(err=exc)) from exc
 
             for (start, end), text in zip(batch_bounds, texts):
                 text = str(text or "").strip()
@@ -307,11 +301,12 @@ class HFPipelineEngine(TorchASREngine):
                 done = batch_bounds[-1][1]
                 progress(
                     min(1.0, done / total),
-                    f"Распознаю: {done / SAMPLE_RATE:.0f} с из {duration:.0f} с",
+                    _("Recognizing: {done:.0f} s of {total:.0f} s").format(
+                        done=done / SAMPLE_RATE, total=duration),
                 )
 
         if options.get("word_timestamps"):
-            warnings.append("HF-pipeline: таймкоды слов не считались — сегменты по кускам аудио")
+            warnings.append(_("HF-pipeline: word timestamps not computed — segments follow audio chunks"))
 
         return TranscriptResult(
             segments=segments,

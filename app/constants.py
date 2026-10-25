@@ -1,32 +1,27 @@
-"""Константы приложения: имена папок, пороговые значения, списки форматов."""
+"""Application constants: folder names, thresholds, format lists."""
 
 from __future__ import annotations
 
 APP_NAME = "LocalASR"
-APP_VERSION = "1.4.0"
-ORG_NAME = "LocalASR"
+APP_VERSION = "1.0.0"
 
-# --- папки внутри проекта -------------------------------------------------- #
-VENV_DIRNAME = ".venv"
+# --- project folders --------------------------------------------------------
 MODELS_DIRNAME = "models"
 OUTPUTS_DIRNAME = "outputs"
 LOGS_DIRNAME = "logs"
 RESOURCES_DIRNAME = "resources"
-TEMP_DIRNAME = ".cache"
+RUNTIME_DIRNAME = "runtime"  # portable Python, downloaded on first run (Windows)
 
 CATALOG_FILENAME = "models_catalog.json"
-# Локальный каталог (resources/models_catalog.json) — основной и всегда рабочий.
-# Отсюда приложение попробует подтянуть свежую версию (если есть сеть) —
-# иначе тихо продолжит с локальной.
+# The local catalog is primary; a remote refresh is attempted when online.
 REPO_URL = "https://github.com/penhavor/LocalASR"
 REPO_RAW_BASE = "https://raw.githubusercontent.com/penhavor/LocalASR/main"
 CATALOG_REMOTE_URL = f"{REPO_RAW_BASE}/resources/models_catalog.json"
 CATALOG_CACHE_TTL_HOURS = 24
 
 SETTINGS_FILENAME = "settings.json"
-ENV_STAMP_FILENAME = ".localasr-env.json"
 
-# --- медиа ----------------------------------------------------------------- #
+# --- media ------------------------------------------------------------------
 AUDIO_EXTENSIONS = {
     ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma",
     ".aiff", ".aif", ".amr", ".alac", ".caf", ".mka", ".ac3", ".eac3", ".mp2",
@@ -39,29 +34,19 @@ VIDEO_EXTENSIONS = {
 }
 MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 
-# Расширения файлов, которые уже являются текстом/субтитрами (можно игнорировать)
-IGNORED_EXTENSIONS = {".txt", ".srt", ".vtt", ".nfo", ".jpg", ".png"}
+SAMPLE_RATE = 16_000  # Whisper/Vosk expect 16 kHz mono
 
-SAMPLE_RATE = 16_000  # Whisper/Vosk работают с 16 кГц моно
-
-# --- форматы результата ---------------------------------------------------- #
-OUTPUT_FORMATS = {
-    "txt": "Текст (.txt)",
-    "txt-time": "Текст с таймкодами (.txt)",
-    "srt": "Субтитры (.srt)",
-    "vtt": "Субтитры (.vtt)",
-    "json": "JSON (сегменты + слова)",
-    "md": "Markdown (.md)",
-}
+# --- output -----------------------------------------------------------------
+OUTPUT_FORMATS = ("txt", "txt-time", "srt", "vtt", "json", "md")
 DEFAULT_OUTPUT_FORMAT = "txt"
 
-# --- движки ---------------------------------------------------------------- #
+# --- engines ----------------------------------------------------------------
 ENGINE_FASTER_WHISPER = "faster-whisper"
 ENGINE_WHISPERCPP = "whispercpp"
 ENGINE_VOSK = "vosk"
-ENGINE_QWEN_ASR = "qwen-asr"          # Qwen3-ASR (Alibaba) через transformers + torch
-ENGINE_GIGAAM = "gigaam"              # GigaAM (Sber) через transformers + torch
-ENGINE_HF = "hf-transformers"         # ЛЮБАЯ ASR-модель Hugging Face через transformers.pipeline
+ENGINE_QWEN_ASR = "qwen-asr"
+ENGINE_GIGAAM = "gigaam"
+ENGINE_HF = "hf-transformers"
 ENGINES = (
     ENGINE_FASTER_WHISPER,
     ENGINE_WHISPERCPP,
@@ -71,86 +56,86 @@ ENGINES = (
     ENGINE_HF,
 )
 
-#: движки на PyTorch — для них имеет смысл ставить CUDA-сборку torch
+#: PyTorch-based engines — CUDA builds of torch make sense for these
 TORCH_ENGINE_NAMES = (ENGINE_QWEN_ASR, ENGINE_GIGAAM, ENGINE_HF)
 
-#: индекс CUDA-сборок PyTorch (Windows-pip ставит только CPU-вариант).
-#: cu126 работает с драйверами NVIDIA >= 525/527 (minor version compatibility)
+#: PyTorch CUDA wheel index (Windows pip installs CPU builds by default).
+#: cu126 works with NVIDIA drivers >= 525/527 (minor version compatibility).
 TORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu126"
 TORCH_CUDA_MIN_DRIVER_MAJOR = 527
 
+#: Display strings; translate with i18n._() at the point of use.
 ENGINE_LABELS = {
     ENGINE_FASTER_WHISPER: "faster-whisper · CTranslate2",
     ENGINE_WHISPERCPP: "whisper.cpp · GGML",
     ENGINE_VOSK: "Vosk · Kaldi",
     ENGINE_QWEN_ASR: "Qwen3-ASR · transformers",
     ENGINE_GIGAAM: "GigaAM (Sber) · transformers",
-    ENGINE_HF: "Transformers · любая ASR с Hugging Face",
+    ENGINE_HF: "Transformers · any ASR model from Hugging Face",
 }
 
-# --- язык ------------------------------------------------------------------ #
+# --- speech language ----------------------------------------------------------
 DEFAULT_LANGUAGE = "ru"
-LANGUAGE_AUTODETECT = ""  # пустая строка = «определить автоматически»
+LANGUAGE_AUTODETECT = ""  # empty string = detect automatically
 
-# Популярные языки для выпадающего списка (код, название по-русски)
+#: Popular speech languages for the dropdown (code, English display name).
 LANGUAGES = [
-    ("", "Определить автоматически"),
-    ("ru", "Русский"),
-    ("uk", "Украинский"),
-    ("be", "Белорусский"),
-    ("kk", "Казахский"),
-    ("en", "Английский"),
-    ("de", "Немецкий"),
-    ("fr", "Французский"),
-    ("es", "Испанский"),
-    ("it", "Итальянский"),
-    ("pl", "Польский"),
-    ("cs", "Чешский"),
-    ("tr", "Турецкий"),
-    ("zh", "Китайский"),
-    ("ja", "Японский"),
-    ("ko", "Корейский"),
-    ("ar", "Арабский"),
-    ("pt", "Португальский"),
-    ("nl", "Нидерландский"),
-    ("sv", "Шведский"),
-    ("fi", "Финский"),
-    ("he", "Иврит"),
-    ("hi", "Хинди"),
-    ("hy", "Армянский"),
-    ("ka", "Грузинский"),
-    ("az", "Азербайджанский"),
-    ("uz", "Узбекский"),
-    ("ky", "Киргизский"),
-    ("tg", "Таджикский"),
-    ("mn", "Монгольский"),
-    ("lv", "Латышский"),
-    ("lt", "Литовский"),
-    ("et", "Эстонский"),
-    ("ro", "Румынский"),
-    ("bg", "Болгарский"),
-    ("sr", "Сербский"),
-    ("hr", "Хорватский"),
-    ("sl", "Словенский"),
-    ("sk", "Словацкий"),
-    ("hu", "Венгерский"),
-    ("el", "Греческий"),
-    ("no", "Норвежский"),
-    ("da", "Датский"),
-    ("is", "Исландский"),
-    ("id", "Индонезийский"),
-    ("vi", "Вьетнамский"),
-    ("th", "Тайский"),
-    ("fa", "Персидский"),
+    ("", "Detect automatically"),
+    ("ru", "Russian"),
+    ("uk", "Ukrainian"),
+    ("be", "Belarusian"),
+    ("kk", "Kazakh"),
+    ("en", "English"),
+    ("de", "German"),
+    ("fr", "French"),
+    ("es", "Spanish"),
+    ("it", "Italian"),
+    ("pl", "Polish"),
+    ("cs", "Czech"),
+    ("tr", "Turkish"),
+    ("zh", "Chinese"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("ar", "Arabic"),
+    ("pt", "Portuguese"),
+    ("nl", "Dutch"),
+    ("sv", "Swedish"),
+    ("fi", "Finnish"),
+    ("he", "Hebrew"),
+    ("hi", "Hindi"),
+    ("hy", "Armenian"),
+    ("ka", "Georgian"),
+    ("az", "Azerbaijani"),
+    ("uz", "Uzbek"),
+    ("ky", "Kyrgyz"),
+    ("tg", "Tajik"),
+    ("mn", "Mongolian"),
+    ("lv", "Latvian"),
+    ("lt", "Lithuanian"),
+    ("et", "Estonian"),
+    ("ro", "Romanian"),
+    ("bg", "Bulgarian"),
+    ("sr", "Serbian"),
+    ("hr", "Croatian"),
+    ("sl", "Slovenian"),
+    ("sk", "Slovak"),
+    ("hu", "Hungarian"),
+    ("el", "Greek"),
+    ("no", "Norwegian"),
+    ("da", "Danish"),
+    ("is", "Icelandic"),
+    ("id", "Indonesian"),
+    ("vi", "Vietnamese"),
+    ("th", "Thai"),
+    ("fa", "Persian"),
 ]
 
-# --- производительность ---------------------------------------------------- #
-DEFAULT_CPU_THREADS = 0          # 0 = «сколько нужно» (решает CTranslate2/система)
-DEFAULT_BATCH_SIZE = 8           # для batched-режима на GPU
-MAX_PREFETCH = 2                 # сколько файлов декодируем в фоне заранее
-DECODER_TIMEOUT_PER_HOUR = 600   # сек на каждый час аудио (защита от зависшего ffmpeg)
+# --- performance --------------------------------------------------------------
+DEFAULT_BATCH_SIZE = 8           # batched mode on GPU
+MAX_PREFETCH = 2                 # files decoded ahead of time in background
+DECODER_TIMEOUT_PER_HOUR = 600   # seconds per hour of audio (stuck ffmpeg guard)
 
-# --- HTTP ------------------------------------------------------------------ #
+# --- HTTP -------------------------------------------------------------------
 HTTP_TIMEOUT = 30
 HTTP_CHUNK = 1024 * 512
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} (+{REPO_URL})"

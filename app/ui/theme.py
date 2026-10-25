@@ -1,4 +1,4 @@
-"""Тема оформления (QSS) — тёмная, без внешних зависимостей и картинок из сети."""
+"""Styling theme (QSS) — dark, no external dependencies or network images."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ QWidget {{
     background-color: transparent;
 }}
 
-/* ---------------- панели ---------------- */
+/* ---------------- panels ---------------- */
 QFrame#SidePanel {{
     background-color: {BG_PANEL};
     border: 1px solid {BORDER};
@@ -73,7 +73,7 @@ QFrame#HeaderBar {{
     border-bottom: 1px solid {BORDER};
 }}
 
-/* ---------------- типографика ---------------- */
+/* ---------------- typography ---------------- */
 QLabel#H1 {{
     font-size: 20px;
     font-weight: 700;
@@ -140,7 +140,7 @@ QLabel#BigButton {{
     font-weight: 700;
 }}
 
-/* ---------------- кнопки ---------------- */
+/* ---------------- buttons ---------------- */
 QPushButton {{
     background-color: {BG_CARD};
     border: 1px solid {BORDER_LIGHT};
@@ -216,7 +216,7 @@ QPushButton#Link:hover {{
     text-decoration: underline;
 }}
 
-/* Кнопка «ℹ» — техническая информация о модели: заметная, круглая */
+/* The "ℹ" button — model technical info: visible, round */
 QPushButton#InfoButton {{
     background-color: #21304d;
     border: 1px solid {ACCENT};
@@ -232,7 +232,7 @@ QPushButton#InfoButton:hover {{
     color: #07101f;
 }}
 
-/* ---------------- поля ввода ---------------- */
+/* ---------------- inputs ---------------- */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};
@@ -273,7 +273,7 @@ QComboBox QAbstractItemView {{
     padding: 4px;
 }}
 
-/* ---------------- чекбоксы/радио ---------------- */
+/* ---------------- checkboxes/radio ---------------- */
 QCheckBox, QRadioButton {{
     spacing: 8px;
     color: {TEXT};
@@ -337,7 +337,7 @@ QPushButton#Ghost:disabled, QPushButton#Link:disabled, QPushButton#Danger:disabl
     background-color: transparent;
 }}
 
-/* ---------------- списки ---------------- */
+/* ---------------- lists ---------------- */
 QListWidget, QTreeView, QTableView {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};
@@ -361,9 +361,9 @@ QListWidget::item:selected {{
     border: 1px solid {ACCENT};
 }}
 
-/* ---------------- прогресс ---------------- */
-/* Основной прогресс-бар: высокий, проценты читаются и на тёмном треке,
-   и на залитой части (белый жирный текст на насыщенном синем). */
+/* ---------------- progress ---------------- */
+/* Main progress bar: tall; the percentage is readable on both the dark track
+   and the filled part (bold white text on saturated blue). */
 QProgressBar {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};
@@ -382,8 +382,8 @@ QProgressBar::chunk {{
     border-radius: 9px;
 }}
 
-/* Тонкий суб-бар (текущий файл): текст не рисуется вообще — иначе проценты
-   вылезали за пределы 6-пиксельной полосы. */
+/* Thin sub-bar (current file): no text at all — percentages would overflow
+   the 6-pixel stripe. */
 QProgressBar#Subtle {{
     border: none;
     background-color: #10141d;
@@ -398,7 +398,7 @@ QProgressBar#Subtle::chunk {{
     border-radius: 3px;
 }}
 
-/* ---------------- скроллбары ---------------- */
+/* ---------------- scrollbars ---------------- */
 QScrollBar:vertical {{
     background: transparent;
     width: 11px;
@@ -436,7 +436,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     background: transparent;
 }}
 
-/* ---------------- вкладки, сплиттеры, статус ---------------- */
+/* ---------------- tabs, splitters, status ---------------- */
 QTabWidget::pane {{
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
@@ -506,8 +506,8 @@ QMenu::item:selected {{
     color: #07101f;
 }}
 
-/* Неактивный пункт меню ОБЯЗАН выглядеть неактивным (серым) — иначе
-   «Выгрузить модель из памяти» неотличима от рабочих пунктов */
+/* A disabled menu item MUST look disabled (gray) — otherwise "Unload model
+   from memory" is indistinguishable from active items */
 QMenu::item:disabled {{
     color: #4d566b;
     background-color: transparent;
@@ -567,8 +567,8 @@ QScrollArea {{
     background: transparent;
 }}
 
-/* Подложка под прозрачными скролл-областями: без неё на части платформ
-   (offscreen/wayland) вместо фона темы остаются «прозрачные дыры». */
+/* Backdrop under transparent scroll areas: without it some platforms
+   (offscreen/wayland) show "transparent holes" instead of the theme bg. */
 QSplitter {{
     background-color: {BG};
 }}
@@ -580,7 +580,7 @@ QMainWindow::separator {{
 
 
 def palette_hints() -> dict:
-    """Цвета для рисования вручную (иконки, бейджи)."""
+    """Colors for manual drawing (icons, badges)."""
     return {
         "bg": BG,
         "panel": BG_PANEL,

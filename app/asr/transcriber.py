@@ -1,6 +1,6 @@
-"""Оркестрация: файл -> звук -> движок -> постобработка -> файл результата.
+"""Orchestration: file -> audio -> engine -> post-processing -> result file.
 
-Здесь нет ни строчки Qt: модуль одинаково используется GUI-воркером и CLI.
+No Qt here: the module is used by both the GUI worker and the CLI.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from ..core.postprocess import (
     join_plain,
     sanitize_segments,
 )
+from ..i18n import _
 from ..logutils import get_logger
 from ..settings import Settings
 from .base import CancelToken, ProgressCallback, TranscriptResult
@@ -116,11 +117,11 @@ class FileResult:
 
 
 def get_engine_for(options: JobOptions, engine=None):
-    """Движок под задачу.
+    """Engine for the job.
 
-    При однопоточной обработке берём общий закэшированный движок из реестра
-    (модель грузится один раз на всю очередь). При parallel_files > 1 каждый
-    поток получает СВОЙ экземпляр — иначе потоки дрались бы за одну модель.
+    Sequential processing uses the shared cached registry engine (the model
+    is loaded once per queue). With parallel_files > 1 every thread gets its
+    OWN instance — otherwise threads would fight over one model.
     """
     if engine is not None:
         return engine
@@ -135,10 +136,10 @@ def get_engine_for(options: JobOptions, engine=None):
     )
 
 
-#: метки форматов, у которых одинаковое расширение (txt и txt-time)
+#: labels for formats sharing one extension (txt and txt-time)
 FORMAT_LABELS = {
     "txt": "",
-    "txt-time": "таймкоды",
+    "txt-time": _("timecodes"),
     "srt": "srt",
     "vtt": "vtt",
     "json": "json",
@@ -156,13 +157,11 @@ def export_all(
     paragraphs: bool = True,
     overwrite: bool = False,
 ) -> List[Path]:
-    """Пишет результат сразу в несколько форматов.
+    """Write the result to several formats at once.
 
-    Правило именования (важно для пользователя):
-      * один формат        -> «лекция 1.txt»  (имя = имени оригинала);
-      * несколько форматов -> «лекция 1.txt», «лекция 1.srt», «лекция 1.vtt»;
-      * коллизия расширений (txt и txt-time) -> «лекция 1 (таймкоды).txt»;
-      * файл уже существует и перезапись выключена -> «лекция 1 (2).txt».
+    Naming: one format -> "lecture 1.txt"; several -> per-format suffixes;
+    an extension collision (txt/txt-time) -> "lecture 1 (timecodes).txt";
+    an existing file with overwrite off -> "lecture 1 (2).txt".
     """
     return exporters.export_all_formats(
         segments,
@@ -187,10 +186,10 @@ def transcribe_file(
     audio_duration: float = 0.0,
     engine: Any = None,
 ) -> FileResult:
-    """Полный цикл обработки одного файла.
+    """Full processing cycle for one file.
 
-    `audio` можно передать готовым (префетч из соседнего потока) — тогда шаг
-    декодирования пропускается.
+    `audio` may be passed pre-decoded (prefetch from another thread) — then
+    the decoding step is skipped.
     """
     source = Path(source)
     result = FileResult(source=source)
@@ -201,13 +200,13 @@ def transcribe_file(
             progress(max(0.0, min(1.0, fraction)), stage)
 
     # ------------------------------------------------------------------ #
-    # 1. Метаданные
+    # 1. Metadata
     # ------------------------------------------------------------------ #
-    report(0.01, f"Читаю {source.name}")
+    report(0.01, _("Reading {name}").format(name=source.name))
     info = probe(source)
     log.debug(
-        "probe(%s): длительность=%.1f с, аудио-потоков=%d, видео-потоков=%d, "
-        "кодек=%s, sample_rate=%d, каналов=%d, ошибка=%r",
+        "probe(%s): duration=%.1f s, audio streams=%d, video streams=%d, "
+        "codec=%s, sample_rate=%d, channels=%d, error=%r",
         source.name, info.duration, info.audio_streams, info.video_streams,
         info.codec, info.sample_rate, info.channels, info.error,
     )
@@ -218,14 +217,14 @@ def transcribe_file(
     result.audio_duration = duration
 
     # ------------------------------------------------------------------ #
-    # 2. Декодирование в 16 кГц моно float32
+    # 2. Decode to 16 kHz mono float32
     # ------------------------------------------------------------------ #
     if audio is None:
         decode_started = time.time()
-        report(0.03, "Извлекаю звук (ffmpeg)")
+        report(0.03, _("Extracting audio (ffmpeg)"))
 
         def decode_progress(fraction: float) -> None:
-            report(0.03 + 0.07 * fraction, "Извлекаю звук…")
+            report(0.03 + 0.07 * fraction, _("Extracting audio…"))
 
         try:
             audio = decode_audio(source, SAMPLE_RATE, cancel=cancel, progress=decode_progress)
@@ -237,10 +236,10 @@ def transcribe_file(
             duration = len(audio) / SAMPLE_RATE
             result.audio_duration = duration
     else:
-        report(0.10, "Звук уже декодирован (prefetch)")
+        report(0.10, _("Audio already decoded (prefetch)"))
 
     # ------------------------------------------------------------------ #
-    # 3. Распознавание
+    # 3. Recognition
     # ------------------------------------------------------------------ #
     engine = get_engine_for(options, engine)
     result.engine_label = f"{engine.name} · {engine.device} · {engine.compute_type}"
@@ -269,11 +268,11 @@ def transcribe_file(
         on_segment=on_segment,
         cancel=cancel,
     )
-    # звук больше не нужен — освобождаем память до постобработки
+    # audio is no longer needed — free memory before post-processing
     del audio
 
     log.debug(
-        "ASR(%s): сегментов=%d, язык=%s, warnings=%s, %.1f с",
+        "ASR(%s): segments=%d, language=%s, warnings=%s, %.1f s",
         source.name, len(transcript.segments), transcript.language or "—",
         transcript.warnings or "—", transcript.elapsed_seconds,
     )
@@ -284,15 +283,15 @@ def transcribe_file(
         result.audio_duration = transcript.audio_duration
 
     # ------------------------------------------------------------------ #
-    # 4. Постобработка (анти-галлюцинации)
+    # 4. Post-processing (anti-hallucinations)
     # ------------------------------------------------------------------ #
-    report(0.96, "Чищу текст от галлюцинаций")
+    report(0.96, _("Cleaning hallucinations from the text"))
     segments = transcript.segments
     if options.suppress_hallucinations:
         cleaned = sanitize_segments(segments, aggressive=True)
         result.dropped = len(segments) - len(cleaned)
         log.debug(
-            "Постобработка(%s): сегментов %d -> %d (отброшено %d)",
+            "Post-processing(%s): segments %d -> %d (dropped %d)",
             source.name, len(segments), len(cleaned), result.dropped,
         )
         segments = cleaned
@@ -301,17 +300,17 @@ def transcribe_file(
         result.dropped = 0
 
     if not segments:
-        result.error = (
-            "Распознавание не дало ни одного сегмента. Возможные причины: в файле нет речи, "
-            "слишком агрессивный VAD или неверно выбран язык."
+        result.error = _(
+            "Recognition produced no segments. Possible reasons: no speech in the file, "
+            "overly aggressive VAD or a wrong language selection."
         )
         result.elapsed_seconds = time.time() - started
         return result
 
     # ------------------------------------------------------------------ #
-    # 5. Экспорт
+    # 5. Export
     # ------------------------------------------------------------------ #
-    report(0.98, "Сохраняю результат")
+    report(0.98, _("Saving the result"))
     stem = paths.sanitize_stem(source.name)
     header = ""
     if options.write_header:
@@ -322,8 +321,8 @@ def transcribe_file(
             duration_seconds=result.audio_duration,
             processing_seconds=max(time.time() - started, 0.001),
             extra={
-                "Движок": result.engine_label or transcript.engine,
-                "Устройство": f"{transcript.device} / {transcript.compute_type}",
+                _("Engine"): result.engine_label or transcript.engine,
+                _("Device"): f"{transcript.device} / {transcript.compute_type}",
                 **options.extra_meta,
             },
         )
@@ -356,7 +355,7 @@ def transcribe_file(
         paragraphs=options.paragraphs,
         overwrite=options.overwrite,
     )
-    log.debug("Экспорт(%s): %s", source.name, ", ".join(str(p) for p in written))
+    log.debug("Export(%s): %s", source.name, ", ".join(str(p) for p in written))
 
     result.outputs = written
     result.ok = True
@@ -365,9 +364,9 @@ def transcribe_file(
     result.chars = sum(len(segment.text) for segment in segments)
     result.elapsed_seconds = time.time() - started
     result.preview = join_plain(segments[:12], paragraphs=False)[:400]
-    report(1.0, f"Готово: {written[0].name if written else stem}")
+    report(1.0, _("Done: {name}").format(name=written[0].name if written else stem))
     log.info(
-        "%s -> %s | %d сегментов, %d слов, %.1f× за %.1f с",
+        _("%s -> %s | %d segments, %d words, %.1f× in %.1f s"),
         source.name,
         written[0].name if written else "—",
         result.segments,

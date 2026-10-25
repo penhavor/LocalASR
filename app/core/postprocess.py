@@ -1,9 +1,8 @@
-"""Постобработка распознавания: чистка галлюцинаций, повторов и оформление текста.
+"""Post-processing: hallucination/repeat cleanup and text assembly.
 
-Whisper (любой сборки) на тишине/шуме иногда выдаёт мусор:
-    «[музыка]», «[аплодисменты]», «Спасибо за просмотр!», «Субтитры сделал DimaTorzok»,
-    бесконечные повторы одной фразы и т.п.
-Здесь всё это вычищается, а сегменты склеиваются в читаемые абзацы.
+Whisper-family models emit junk on silence/noise ("[music]", "Thanks for
+watching!", endless phrase repeats). This module strips it and joins
+segments into readable paragraphs.
 """
 
 from __future__ import annotations
@@ -13,9 +12,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence
 
-# --------------------------------------------------------------------------- #
-#  Структуры
-# --------------------------------------------------------------------------- #
+from ..i18n import _
+
 
 
 @dataclass
@@ -45,10 +43,10 @@ class Word:
 
 
 # --------------------------------------------------------------------------- #
-#  Мусорные вставки Whisper
+#  Whisper junk inserts
 # --------------------------------------------------------------------------- #
 
-# Скобки с «звуковыми эффектами» и служебные пометки
+# Bracketed "sound effects" and service marks
 BRACKET_NOISE = re.compile(
     r"""[\[\(]\s*(?:
         музыка|музыку|мюзик|melody|music|applause|аплодисменты|хлопки|смех|laughter|
@@ -62,7 +60,7 @@ BRACKET_NOISE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Фразы-паразиты авто-субтитров (целиком в сегменте)
+# Auto-subtitle parasite phrases (whole segment)
 JUNK_PHRASES = [
     "спасибо за просмотр",
     "спасибо за внимание",
@@ -83,13 +81,13 @@ JUNK_PHRASES = [
     "music by",
 ]
 
-# Музыкальные ноты и прочий «символьный шум»
+# Music notes and other symbolic noise
 NOTES = re.compile(r"[♪♫♬🎵🎶]+")
 EMOJI = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F0FF\U00002190-\U000021FF\U00002B00-\U00002BFF]"
 )
 
-# «Бла-бла» повторы: одно и то же слово 3+ раза подряд
+# The same word 3+ times in a row
 REPEATED_WORD = re.compile(r"\b(\w{2,})(?:\s+\1\b){2,}", re.IGNORECASE | re.UNICODE)
 
 LANGUAGE_TOKEN = re.compile(r"<\|[^|>]{1,24}\|>")
@@ -97,17 +95,16 @@ ASTERISKS = re.compile(r"\*{2,}")
 
 
 # --------------------------------------------------------------------------- #
-#  Очистка одного сегмента
+#  Single segment cleanup
 # --------------------------------------------------------------------------- #
 
 
 def unwrap_repr_container(text: str) -> str:
-    """«('текст', [45, 33, …])» -> «текст».
+    """ "('text', [45, 33, …])" -> "text".
 
-    Защита второго эшелона: если какой-то движок/версия модели пронесла в вывод
-    repr кортежа/списка (текст + индексы токенов), вытаскиваем строковую часть.
-    Срабатывает ТОЛЬКО когда строка целиком является литералом-контейнером,
-    начинающимся с кавычки, — обычный текст не затрагивается.
+    Second-line defense: if an engine leaked a tuple/list repr into the
+    output, extract the string part. Fires ONLY when the whole string is a
+    container literal — regular text is untouched.
     """
     stripped = text.strip()
     if not stripped.startswith(("('", '(\"', "['", '[\"')):
@@ -118,7 +115,7 @@ def unwrap_repr_container(text: str) -> str:
         import ast
 
         obj = ast.literal_eval(stripped)
-    except Exception:  # noqa: BLE001 - не литерал => не трогаем
+    except Exception:  # noqa: BLE001 - not a literal => leave as is
         return text
     if isinstance(obj, (tuple, list)):
         strings = [part for part in obj if isinstance(part, str)]
@@ -128,7 +125,7 @@ def unwrap_repr_container(text: str) -> str:
 
 
 def clean_text(text: str) -> str:
-    """Убирает шум из строки (без анализа повторов между сегментами)."""
+    """Remove noise from a string (no cross-segment repeat analysis)."""
     if not text:
         return ""
     cleaned = unwrap_repr_container(text)
@@ -150,7 +147,7 @@ def is_junk_segment(text: str) -> bool:
     for phrase in JUNK_PHRASES:
         if phrase in low and len(low) < len(phrase) + 40:
             return True
-    # почти нет букв — «сегмент» из знаков препинания
+    # almost no letters — a "segment" of punctuation
     letters = sum(ch.isalpha() for ch in low)
     if letters < 2:
         return True
@@ -158,7 +155,7 @@ def is_junk_segment(text: str) -> bool:
 
 
 def _collapse_repeated_tail(text: str, min_chunk: int = 4, max_repeats: int = 40) -> str:
-    """Убирает «заевшую пластинку»: «фраза фраза фраза фраза» -> «фраза»."""
+    """Collapse a stuck tail: "phrase phrase phrase phrase" -> "phrase"."""
     tokens = text.split()
     total = len(tokens)
     if total < min_chunk * 2:
@@ -177,15 +174,10 @@ def _collapse_repeated_tail(text: str, min_chunk: int = 4, max_repeats: int = 40
 
 
 def squeeze_repeats(text: str) -> str:
-    """«это это это важно» -> «это важно», «фраза фраза фраза» -> «фраза».
+    """Collapse in-segment decoder loops ("this this this matters" -> "this matters").
 
-    Дополнительно снимает декодерные «петли» внутри сегмента (важно для
-    CTC/RNNT-моделей БЕЗ пунктуации, где весь сегмент — одно «предложение»
-    и межпредложенческая дедупликация бессильна):
-      * соседние дубли-прогоны («делаем раствор добавляем усилитель Делаем
-        раствор добавляем усилитель и это все…»);
-      * точные повторы окна в другом месте сегмента;
-      * короткое эхо в хвосте («…финальное взвешивание … финальное взвешивание»).
+    Handles loops inside one segment (important for CTC/RNNT models without
+    punctuation): adjacent duplicate runs, exact repeated windows, tail echo.
     """
     def repl(match: "re.Match") -> str:
         return match.group(1)
@@ -217,13 +209,12 @@ def _seq_ratio(a: List[str], b: List[str]) -> float:
 def squeeze_adjacent_spans(
     text: str, min_span: int = 5, max_span: int = 40, threshold: float = 0.85
 ) -> str:
-    """Схлопывает соседние дубль-прогоны: «X X …» -> «X …».
+    """Collapse adjacent duplicate runs: "X X …" -> "X …".
 
-    X — подряд идущий прогон из >= min_span слов, повторенный сразу же
-    (допускается деградация пары токенов: «…уровень паш в норму» /
-    «…уровень пш в норму» — это петля декодера, а не речь). Легитимные
-    параллельные конструкции под это не попадают: они НЕ смежные и/или
-    отличаются больше, чем на 15% токенов.
+    X is a run of >= min_span words repeated immediately (a couple of
+    degraded tokens are tolerated — that is a decoder loop, not speech).
+    Legitimate parallel constructions are not adjacent and/or differ by
+    more than 15% of tokens.
     """
     tokens = text.split()
     norms = [_norm_token(t) for t in tokens]
@@ -236,8 +227,8 @@ def squeeze_adjacent_spans(
             for i in range(n - 2 * size + 1):
                 a = norms[i:i + size]
                 b = norms[i + size:i + 2 * size]
-                # граничные токены прогонов должны совпадать: иначе «петля»
-                # на самом деле съехавшее окно и удаление склеит чужие слова
+                # boundary tokens must match: otherwise the "loop" is a
+                # shifted window and removal would glue unrelated words
                 if a[0] != b[0] or a[-1] != b[-1]:
                     continue
                 if _seq_ratio(a, b) >= threshold:
@@ -252,10 +243,9 @@ def squeeze_adjacent_spans(
 
 
 def drop_repeat_windows(text: str, min_span: int = 4, max_span: int = 40) -> str:
-    """Убирает ТОЧНЫЙ повтор окна слов в другом месте сегмента (второе вхождение).
+    """Remove the SECOND exact occurrence of a word window within a segment.
 
-    «…выглядит в макро Вот так теперь этот коврик выглядит в макро у каждой…»
-    Легитимные повторы коротких фраз (< min_span слов) сохраняются.
+    Legitimate repeats of short phrases (< min_span words) are kept.
     """
     tokens = text.split()
     norms = [_norm_token(t) for t in tokens]
@@ -280,10 +270,10 @@ def drop_repeat_windows(text: str, min_span: int = 4, max_span: int = 40) -> str
 
 
 def drop_tail_echo(text: str, min_span: int = 1, max_span: int = 5, min_gap: int = 3) -> str:
-    """Убирает точное эхо в хвосте: «финальное взвешивание … финальное взвешивание».
+    """Remove an exact echo in the tail ("final weighting … final weighting").
 
-    Однословное эхо («…съёмки этого видео Клиентка») снимается только при
-    большом отступе, чтобы не резать легитимные короткие концовки.
+    A single-word echo is removed only at a large gap so legitimate short
+    endings are not cut.
     """
     tokens = text.split()
     norms = [_norm_token(t) for t in tokens]
@@ -296,8 +286,8 @@ def drop_tail_echo(text: str, min_span: int = 1, max_span: int = 5, min_gap: int
         if not any(tail):
             continue
         for i in range(0, n - size - gap_needed + 1):
-            # однословное эхо снимаем только когда слово открывало сегмент
-            # («Клиентка … видео Клиентка»); иное — легитимное последнее слово
+            # a single-word echo is removed only when the word opened the
+            # segment; otherwise it is a legitimate last word
             if size == 1 and i != 0:
                 continue
             if tuple(norms[i:i + size]) == tail and (n - size) - (i + size) >= gap_needed:
@@ -306,12 +296,11 @@ def drop_tail_echo(text: str, min_span: int = 1, max_span: int = 5, min_gap: int
 
 
 def trim_echo_prefix(text: str, prev_norms: List[str], min_span: int = 3, max_span: int = 40) -> str:
-    """Срезает начало сегмента, повторяющее конец предыдущего.
+    """Trim a segment start that repeats the previous segment's end.
 
-    Петля декодера часто рвётся ровно по границе куска: хвост сегмента A и
-    голова сегмента B — один и тот же прогон («…добавляем усилитель» |
-    «Делаем волшебный раствор добавляем усилитель и это все…»). Внутри
-    каждого сегмента повтора при этом нет, поэтому ловим только на стыке.
+    A decoder loop often breaks exactly at the chunk boundary: tail of A and
+    head of B are the same run. Neither segment contains the repeat alone,
+    so it is caught only at the seam.
     """
     if not prev_norms:
         return text
@@ -331,11 +320,8 @@ def trim_echo_prefix(text: str, prev_norms: List[str], min_span: int = 3, max_sp
 
 
 def is_echo_fragment(text: str, prev_norms: List[str], max_words: int = 4) -> bool:
-    """Короткий огрызок (<= max_words слов), целиком повторяющий начало или
-    конец предыдущего сегмента («…финальное взвешивание» | «финальное
-    взвешивание»). Раньше такие проходили защитой «предложения короче 3 слов
-    не трогать» — но та защита про реплики диалога («Да.»), а здесь точное
-    совпадение с соседом, т.е. петля."""
+    """A short stub (<= max_words) fully repeating the start or the end of
+    the previous segment — an exact match with the neighbor, i.e. a loop."""
     norms = [_norm_token(t) for t in text.split()]
     if not (1 <= len(norms) <= max_words) or not prev_norms:
         return False
@@ -346,7 +332,7 @@ def is_echo_fragment(text: str, prev_norms: List[str], max_words: int = 4) -> bo
 
 
 def _sentence_norms(text: str) -> List[str]:
-    """Нормализованные предложения текста (для дедупликации)."""
+    """Normalized sentences of the text (for deduplication)."""
     return [
         re.sub(r"\W+", " ", part.lower()).strip()
         for part in re.split(r"(?<=[.!?…])\s+", text)
@@ -355,15 +341,15 @@ def _sentence_norms(text: str) -> List[str]:
 
 
 def _is_echo_sentence(candidate: str, previous: str, threshold: float = 0.80) -> bool:
-    """candidate — эхо previous?
+    """Is candidate an echo of previous?
 
-    Правила (консервативные, чтобы не съесть легитимный контент):
-      * Dice-схожесть биграмм ≥ threshold  → почти дословный повтор;
-      * candidate КОРОЧЕ и его биграммы ≥90% содержатся в previous →
-        «обломок» предыдущей фразы (хвост петли); если candidate ДЛИННЕЕ и
-        продолжает previous — он несёт новую информацию, оставляем;
-      * уникальные слова candidate ≥90% покрыты словами previous И порядок
-        похож (Dice ≥ 0.55), и слов ≥5 → деградировавший повтор петли.
+    Conservative rules (never eat legitimate content):
+      * bigram Dice >= threshold -> near-verbatim repeat;
+      * candidate is SHORTER and >=90% of its bigrams occur in previous ->
+        a fragment of the previous phrase (loop tail); a longer candidate
+        that continues previous carries new information and is kept;
+      * >=90% of candidate words occur in previous, order is similar
+        (Dice >= 0.55) and there are >=5 words -> degraded loop repeat.
     """
     dice = _similarity(candidate, previous)
     if dice >= threshold:
@@ -398,14 +384,12 @@ def squeeze_duplicate_sentences(
     context: Optional[Sequence[str]] = None,
     min_words: int = 3,
 ) -> str:
-    """Убирает дубли/эхо-предложения — внутри сегмента И через границу сегментов.
+    """Remove duplicate/echo sentences — within a segment AND across boundaries.
 
-    RNNT/CTC-модели на шуме и музыке «зацикливаются»: фраза повторяется 2–3
-    раза с постепенной деградацией, в том числе «перетекая» через границу
-    куска. `context` — нормализованные предложения предыдущих сегментов
-    (скользящее окно), чтобы ловить повтор «конец сегмента A = начало B».
-    Предложение короче min_words слов не дедуплицируется («Да.» в диалоге).
-    Из дублей оставляем самое длинное (в нём меньше «съеденных» слов).
+    RNNT/CTC models loop on noise/music: a phrase repeats with gradual
+    degradation, sometimes flowing across the chunk boundary. `context` is a
+    sliding window of normalized sentences of previous segments. Sentences
+    shorter than min_words are never deduplicated ("Yes." in a dialogue).
     """
     if not text:
         return text
@@ -413,19 +397,19 @@ def squeeze_duplicate_sentences(
     if not sentences:
         return text
 
-    # история последних предложений (включая уже отброшенные варианты —
-    # деградировавший повтор может быть ближе к ОТБРОШЕННОМУ, чем к оставленному)
+    # history of recent sentences (including dropped variants — a degraded
+    # repeat may be closer to the DROPPED one than to the kept one)
     history: List[str] = list(context or [])[-lookback:]
 
     kept: List[str] = []
     for sentence in sentences:
         candidate = re.sub(r"\W+", " ", sentence.lower()).strip()
         if len(candidate.split()) < min_words:
-            # «Да.» / «Ну что.» — диалогные мелочи не дедуплицируем
+            # short dialogue lines ("Yes.") are not deduplicated
             kept.append(sentence)
             continue
         if any(_is_echo_sentence(candidate, previous, threshold) for previous in history[-lookback:]):
-            continue    # эхо — отбрасываем, первое вхождение уже оставлено
+            continue    # echo — drop; the first occurrence is already kept
         kept.append(sentence)
         history.append(candidate)
         if len(history) > lookback * 3:
@@ -434,12 +418,12 @@ def squeeze_duplicate_sentences(
 
 
 # --------------------------------------------------------------------------- #
-#  Очистка потока сегментов
+#  Segment stream cleanup
 # --------------------------------------------------------------------------- #
 
 
 def _similarity(a: str, b: str) -> float:
-    """Быстрая схожесть строк (Дайс по биграммам) — без тяжёлых зависимостей."""
+    """Fast string similarity (bigram Dice) — no heavy dependencies."""
     if not a or not b:
         return 0.0
     if a == b:
@@ -467,14 +451,14 @@ def sanitize_segments(
     duplicate_similarity: float = 0.94,
     window: int = 6,
 ) -> List[Segment]:
-    """Чистит список сегментов: галлюцинации, повторы, низкокачественный вывод.
+    """Clean a segment list: hallucinations, repeats, low-quality output.
 
-    Возвращает НОВЫЙ список (исходные сегменты помечаются флагом dropped).
+    Returns a NEW list (dropped segments are flagged in place).
     """
     result: List[Segment] = []
-    recent_texts: List[tuple] = []   # (нормализованный текст, конец сегмента)
-    recent_sentences: List[str] = []   # скользящее окно для межсегментных эхо-повторов
-    prev_norms: List[str] = []         # токены предыдущего ПРИНЯТОГО сегмента (стыковые петли)
+    recent_texts: List[tuple] = []     # (normalized text, segment end)
+    recent_sentences: List[str] = []   # sliding window for cross-segment echoes
+    prev_norms: List[str] = []         # tokens of the previous KEPT segment
 
     for segment in segments:
         original = segment.text or ""
@@ -483,8 +467,8 @@ def sanitize_segments(
         if aggressive:
             text = squeeze_repeats(text)
             text = squeeze_duplicate_sentences(text, context=recent_sentences)
-            # петля, рваная по границе кусков: голова сегмента повторяет хвост
-            # предыдущего — срезаем это общее «кольцо»
+            # loop torn at the chunk boundary: the head repeats the previous
+            # tail — trim the shared "ring"
             text = trim_echo_prefix(text, prev_norms)
             for sentence_norm in _sentence_norms(text):
                 if len(sentence_norm.split()) >= 3:
@@ -495,35 +479,34 @@ def sanitize_segments(
 
         if not text or is_junk_segment(text):
             segment.dropped = True
-            segment.drop_reason = "мусор/пусто"
+            segment.drop_reason = "junk/empty"
             continue
 
         if aggressive and is_echo_fragment(text, prev_norms):
             segment.dropped = True
-            segment.drop_reason = "огрызок-эхо предыдущего сегмента"
+            segment.drop_reason = "echo stub of the previous segment"
             continue
 
-        # технические пороги качества (есть не у всех движков)
+        # technical quality thresholds (not all engines provide them)
         if aggressive:
             if segment.avg_logprob and segment.avg_logprob < min_avg_logprob and segment.duration > 1.0:
                 segment.dropped = True
-                segment.drop_reason = f"низкая уверенность (logprob {segment.avg_logprob:.2f})"
+                segment.drop_reason = f"low confidence (logprob {segment.avg_logprob:.2f})"
                 continue
             if segment.no_speech_prob >= max_no_speech_prob and len(text.split()) <= 2:
                 segment.dropped = True
-                segment.drop_reason = "похоже на тишину"
+                segment.drop_reason = "looks like silence"
                 continue
             if segment.compression_ratio and segment.compression_ratio > max_compression_ratio:
                 segment.dropped = True
-                segment.drop_reason = f"дегенеративный текст (cr {segment.compression_ratio:.2f})"
+                segment.drop_reason = f"degenerate text (cr {segment.compression_ratio:.2f})"
                 continue
 
-        # повторы между сегментами (типичная петля Whisper/GigaAM на шуме):
-        # либо высокая схожесть, либо один текст почти целиком содержится
-        # в другом (короткий «эхо-сегмент» после длинного).
-        # ВАЖНО: петля идёт стык-в-стык (gap ~ 0), а легитимные короткие
-        # реплики диалога («Да.» … «Да.») разделены секундами/минутами —
-        # поэтому для сегментов в 1-2 слова требуем временной близости.
+        # cross-segment repeats (a typical Whisper/GigaAM loop on noise):
+        # either high similarity or one text almost fully contained in the
+        # other (a short echo segment after a long one). Loops are back to
+        # back (gap ~ 0) while legitimate short replies are seconds apart —
+        # so 1-2 word segments must also be close in time.
         normalized = re.sub(r"\W+", " ", text.lower()).strip()
         short_segment = len(text.split()) <= 2
         duplicate = False
@@ -538,7 +521,7 @@ def sanitize_segments(
                 set_s = set(shorter.split())
                 set_l = set(longer.split())
                 if set_s and len(set_s & set_l) / len(set_s) >= 0.92:
-                    # биграммный containment строже словесного — проверяем им
+                    # bigram containment is stricter than word-level — use it
                     big_s = {f"{a}|{b}" for a, b in zip(shorter.split(), shorter.split()[1:])}
                     big_l = {f"{a}|{b}" for a, b in zip(longer.split(), longer.split()[1:])}
                     if big_s and len(big_s & big_l) / len(big_s) >= 0.90:
@@ -546,13 +529,13 @@ def sanitize_segments(
                         break
         if duplicate:
             segment.dropped = True
-            segment.drop_reason = "повтор предыдущего сегмента"
+            segment.drop_reason = "repeat of the previous segment"
             continue
 
         recent_texts.append((normalized, segment.end))
         if len(recent_texts) > window * 3:
             recent_texts = recent_texts[-window * 2:]
-        # запоминаем токены принятого сегмента для стыкового эхо-детектора
+        # remember tokens of the kept segment for the seam echo detector
         prev_norms = [_norm_token(t) for t in text.split()][-80:]
         result.append(segment)
 
@@ -560,13 +543,13 @@ def sanitize_segments(
 
 
 # --------------------------------------------------------------------------- #
-#  Сборка текста
+#  Text assembly
 # --------------------------------------------------------------------------- #
 
-SHORT_ECHO_GAP_SECONDS = 2.0    # короткая реплика («Да.») считается петлёй,
-                                # только если прозвучала стык-в-стык с такой же
-PARAGRAPH_GAP_SECONDS = 1.6     # пауза длиннее — новый абзац
-PARAGRAPH_MAX_CHARS = 900       # и по длине тоже режем
+SHORT_ECHO_GAP_SECONDS = 2.0    # a short reply ("Yes.") counts as a loop only
+                                # when it is back to back with an identical one
+PARAGRAPH_GAP_SECONDS = 1.6     # a longer pause starts a new paragraph
+PARAGRAPH_MAX_CHARS = 900       # paragraphs are also split by length
 SENTENCE_END = ".!?…"
 
 
@@ -580,7 +563,7 @@ def ensure_sentence_end(text: str) -> str:
 
 
 def capitalize_start(text: str) -> str:
-    """Первая БУКВА становится заглавной (вводные тире/кавычки не мешают)."""
+    """Capitalize the first LETTER (leading dashes/quotes do not interfere)."""
     if not text:
         return text
     for index, char in enumerate(text[:12]):
@@ -593,7 +576,7 @@ def capitalize_start(text: str) -> str:
 
 
 def join_plain(segments: Iterable[Segment], paragraphs: bool = True) -> str:
-    """Обычный текст (для .txt / .md)."""
+    """Plain text (for .txt / .md)."""
     chunks: List[str] = []
     current: List[str] = []
     current_len = 0
@@ -651,7 +634,7 @@ def format_timestamp(seconds: float, milliseconds: bool = False, comma: bool = F
 
 
 def split_for_subtitles(segments: Sequence[Segment], max_chars: int = 84, max_seconds: float = 6.0) -> List[Segment]:
-    """Режет длинные сегменты на субтитрные куски (для SRT/VTT)."""
+    """Split long segments into subtitle chunks (for SRT/VTT)."""
     out: List[Segment] = []
     for segment in segments:
         words = segment.text.split()
@@ -661,7 +644,7 @@ def split_for_subtitles(segments: Sequence[Segment], max_chars: int = 84, max_se
             out.append(segment)
             continue
 
-        # режем по словам, стараясь попадать в границы знаков препинания
+        # split by words, preferring punctuation boundaries
         if segment.words and len(segment.words) == len(words):
             buffer_words: List[Word] = []
             buffer_text: List[str] = []
@@ -696,7 +679,7 @@ def split_for_subtitles(segments: Sequence[Segment], max_chars: int = 84, max_se
                 )
             continue
 
-        # слов с таймингами нет — режем «на глаз» пропорционально длине
+        # no word timings — split proportionally to length
         total_chars = max(1, sum(len(w) + 1 for w in words))
         per_char = segment.duration / total_chars
         cursor = segment.start
@@ -727,16 +710,17 @@ def build_header(
     processing_seconds: float,
     extra: Optional[dict] = None,
 ) -> str:
-    """Шапка для .md/.txt-time (по желанию пользователя)."""
+    """Header for .md/.txt-time (optional, user-enabled)."""
     lines = [
         f"# {source_name}",
         "",
-        f"- Модель: {model_name}",
-        f"- Язык: {language or 'определён автоматически'}",
-        f"- Длительность: {format_timestamp(duration_seconds)}",
-        f"- Обработано за: {processing_seconds:.1f} с "
-        f"({(duration_seconds / processing_seconds):.1f}× реального времени)"
-        if processing_seconds > 0 else f"- Обработано за: {processing_seconds:.1f} с",
+        _("- Model: {}").format(model_name),
+        _("- Language: {}").format(language or _("detected automatically")),
+        _("- Duration: {}").format(format_timestamp(duration_seconds)),
+        _("- Processed in: {:.1f} s ({:.1f}× realtime)").format(
+            processing_seconds, duration_seconds / processing_seconds
+        )
+        if processing_seconds > 0 else _("- Processed in: {:.1f} s").format(processing_seconds),
     ]
     for key, value in (extra or {}).items():
         lines.append(f"- {key}: {value}")

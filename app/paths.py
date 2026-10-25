@@ -1,6 +1,6 @@
-"""Пути, имена файлов и прочие «бытовые» утилиты.
+"""Paths, file names and other everyday utilities.
 
-Здесь не должно быть тяжёлых импортов: модуль используется и в тестах, и в CLI.
+No heavy imports here: the module is used by tests and the CLI too.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -21,37 +20,38 @@ from .constants import (
     MODELS_DIRNAME,
     OUTPUTS_DIRNAME,
     RESOURCES_DIRNAME,
-    TEMP_DIRNAME,
+    RUNTIME_DIRNAME,
 )
+from .i18n import _
+
 
 # --------------------------------------------------------------------------- #
-#  Корень проекта
+#  Project root
 # --------------------------------------------------------------------------- #
 
 
 def find_root() -> Path:
-    """Корень проекта.
+    """Project root.
 
-    Приоритет:
-      1. переменная окружения LOCALASR_ROOT (её ставит bootstrap при перезапуске);
-      2. папка, из которой запущен процесс, если в ней есть main.py;
-      3. папка на два уровня выше этого файла (обычный запуск из дерева проекта);
-      4. папка исполняемого файла (сборка в exe).
+    Priority: LOCALASR_ROOT env var (set by bootstrap on relaunch) -> current
+    working dir -> parent of this package -> directory of the executable.
     """
+    marker = Path("launcher") / "main.py"
+
     env = os.environ.get("LOCALASR_ROOT")
-    if env and (Path(env) / "main.py").is_file():
+    if env and (Path(env) / marker).is_file():
         return Path(env).resolve()
 
     cwd = Path.cwd()
-    if (cwd / "main.py").is_file() and (cwd / "app").is_dir():
+    if (cwd / marker).is_file() and (cwd / "app").is_dir():
         return cwd.resolve()
 
     here = Path(__file__).resolve().parent.parent
-    if (here / "main.py").is_file():
+    if (here / marker).is_file():
         return here
 
     exe_dir = Path(sys.executable).resolve().parent
-    if (exe_dir / "main.py").is_file():
+    if (exe_dir / marker).is_file():
         return exe_dir
 
     return here
@@ -76,19 +76,32 @@ def resources_dir(root: Optional[Path] = None) -> Path:
     return (root or ROOT_DIR) / RESOURCES_DIRNAME
 
 
-def cache_dir(root: Optional[Path] = None) -> Path:
-    """Временные файлы (WAV-декод, частичные загрузки)."""
-    path = (root or ROOT_DIR) / TEMP_DIRNAME
-    _ensure(path)
-    return path
-
-
 def venv_dir(root: Optional[Path] = None) -> Path:
     return (root or ROOT_DIR) / ".venv"
 
 
+def runtime_dir(root: Optional[Path] = None) -> Path:
+    return (root or ROOT_DIR) / RUNTIME_DIRNAME
+
+
+def embedded_python(root: Optional[Path] = None) -> Optional[Path]:
+    """Portable interpreter (runtime/python, downloaded on first run)."""
+    base = runtime_dir(root) / "python"
+    exe = base / ("python.exe" if os.name == "nt" else "bin/python3")
+    return exe if exe.is_file() else None
+
+
+def env_dir(root: Optional[Path] = None) -> Path:
+    """Python environment the app installs packages into.
+
+    runtime/python for the portable mode, .venv otherwise.
+    """
+    embedded = embedded_python(root)
+    return embedded.parent if embedded else venv_dir(root)
+
+
 def resource_path(name: str, root: Optional[Path] = None) -> Optional[Path]:
-    """Файл из resources/ (работает и в собранном виде — через sys._MEIPASS)."""
+    """File from resources/ (also works in frozen builds via sys._MEIPASS)."""
     base = resources_dir(root)
     candidate = base / name
     if candidate.is_file():
@@ -110,10 +123,9 @@ def _ensure(path: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-#  Имена файлов
+#  File names
 # --------------------------------------------------------------------------- #
 
-# Символы, которые нельзя использовать в именах файлов (Windows строже всех)
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -124,21 +136,16 @@ MAX_STEM_LENGTH = 120
 
 
 def sanitize_stem(name: str) -> str:
-    """Делает из произвольной строки безопасное имя файла (без расширения).
-
-    «лекция 1.mp4»                       -> «лекция 1»
-    «C:\\Video\\лекция 1.mp4»           -> «лекция 1»   (и на Linux тоже)
-    «a/b:c*.mp4»                         -> «b_c»
-    """
+    """Turn an arbitrary string into a safe file name (without extension)."""
     text = str(name).replace("\x00", "")
-    # Windows-пути должны разбираться и на Linux/macOS (пользователь мог
-    # скопировать путь из письма или из логов)
+    # Windows paths must also parse on Linux/macOS (a path may come from an
+    # email or a log)
     normalized = text.replace("\\", "/")
     stem = os.path.splitext(os.path.basename(normalized))[0]
     stem = _ILLEGAL_CHARS.sub("_", stem)
     stem = stem.replace("\n", " ").replace("\r", " ").replace("\t", " ")
     stem = re.sub(r"\s{2,}", " ", stem).strip(" .")
-    stem = stem.strip("_") if stem.strip("_") else stem  # «b:c*.mp4» -> «b_c», а не «b_c_»
+    stem = stem.strip("_") if stem.strip("_") else stem
     if not stem:
         stem = "transcript"
     if stem.upper() in _RESERVED_NAMES:
@@ -149,19 +156,18 @@ def sanitize_stem(name: str) -> str:
 
 
 def datetime_stamp(when: Optional[float] = None) -> str:
-    """Метка «дата и время» для имён файлов: 2026-10-24 15-30-05.
+    """Date-time stamp for file names: 2026-10-24 15-30-05.
 
-    Двоеточия в имени заменены на дефисы — иначе Windows не даст создать файл.
+    Colons are replaced with dashes — Windows forbids them in file names.
     """
     return time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(when if when is not None else time.time()))
 
 
 def unique_path(directory: Path, stem: str, suffix: str, overwrite: bool = False) -> Path:
-    """Путь результата: `лекция 1.txt`.
+    """Result path: `lecture 1.txt`.
 
-    При коллизии и выключенной перезаписи файл НЕ затирается: имя получает
-    хвост «дата и время» — `лекция 1 2026-10-24 15-30-05.txt`. Если и такое
-    имя уже занято (два запуска в одну секунду), добавляется счётчик.
+    On collision (overwrite off) the name gets a date-time tail; if that is
+    taken too (two runs in one second), a counter is appended.
     """
     directory = Path(directory)
     _ensure(directory)
@@ -176,7 +182,7 @@ def unique_path(directory: Path, stem: str, suffix: str, overwrite: bool = False
     while target.exists():
         target = directory / f"{base} ({counter}){suffix}"
         counter += 1
-        if counter > 999:  # защита от бесконечного цикла
+        if counter > 999:
             target = directory / f"{base}-{hashlib.md5(str(target).encode()).hexdigest()[:6]}{suffix}"
             break
     return target
@@ -198,10 +204,10 @@ def is_media_file(path: str | os.PathLike) -> bool:
 
 
 def expand_media_inputs(inputs: Iterable[str]) -> List[Path]:
-    """Раскрывает файлы и папки в плоский список медиафайлов.
+    """Expand files and folders into a flat list of media files.
 
-    Из папок берутся только медиафайлы; из явно указанных файлов — любые
-    (расширение может отсутствовать, а декодер сам разберётся).
+    Folders contribute media files only; explicitly listed files are taken
+    as-is (extension may be missing, the decoder will figure it out).
     """
     result: List[Path] = []
     for raw in inputs:
@@ -212,9 +218,8 @@ def expand_media_inputs(inputs: Iterable[str]) -> List[Path]:
                     result.append(child)
         elif path.is_file():
             if path.suffix.lower() and not is_media_file(path):
-                continue  # явно не медиа (например, .txt) — пропускаем
+                continue
             result.append(path)
-    # убираем дубликаты, сохраняя порядок
     seen = set()
     unique: List[Path] = []
     for item in result:
@@ -226,7 +231,7 @@ def expand_media_inputs(inputs: Iterable[str]) -> List[Path]:
 
 
 # --------------------------------------------------------------------------- #
-#  Человекочитаемые размеры и место на диске
+#  Human-readable sizes and disk space
 # --------------------------------------------------------------------------- #
 
 
@@ -234,24 +239,14 @@ def human_size(num_bytes: Optional[float]) -> str:
     if num_bytes is None:
         return "—"
     value = float(num_bytes)
-    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if abs(value) < 1024 or unit == "ТБ":
-            if unit == "Б":
+    units = (_("B"), _("KB"), _("MB"), _("GB"), _("TB"))
+    for unit in units:
+        if abs(value) < 1024 or unit == units[-1]:
+            if unit == units[0]:
                 return f"{int(value)} {unit}"
             return f"{value:.1f} {unit}".replace(".0", "")
         value /= 1024
-    return f"{value:.1f} ТБ"
-
-
-def plural_ru(count: int, one: str, few: str, many: str) -> str:
-    """Русская плюрализация: 1 файл, 2 файла, 5 файлов, 11 файлов, 21 файл."""
-    count = abs(int(count))
-    mod10, mod100 = count % 10, count % 100
-    if mod10 == 1 and mod100 != 11:
-        return one
-    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
-        return few
-    return many
+    return f"{value:.1f} {units[-1]}"
 
 
 def free_space(path: Path) -> Optional[int]:
@@ -262,24 +257,20 @@ def free_space(path: Path) -> Optional[int]:
 
 
 def ensure_free_space(path: Path, needed_bytes: int, margin_bytes: int = 512 * 1024 * 1024) -> None:
-    """Бросает понятную ошибку, если на диске не хватает места."""
+    """Raise a clear error when the disk has not enough free space."""
     free = free_space(path)
     if free is None:
         return
     if free < needed_bytes + margin_bytes:
         raise OSError(
-            f"Недостаточно места на диске: нужно {human_size(needed_bytes + margin_bytes)}, "
-            f"свободно {human_size(free)} ({path})."
+            _("Not enough disk space: need {}, free {} ({})").format(
+                human_size(needed_bytes + margin_bytes), human_size(free), path
+            )
         )
 
 
-def temp_dir() -> Path:
-    """Системная временная папка (для WAV при декодировании)."""
-    return Path(tempfile.gettempdir())
-
-
 def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
-    """Пишем во временный файл и переименовываем — никаких «половинок» при сбое."""
+    """Write to a temp file and rename — no half-written files on failure."""
     path = Path(path)
     _ensure(path.parent)
     tmp = path.with_suffix(path.suffix + ".part")
@@ -312,7 +303,7 @@ def dir_size(path: Path) -> int:
 
 
 def short_path(path: Path | str, limit: int = 62) -> str:
-    """Сокращает длинный путь для показа в интерфейсе: …/очень/длинный/файл.mp4"""
+    """Shorten a long path for display: …/very/long/file.mp4"""
     text = str(path)
     if len(text) <= limit:
         return text

@@ -1,4 +1,4 @@
-"""Диалоги: прогресс, добавление своей модели, первый запуск, настройки, железо."""
+"""Dialogs: progress, custom model, settings, hardware, diagnostics."""
 
 from __future__ import annotations
 
@@ -6,18 +6,17 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -32,21 +31,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import paths
+from .. import i18n, paths
 from ..constants import ENGINE_LABELS, ENGINES, LANGUAGES
 from ..core.models_catalog import ModelEntry
+from ..i18n import _
 from ..settings import Settings
 from . import compat
-from .widgets import FlowLayout, make_label, open_url, stars
+from .widgets import make_label, open_url, stars
 
 
 # --------------------------------------------------------------------------- #
-#  Прогресс с возможностью отмены
+#  Progress with cancellation
 # --------------------------------------------------------------------------- #
 
 
 class ProgressDialog(QDialog):
-    """Универсальное окно прогресса (скачивание модели, установка пакетов, работа)."""
+    """Universal progress window (model download, package install, work)."""
 
     cancelRequested = Signal()
 
@@ -76,7 +76,7 @@ class ProgressDialog(QDialog):
         self.progress.setValue(0)
         root.addWidget(self.progress)
 
-        self.status_label = make_label("Подготовка…", "Dim", word_wrap=True)
+        self.status_label = make_label(_("Preparing…"), "Dim", word_wrap=True)
         root.addWidget(self.status_label)
 
         self.log = QPlainTextEdit()
@@ -90,7 +90,7 @@ class ProgressDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button = QPushButton(_("Cancel"))
         self.cancel_button.setObjectName("Danger")
         self.cancel_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.cancel_button.clicked.connect(self.cancel)
@@ -104,8 +104,8 @@ class ProgressDialog(QDialog):
             return
         self._cancelled = True
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Останавливаю…")
-        self.status_label.setText("Отмена — дожидаемся завершения текущей операции…")
+        self.cancel_button.setText(_("Stopping…"))
+        self.status_label.setText(_("Cancelling — waiting for the current operation to finish…"))
         self.cancelRequested.emit()
 
     @property
@@ -113,8 +113,8 @@ class ProgressDialog(QDialog):
         return self._cancelled
 
     def set_status(self, text: object) -> None:
-        # Защита от «плавания» типов: сигналы воркеров могут принести что угодно,
-        # а QLabel.setText(float) ронял приложение TypeError'ом на каждом тике.
+        # type guard: worker signals may carry anything, and QLabel.setText(float)
+        # used to crash the app with a TypeError on every tick
         self.status_label.setText("" if text is None else str(text))
 
     def set_fraction(self, fraction: object) -> None:
@@ -132,11 +132,11 @@ class ProgressDialog(QDialog):
         if line:
             self.log.appendPlainText(line.rstrip())
 
-    def finish(self, message: str = "Готово") -> None:
+    def finish(self, message: Optional[str] = None) -> None:
         self._done = True
         self.set_fraction(1.0)
-        self.status_label.setText(message)
-        self.cancel_button.setText("Закрыть")
+        self.status_label.setText(message if message is not None else _("Done"))
+        self.cancel_button.setText(_("Close"))
         self.cancel_button.setObjectName("Primary")
         self.cancel_button.style().unpolish(self.cancel_button)
         self.cancel_button.style().polish(self.cancel_button)
@@ -149,7 +149,7 @@ class ProgressDialog(QDialog):
         self.cancel_button.clicked.connect(self.accept)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        """Крестик = отмена операции. После отмены/завершения окно закрывается."""
+        """The X button cancels the operation. After cancel/finish it closes."""
         if self._done or self._cancelled:
             event.accept()
             return
@@ -158,16 +158,16 @@ class ProgressDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-#  Своя модель по ссылке
+#  Custom model by link
 # --------------------------------------------------------------------------- #
 
 
 class CustomModelDialog(QDialog):
-    """Добавление любой модели: HF-репозиторий, прямая ссылка или папка на диске."""
+    """Add any model: HF repository, direct link or a folder on disk."""
 
     def __init__(self, parent: Optional[QWidget] = None, models_root: Optional[Path] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Своя модель")
+        self.setWindowTitle(_("Custom model"))
         self.setModal(True)
         self.setMinimumWidth(680)
         self.entry: Optional[ModelEntry] = None
@@ -178,19 +178,16 @@ class CustomModelDialog(QDialog):
         root.setSpacing(12)
 
         root.addWidget(
-            make_label(
-                "Можно добавить любую модель, а не только те, что в каталоге.",
-                "H2",
-            )
+            make_label(_("You can add any model, not only the catalog ones."), "H2")
         )
         root.addWidget(
             make_label(
-                "Поддерживаются три вида источников:\n"
-                "  • репозиторий Hugging Face — например, coriollon/whisper-large-v3-turbo-russian\n"
-                "    (можно с подпапкой: owner/name/tree/main/ct2_int8_float16)\n"
-                "  • прямая ссылка на файл — ggml-*.bin, *.zip (Vosk), model.bin\n"
-                "  • папка или файл на диске — например, D:\\models\\my-whisper\n\n"
-                "Движок определим автоматически по содержимому.",
+                _("Three kinds of sources are supported:\n"
+                  "  • a Hugging Face repository — e.g. coriollon/whisper-large-v3-turbo-russian\n"
+                  "    (a subfolder works too: owner/name/tree/main/ct2_int8_float16)\n"
+                  "  • a direct file link — ggml-*.bin, *.zip (Vosk), model.bin\n"
+                  "  • a folder or file on disk — e.g. D:\\models\\my-whisper\n\n"
+                  "The engine is detected automatically from the content."),
                 "Dim",
                 word_wrap=True,
             )
@@ -201,44 +198,44 @@ class CustomModelDialog(QDialog):
 
         source_row = QHBoxLayout()
         self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("owner/name, https://… или C:\\путь\\к\\модели")
+        self.source_edit.setPlaceholderText(_("owner/name, https://… or C:\\path\\to\\model"))
         source_row.addWidget(self.source_edit, stretch=1)
 
-        self.browse_button = QPushButton("Обзор…")
+        self.browse_button = QPushButton(_("Browse…"))
         self.browse_button.setObjectName("Ghost")
         self.browse_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.browse_button.clicked.connect(self._browse)
         source_row.addWidget(self.browse_button)
-        form.addRow("Источник", source_row)
+        form.addRow(_("Source"), source_row)
 
         self.id_edit = QLineEdit()
-        self.id_edit.setPlaceholderText("оставь пустым — придумаем сами (это имя папки в models/)")
-        form.addRow("ID модели", self.id_edit)
+        self.id_edit.setPlaceholderText(_("leave empty — we will invent one (the folder name in models/)"))
+        form.addRow(_("Model ID"), self.id_edit)
 
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("название, которое увидишь в списке")
-        form.addRow("Название", self.name_edit)
+        self.name_edit.setPlaceholderText(_("the name you will see in the list"))
+        form.addRow(_("Name"), self.name_edit)
 
         self.engine_combo = QComboBox()
-        self.engine_combo.addItem("Определить автоматически", "")
+        self.engine_combo.addItem(_("Detect automatically"), "")
         for engine in ENGINES:
-            self.engine_combo.addItem(ENGINE_LABELS[engine], engine)
-        form.addRow("Движок", self.engine_combo)
+            self.engine_combo.addItem(_(ENGINE_LABELS[engine]), engine)
+        form.addRow(_("Engine"), self.engine_combo)
 
         self.languages_edit = QLineEdit()
-        self.languages_edit.setPlaceholderText("ru, en (через запятую)")
+        self.languages_edit.setPlaceholderText(_("ru, en (comma-separated)"))
         self.languages_edit.setText("ru, en")
-        form.addRow("Языки", self.languages_edit)
+        form.addRow(_("Languages"), self.languages_edit)
 
         self.ram_spin = QSpinBox()
         self.ram_spin.setRange(0, 200_000)
-        self.ram_spin.setSuffix(" МБ")
-        self.ram_spin.setSpecialValueText("оценить автоматически")
-        form.addRow("Память в работе", self.ram_spin)
+        self.ram_spin.setSuffix(_(" MB"))
+        self.ram_spin.setSpecialValueText(_("estimate automatically"))
+        form.addRow(_("Memory in use"), self.ram_spin)
 
         root.addLayout(form)
 
-        self.inspect_button = QPushButton("🔍 Определить, что это за модель")
+        self.inspect_button = QPushButton(_("🔍 Detect what kind of model this is"))
         self.inspect_button.setObjectName("Ghost")
         self.inspect_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.inspect_button.clicked.connect(self._inspect)
@@ -249,9 +246,9 @@ class CustomModelDialog(QDialog):
         root.addWidget(self.result_label)
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Ok", "Cancel"))
-        buttons.button(compat.dialog_buttons("Ok")).setText("Добавить и скачать")
+        buttons.button(compat.dialog_buttons("Ok")).setText(_("Add and download"))
         buttons.button(compat.dialog_buttons("Ok")).setObjectName("Primary")
-        buttons.button(compat.dialog_buttons("Cancel")).setText("Отмена")
+        buttons.button(compat.dialog_buttons("Cancel")).setText(_("Cancel"))
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -260,7 +257,7 @@ class CustomModelDialog(QDialog):
     def _browse(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
-        picked = QFileDialog.getExistingDirectory(self, "Папка с моделью", str(self._models_root))
+        picked = QFileDialog.getExistingDirectory(self, _("Model folder"), str(self._models_root))
         if picked:
             self.source_edit.setText(picked)
             self._inspect()
@@ -268,16 +265,16 @@ class CustomModelDialog(QDialog):
     def _inspect(self) -> None:
         source = self.source_edit.text().strip()
         if not source:
-            self.result_label.setText("Сначала укажи источник.")
+            self.result_label.setText(_("Specify a source first."))
             return
         self.inspect_button.setEnabled(False)
-        self.result_label.setText("Проверяю источник…")
+        self.result_label.setText(_("Checking the source…"))
         try:
             from ..core.downloader import inspect_custom_source
 
             entry = inspect_custom_source(source)
         except Exception as exc:  # noqa: BLE001
-            self.result_label.setText(f"Не получилось: {exc}")
+            self.result_label.setText(_("Did not work: {exc}").format(exc=exc))
             self.inspect_button.setEnabled(True)
             return
 
@@ -292,17 +289,15 @@ class CustomModelDialog(QDialog):
         if entry.ram_mb:
             self.ram_spin.setValue(entry.ram_mb)
 
-        self.result_label.setText(
-            f"Движок: {ENGINE_LABELS.get(entry.engine, entry.engine)}\n"
-            f"Размер: {entry.size_text}\n"
-            f"Файлов: источник распознан, можно добавлять."
-        )
+        self.result_label.setText(_(
+            "Engine: {engine}\nSize: {size}\nFiles: the source is recognized, ready to add."
+        ).format(engine=_(ENGINE_LABELS.get(entry.engine, entry.engine)), size=entry.size_text))
         self._probed = entry
 
     def _accept(self) -> None:
         source = self.source_edit.text().strip()
         if not source:
-            QMessageBox.warning(self, "Своя модель", "Укажи источник: ссылку, HF-репозиторий или путь.")
+            QMessageBox.warning(self, _("Custom model"), _("Specify a source: link, HF repository or path."))
             return
 
         probed: Optional[ModelEntry] = getattr(self, "_probed", None)
@@ -312,7 +307,7 @@ class CustomModelDialog(QDialog):
 
                 probed = inspect_custom_source(source)
             except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Своя модель", f"Не удалось разобрать источник:\n{exc}")
+                QMessageBox.critical(self, _("Custom model"), _("Failed to parse the source:\n{exc}").format(exc=exc))
                 return
 
         model_id = self.id_edit.text().strip() or probed.id
@@ -336,27 +331,27 @@ class CustomModelDialog(QDialog):
             probed.ram_mb = self.ram_spin.value()
 
         probed.custom = True
-        probed.tags = list(dict.fromkeys([*probed.tags, "своя модель"]))
+        probed.tags = list(dict.fromkeys([*probed.tags, "custom model"]))
         self.entry = probed
         self.accept()
 
 
 # --------------------------------------------------------------------------- #
-#  Информация о железе
+#  Hardware info
 # --------------------------------------------------------------------------- #
 
 
 class HardwareDialog(QDialog):
     def __init__(self, summary: str, ffmpeg_text: str, notes: List[str], parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Железо и окружение")
+        self.setWindowTitle(_("Hardware & environment"))
         self.setModal(True)
         self.setMinimumWidth(560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(10)
-        root.addWidget(make_label("Что видит LocalASR", "H2"))
+        root.addWidget(make_label(_("What LocalASR sees"), "H2"))
 
         box = QPlainTextEdit()
         box.setReadOnly(True)
@@ -368,14 +363,14 @@ class HardwareDialog(QDialog):
             root.addWidget(make_label("• " + note, "Dim", word_wrap=True))
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Close"))
-        buttons.button(compat.dialog_buttons("Close")).setText("Закрыть")
+        buttons.button(compat.dialog_buttons("Close")).setText(_("Close"))
         buttons.rejected.connect(self.accept)
         buttons.accepted.connect(self.accept)
         root.addWidget(buttons)
 
 
 # --------------------------------------------------------------------------- #
-#  Настройки
+#  Settings
 # --------------------------------------------------------------------------- #
 
 
@@ -391,31 +386,33 @@ class SettingsDialog(QDialog):
         self.settings = settings
         self.hardware = hardware or {}
         self._on_reset_defaults = on_reset_defaults
-        self.setWindowTitle("Настройки")
+        self._restart_requested = False
+        self.setWindowTitle(_("Settings"))
         self.setModal(True)
         self.setMinimumSize(700, 640)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._scroll_wrap(self._tab_quality()), "Качество текста")
-        self.tabs.addTab(self._scroll_wrap(self._tab_speed()), "Скорость и железо")
-        self.tabs.addTab(self._scroll_wrap(self._tab_engines()), "Движки")
-        self.tabs.addTab(self._scroll_wrap(self._tab_logging()), "Журнал и диагностика")
-        self.tabs.addTab(self._scroll_wrap(self._tab_about()), "О программе")
+        self.tabs.addTab(self._scroll_wrap(self._tab_interface()), _("Interface"))
+        self.tabs.addTab(self._scroll_wrap(self._tab_quality()), _("Text quality"))
+        self.tabs.addTab(self._scroll_wrap(self._tab_speed()), _("Speed & hardware"))
+        self.tabs.addTab(self._scroll_wrap(self._tab_engines()), _("Engines"))
+        self.tabs.addTab(self._scroll_wrap(self._tab_logging()), _("Logging & diagnostics"))
+        self.tabs.addTab(self._scroll_wrap(self._tab_about()), _("About"))
 
         buttons = QDialogButtonBox(compat.dialog_buttons("Save", "Cancel"))
-        buttons.button(compat.dialog_buttons("Save")).setText("Сохранить")
+        buttons.button(compat.dialog_buttons("Save")).setText(_("Save"))
         buttons.button(compat.dialog_buttons("Save")).setObjectName("Primary")
-        buttons.button(compat.dialog_buttons("Cancel")).setText("Отмена")
+        buttons.button(compat.dialog_buttons("Cancel")).setText(_("Cancel"))
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
 
-        self.reset_button = QPushButton("Сбросить настройки по умолчанию")
+        self.reset_button = QPushButton(_("Reset settings to defaults"))
         self.reset_button.setObjectName("Ghost")
         self.reset_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.reset_button.setToolTip(
-            "Вернуть ВСЕ настройки к стандартным: параметры распознавания, папки,\n"
-            "положение и размер окна, фильтры каталога моделей."
-        )
+        self.reset_button.setToolTip(_(
+            "Return ALL settings to defaults: recognition options, folders,\n"
+            "window position and size, model catalog filters."
+        ))
         self.reset_button.clicked.connect(self._reset_defaults)
 
         buttons_row = QHBoxLayout()
@@ -428,14 +425,14 @@ class SettingsDialog(QDialog):
         root.addWidget(self.tabs, stretch=1)
         root.addLayout(buttons_row)
 
-    # -- сброс настроек ----------------------------------------------------- #
+    # -- settings reset -------------------------------------------------------- #
     def _reset_defaults(self) -> None:
         answer = QMessageBox.question(
-            self, "Сброс настроек",
-            "Вернуть все настройки к стандартным?\n\n"
-            "Будут сброшены: параметры распознавания, папка результатов,\n"
-            "положение и размер окна, фильтры каталога моделей.\n"
-            "Скачанные модели и файлы результатов не затрагиваются.",
+            self, _("Reset settings"),
+            _("Return all settings to defaults?\n\n"
+              "Will be reset: recognition options, results folder,\n"
+              "window position and size, model catalog filters.\n"
+              "Downloaded models and result files are not affected."),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_no(),
         )
@@ -447,12 +444,12 @@ class SettingsDialog(QDialog):
                 self._on_reset_defaults()
             except Exception:  # noqa: BLE001
                 pass
-        self.done(0)   # не accept(): старые значения виджетов сохранять не нужно
+        self.done(0)   # not accept(): stale widget values must not be saved
 
-    # -- помощники --------------------------------------------------------- #
+    # -- helpers ------------------------------------------------------------------ #
     @staticmethod
     def _scroll_wrap(page: QWidget) -> QScrollArea:
-        """Вкладка со своей прокруткой: пояснения не обрезаются в маленьком окне."""
+        """Tab with its own scroller: hints are not clipped in a small window."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(compat.frame_no_frame())
@@ -462,12 +459,31 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _hinted(form: QFormLayout, title: str, widget: QWidget, hint: str) -> None:
-        """Строка настройки + пояснение «зачем это и как настраивать»."""
+        """A setting row + a "why and how" hint."""
         widget.setToolTip(hint)
         form.addRow(title, widget)
         form.addRow(make_label(hint, "Muted", word_wrap=True))
 
-    # -- вкладки ---------------------------------------------------------- #
+    # -- tabs ------------------------------------------------------------------ #
+    def _tab_interface(self) -> QWidget:
+        page = QWidget()
+        form = QFormLayout(page)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(8)
+
+        self.ui_language_combo = QComboBox()
+        for label, value in i18n.language_choices():
+            self.ui_language_combo.addItem(label, value)
+        index = self.ui_language_combo.findData(self.settings.ui_language or "")
+        self.ui_language_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._hinted(
+            form, _("Interface language"), self.ui_language_combo,
+            _("Language of menus, buttons, hints and messages. \"Detect automatically\" "
+              "follows the operating system language. A change takes effect after "
+              "restarting the application — you will be offered to restart on Save."),
+        )
+        return page
+
     def _tab_quality(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
@@ -476,85 +492,86 @@ class SettingsDialog(QDialog):
 
         self.language_combo = QComboBox()
         for code, title in LANGUAGES:
-            self.language_combo.addItem(title, code)
+            self.language_combo.addItem(_(title), code)
         index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(index if index >= 0 else 1)
         self._hinted(
-            form, "Язык речи", self.language_combo,
-            "Язык записи. «Определить автоматически» удобно для разноязычных папок, "
-            "но явный выбор быстрее и надёжнее на коротких/шумных файлах.",
+            form, _("Speech language"), self.language_combo,
+            _("Language of the recording. \"Detect automatically\" is handy for mixed "
+              "folders, but an explicit choice is faster and more reliable on "
+              "short/noisy files."),
         )
 
-        self.translate_check = QCheckBox("Переводить результат в английский (task=translate)")
+        self.translate_check = QCheckBox(_("Translate the result to English (task=translate)"))
         self.translate_check.setChecked(self.settings.translate_to_english)
         self._hinted(
             form, "", self.translate_check,
-            "Модель сразу выдаёт перевод услышанного на английский вместо исходного текста. "
-            "Для конспекта русской лекции держи выключенным.",
+            _("The model outputs an English translation of what it heard instead of the "
+              "original text. Keep it off for notes of a Russian lecture."),
         )
 
-        self.vad_check = QCheckBox("Отрезать тишину и шум (Silero VAD)")
+        self.vad_check = QCheckBox(_("Cut silence and noise (Silero VAD)"))
         self.vad_check.setChecked(self.settings.use_vad)
         self._hinted(
             form, "", self.vad_check,
-            "До распознавания вырезает паузы/музыку/шум: быстрее и меньше галлюцинаций. "
-            "Выключай только если тишина в записи содержательна.",
+            _("Cuts pauses/music/noise before recognition: faster and fewer hallucinations. "
+              "Turn off only if the silence itself is meaningful."),
         )
 
-        self.anti_hallucination = QCheckBox("Чистить «[музыка]», «Спасибо за просмотр», повторы и петли")
+        self.anti_hallucination = QCheckBox(_('Clean "[music]", "Thanks for watching", repeats and loops'))
         self.anti_hallucination.setChecked(self.settings.suppress_hallucinations)
         self._hinted(
             form, "", self.anti_hallucination,
-            "Постобработка: убирает мусорные сегменты, которые Whisper придумывает на тишине "
-            "и музыке, и склеенные повторы одной фразы. Рекомендуется всегда включённым.",
+            _("Post-processing: removes junk segments Whisper invents on silence and "
+              "music, and glued repeats of one phrase. Recommended always on."),
         )
 
-        self.paragraphs_check = QCheckBox("Склеивать фразы в абзацы")
+        self.paragraphs_check = QCheckBox(_("Join phrases into paragraphs"))
         self.paragraphs_check.setChecked(self.settings.paragraphs)
         self._hinted(
             form, "", self.paragraphs_check,
-            "В .txt текст будет абзацами по смысловым паузам, а не «простынёй» из фраз. "
-            "Выключи, если нужна каждая фраза с новой строки.",
+            _("In .txt the text becomes paragraphs split by meaningful pauses instead "
+              "of one long line. Turn off if every phrase should start a new line."),
         )
 
-        self.word_ts_check = QCheckBox("Считать таймкоды каждого слова")
+        self.word_ts_check = QCheckBox(_("Compute per-word timestamps"))
         self.word_ts_check.setChecked(self.settings.word_timestamps)
         self._hinted(
             form, "", self.word_ts_check,
-            "Нужно только для покадрово точных субтитров; замедляет распознавание. "
-            "Для .txt-конспекта выключи.",
+            _("Only needed for frame-accurate subtitles; slows recognition down. "
+              "Turn off for .txt notes."),
         )
 
         self.beam_spin = QSpinBox()
         self.beam_spin.setRange(1, 12)
         self.beam_spin.setValue(int(self.settings.beam_size or 5))
         self._hinted(
-            form, "Beam size (качество декодинга)", self.beam_spin,
-            "Сколько вариантов продолжения фразы держит декодер: 1 — быстрее всего, "
-            "5 — оптимально, 8+ — максимум точности и времени. Для лекций хватает 5.",
+            form, _("Beam size (decoding quality)"), self.beam_spin,
+            _("How many phrase continuations the decoder keeps: 1 — fastest, "
+              "5 — optimal, 8+ — maximum accuracy and time. 5 is enough for lectures."),
         )
 
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlainText(self.settings.initial_prompt)
         self.prompt_edit.setFixedHeight(70)
-        self.prompt_edit.setPlaceholderText(
-            "Подсказка модели: стиль и термины. Например:\n"
-            "Лекция по машинному обучению. Термины: градиентный спуск, трансформер, attention, токенизация."
-        )
+        self.prompt_edit.setPlaceholderText(_(
+            "Model hint: style and terms. Example:\n"
+            "Machine learning lecture. Terms: gradient descent, transformer, attention, tokenization."
+        ))
         self._hinted(
-            form, "initial_prompt (стиль/термины)", self.prompt_edit,
-            "Короткий пример стиля/тематики, который модель «продолжает». Помогает с терминологией "
-            "и оформлением (например, «пиши научным стилем, имена собственные с заглавной»).",
+            form, _("initial_prompt (style/terms)"), self.prompt_edit,
+            _("A short style/topic example the model \"continues\". Helps with terminology "
+              "and formatting (e.g. \"write in a scientific style, capitalize names\")."),
         )
 
         self.hotwords_edit = QPlainTextEdit()
         self.hotwords_edit.setPlainText(self.settings.hotwords)
         self.hotwords_edit.setFixedHeight(60)
-        self.hotwords_edit.setPlaceholderText("Слова-подсказки через запятую: Хаффман, RAG, Kubernetes…")
+        self.hotwords_edit.setPlaceholderText(_("Comma-separated hint words: Huffman, RAG, Kubernetes…"))
         self._hinted(
-            form, "hotwords (слова-подсказки)", self.hotwords_edit,
-            "Список редких слов и терминов конкретной лекции — модель будет писать их верно. "
-            "Работает в faster-whisper; остальные движки подсказку игнорируют.",
+            form, _("hotwords (hint words)"), self.hotwords_edit,
+            _("Rare words and terms of the concrete lecture — the model will spell them "
+              "correctly. Works in faster-whisper; other engines ignore the hint."),
         )
 
         return page
@@ -566,77 +583,77 @@ class SettingsDialog(QDialog):
         form.setSpacing(8)
 
         self.device_combo = QComboBox()
-        self.device_combo.addItem("Авто (рекомендуется)", "auto")
+        self.device_combo.addItem(_("Auto (recommended)"), "auto")
         self.device_combo.addItem("CPU", "cpu")
-        self.device_combo.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.device_combo.addItem(_("NVIDIA GPU (CUDA)"), "cuda")
         index = self.device_combo.findData(self.settings.device)
         self.device_combo.setCurrentIndex(index if index >= 0 else 0)
         self._hinted(
-            form, "Устройство", self.device_combo,
-            "Где считаем: «Авто» выберет GPU, если CUDA видна, иначе CPU. "
-            "Принудительный CPU полезен, когда GPU занят играми/рендером. "
-            "Если выберешь GPU без установленных CUDA-библиотек — программа предложит "
-            "установку (вкладка «Движки»), а до тех пор будет работать на CPU.",
+            form, _("Device"), self.device_combo,
+            _("Where to compute: Auto picks the GPU when CUDA is visible, otherwise CPU. "
+              "Forced CPU helps when the GPU is busy with games/rendering. "
+              "If you pick a GPU without CUDA libraries installed, the app offers "
+              "the installation (Engines tab) and runs on CPU meanwhile."),
         )
 
         self.compute_combo = QComboBox()
         for value, title in (
-            ("auto", "Авто"),
-            ("int8", "int8 — CPU, минимум памяти"),
-            ("int8_float16", "int8_float16 — GPU с малой VRAM"),
-            ("float16", "float16 — GPU, быстрее всего"),
-            ("default", "default — как решит движок"),
+            ("auto", _("Auto")),
+            ("int8", _("int8 — CPU, minimum memory")),
+            ("int8_float16", _("int8_float16 — GPU with small VRAM")),
+            ("float16", _("float16 — GPU, fastest")),
+            ("default", _("default — whatever the engine decides")),
         ):
             self.compute_combo.addItem(title, value)
         index = self.compute_combo.findData(self.settings.compute_type)
         self.compute_combo.setCurrentIndex(index if index >= 0 else 0)
         self._hinted(
-            form, "Точность вычислений", self.compute_combo,
-            "Формат чисел модели в памяти: int8 экономит RAM/VRAM ценой ~0.1–0.3% точности, "
-            "float16 быстрее на GPU. «Авто» подберёт по устройству.",
+            form, _("Compute precision"), self.compute_combo,
+            _("The numeric format of model weights in memory: int8 saves RAM/VRAM at the "
+              "cost of ~0.1–0.3% accuracy, float16 is fastest on GPU. Auto picks per device."),
         )
 
-        self.batched_check = QCheckBox("Пакетный декодинг (BatchedInferencePipeline)")
+        self.batched_check = QCheckBox(_("Batched decoding (BatchedInferencePipeline)"))
         self.batched_check.setChecked(bool(self.settings.batched))
         self._hinted(
             form, "", self.batched_check,
-            "До 4× быстрее на GPU: куски аудио считаются батчем. На CPU выигрыша почти нет, "
-            "а памяти нужно больше — при нехватке RAM выключи.",
+            _("Up to 4× faster on GPU: audio chunks are computed as a batch. Almost no "
+              "gain on CPU and more memory needed — turn off when RAM is tight."),
         )
 
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 32)
         self.batch_spin.setValue(int(self.settings.batch_size or 8))
         self._hinted(
-            form, "Размер батча", self.batch_spin,
-            "Сколько кусков аудио уходит в батч за раз. Больше — быстрее на GPU, но растёт VRAM. "
-            "При ошибках «out of memory» уменьшай до 4/2.",
+            form, _("Batch size"), self.batch_spin,
+            _("How many audio chunks go into one batch. More — faster on GPU but more VRAM. "
+              "On \"out of memory\" errors reduce to 4/2."),
         )
 
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(0, 64)
-        self.threads_spin.setSpecialValueText(f"авто ({self.hardware.get('recommended_threads', '?')})")
+        self.threads_spin.setSpecialValueText(_("auto ({})").format(self.hardware.get("recommended_threads", "?")))
         self.threads_spin.setValue(int(self.settings.cpu_threads or 0))
         self._hinted(
-            form, "Потоки CPU", self.threads_spin,
-            "Сколько потоков CPU отдаём инференсу. 0 (авто) — обычно лучше всего; "
-            "ограничь, если параллельно работаешь за машиной и она «тормозит».",
+            form, _("CPU threads"), self.threads_spin,
+            _("How many CPU threads inference gets. 0 (auto) is usually best; limit it "
+              "if you keep working on the machine and it feels slow."),
         )
 
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 8)
         self.parallel_spin.setValue(int(self.settings.parallel_files or 1))
         self._hinted(
-            form, "Файлов одновременно", self.parallel_spin,
-            "1 — предсказуемо и экономно по памяти. 2–4 — быстрее на многоядерном CPU/GPU "
-            "с большим запасом RAM: каждая копия модели ест память целиком.",
+            form, _("Files at once"), self.parallel_spin,
+            _("1 — predictable and memory-friendly. 2–4 — faster on multi-core CPU/GPU "
+              "with plenty of RAM: each model copy consumes memory in full."),
         )
 
         note = make_label(
-            "Результат всегда сохраняется в .txt (имя файла = имени оригинала). "
-            "Узкое место должно быть железо, а не Python: декодирование звука идёт в отдельном потоке "
-            "заранее (prefetch), модель грузится один раз на всю очередь, а сам инференс работает в "
-            "C++/CTranslate2 без GIL.",
+            _("The result is always saved as .txt (file name = original name). "
+              "The bottleneck should be the hardware, not Python: audio decoding runs in a "
+              "separate thread ahead of time (prefetch), the model loads once per queue, and "
+              "inference itself runs in C++/CTranslate2 without the GIL."),
             "Muted",
             word_wrap=True,
         )
@@ -654,82 +671,83 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(
             make_label(
-                "Движок — это библиотека, которой программа распознаёт речь. "
-                "Ставить что-то заранее не нужно: отсутствующий движок установится "
-                "сам, когда ты запустишь подходящую модель (программа спросит "
-                "подтверждение и покажет объём скачивания).",
+                _("An engine is the library the app recognizes speech with. "
+                  "Nothing needs pre-installing: a missing engine installs itself when "
+                  "you start a suitable model (the app asks for confirmation and shows "
+                  "the download size)."),
                 "Muted",
                 word_wrap=True,
             )
         )
 
         for engine in ENGINES:
-            box = QGroupBox(ENGINE_LABELS[engine])
-            box.setToolTip("Статус движка в виртуальном окружении проекта (.venv)")
+            box = QGroupBox(_(ENGINE_LABELS[engine]))
+            box.setToolTip(_("Engine status in the project environment"))
             box_layout = QVBoxLayout(box)
             installed = engine_available(engine)
             status = make_label(
-                "✓ установлен" if installed else "○ не установлен — установится автоматически при необходимости",
+                _("✓ engine installed") if installed
+                else _("○ not installed — installs automatically when needed"),
                 "BadgeInstalled" if installed else "Muted",
             )
-            status.setToolTip(
-                "Проверяется по наличию pip-пакетов движка в .venv проекта.\n"
-                "Отсутствующий движок программа предложит скачать в момент запуска модели."
-            )
+            status.setToolTip(_(
+                "Checked by the presence of the engine's pip packages in the project env.\n"
+                "A missing engine is offered for download when a model is started."
+            ))
             status.setWordWrap(True)
             box_layout.addWidget(status)
-            note = engine_note(engine)
+            note = _(engine_note(engine)) if engine_note(engine) else ""
             if note:
                 box_layout.addWidget(make_label(note, "Muted", word_wrap=True))
-            size_text = engine_install_size(engine)
+            size_text = _(engine_install_size(engine)) if engine_install_size(engine) else ""
             if size_text and not installed:
                 box_layout.addWidget(
-                    make_label(f"Объём установки: {size_text}", "Dim", word_wrap=True)
+                    make_label(_("Install size: {size}").format(size=size_text), "Dim", word_wrap=True)
                 )
             layout.addWidget(box)
 
-        # CUDA для faster-whisper: кнопка установки появляется ТОЛЬКО когда
-        # она действительно нужна (карта NVIDIA есть, а библиотек нет).
-        cuda_box = QGroupBox("Ускорение NVIDIA CUDA (для faster-whisper)")
+        # CUDA for faster-whisper: the install button appears ONLY when it is
+        # actually needed (an NVIDIA card exists but the libraries do not).
+        cuda_box = QGroupBox(_("NVIDIA CUDA acceleration (for faster-whisper)"))
         cuda_layout = QVBoxLayout(cuda_box)
         cuda_ok = bool(self.hardware.get("cuda_ok"))
         has_nvidia = bool(self.hardware.get("has_nvidia"))
         if cuda_ok:
             cuda_layout.addWidget(
-                make_label("✓ CUDA доступна — Whisper-модели могут работать на GPU",
+                make_label(_("✓ CUDA is available — Whisper models can run on the GPU"),
                            "BadgeInstalled", word_wrap=True)
             )
         elif not has_nvidia:
             cuda_layout.addWidget(
-                make_label("○ Видеокарта NVIDIA не обнаружена — раздел не требуется",
+                make_label(_("○ No NVIDIA GPU detected — this section is not needed"),
                            "Muted", word_wrap=True)
             )
         else:
             cuda_layout.addWidget(
                 make_label(
-                    "○ Видеокарта NVIDIA есть, но библиотеки CUDA (cuBLAS/cuDNN 9) "
-                    "не установлены — распознавание идёт на процессоре",
+                    _("○ An NVIDIA GPU is present, but the CUDA libraries (cuBLAS/cuDNN 9) "
+                      "are not installed — recognition runs on the CPU"),
                     "BadgeWarn",
                     word_wrap=True,
                 )
             )
             cuda_layout.addWidget(
                 make_label(
-                    "Установка: ~1 ГБ (nvidia-cublas-cu12 + nvidia-cudnn-cu12, один раз).\n"
-                    "Windows: дополнительно нужны системные DLL cuBLAS/cuDNN 9 — скачать из "
-                    "github.com/Purfview/whisper-standalone-win (релиз libs) и положить в "
-                    ".venv\\Lib\\site-packages.",
+                    _("Install: ~1 GB (nvidia-cublas-cu12 + nvidia-cudnn-cu12, one time).\n"
+                      "Windows: the system cuBLAS/cuDNN 9 DLLs are additionally required — "
+                      "download them from github.com/Purfview/whisper-standalone-win (libs "
+                      "release) and put them into the environment's Lib\\site-packages."),
                     "Muted",
                     word_wrap=True,
                 )
             )
-            install_cuda = QPushButton("Установить CUDA-библиотеки (~1 ГБ)")
+            install_cuda = QPushButton(_("Install CUDA libraries (~1 GB)"))
             install_cuda.setObjectName("Primary")
             install_cuda.setCursor(compat.CURSOR_POINTING_HAND)
-            install_cuda.setToolTip(
-                "Скачает cuBLAS/cuDNN в .venv проекта (разово, ~1 ГБ).\n"
-                "После этого Whisper-модели смогут работать на видеокарте."
-            )
+            install_cuda.setToolTip(_(
+                "Downloads cuBLAS/cuDNN into the project environment (once, ~1 GB).\n"
+                "After that Whisper models can run on the GPU."
+            ))
             install_cuda.clicked.connect(
                 lambda: self._install_engine(
                     "cuda", ["-r", str(paths.ROOT_DIR / "requirements" / "gpu.txt")]
@@ -745,11 +763,11 @@ class SettingsDialog(QDialog):
         window = self.parent()
         if window is not None and hasattr(window, "install_packages_interactive"):
             self.accept()
-            window.install_packages_interactive(packages, f"Установка: {engine}")
+            window.install_packages_interactive(packages, _("Installing: {engine}").format(engine=engine))
         else:
-            QMessageBox.information(self, "Движки", "Установить пакеты можно из главного окна программы.")
+            QMessageBox.information(self, _("Engines"), _("Packages can be installed from the main window."))
 
-    # -- вкладка журнала (файловые логи) ---------------------------------- #
+    # -- logging tab (file logs) ------------------------------------------- #
     def _tab_logging(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -758,29 +776,28 @@ class SettingsDialog(QDialog):
 
         from .. import logutils
 
-        layout.addWidget(make_label("Подробный лог-файл", "H2"))
+        layout.addWidget(make_label(_("Verbose log file"), "H2"))
         layout.addWidget(
             make_label(
-                "По умолчанию программа НЕ пишет лог-файлы — папка logs/ остаётся пустой.\n"
-                "Когда логирование включено:\n"
-                "  • каждый запуск создаёт ОТДЕЛЬНЫЙ файл logs/localasr_ГГГГ-ММ-ДД_ЧЧ-ММ-СС.log;\n"
-                "  • в него попадает исчерпывающая информация обо всём, что происходит:\n"
-                "    параметры запуска, железо, сетевые запросы, стадии обработки файлов,\n"
-                "    тайминги, ошибки с полными стектрейсами — этого достаточно, чтобы\n"
-                "    воспроизвести и починить любой баг;\n"
-                "  • старые файлы подчищаются автоматически (хранится 30 последних).\n\n"
-                "Переключатель действует СРАЗУ — перезапускать программу не нужно.",
+                _("By default the app writes NO log files — logs/ stays empty.\n"
+                  "When logging is enabled:\n"
+                  "  • each launch creates a SEPARATE file logs/localasr_YYYY-MM-DD_HH-MM-SS.log;\n"
+                  "  • it contains everything that happens: startup options, hardware,\n"
+                  "    network requests, processing stages, timings, errors with full\n"
+                  "    tracebacks — enough to reproduce and fix any bug;\n"
+                  "  • old files are pruned automatically (the last 30 are kept).\n\n"
+                  "The switch applies IMMEDIATELY — no restart needed."),
                 "Dim",
                 word_wrap=True,
             )
         )
 
-        self.file_logging_check = QCheckBox("Вести подробный лог-файл (logs/)")
+        self.file_logging_check = QCheckBox(_("Keep a verbose log file (logs/)"))
         self.file_logging_check.setChecked(bool(logutils.file_logging_enabled() or self.settings.file_logging))
-        self.file_logging_check.setToolTip(
-            "Включить/выключить запись подробного лога. Применяется мгновенно:\n"
-            "при включении файл в logs/ появляется сразу, при выключении — запись прекращается."
-        )
+        self.file_logging_check.setToolTip(_(
+            "Enable/disable verbose logging. Applies instantly:\n"
+            "enabling creates the file in logs/ right away, disabling stops the writes."
+        ))
         self.file_logging_check.toggled.connect(self._on_file_logging_toggled)
         layout.addWidget(self.file_logging_check)
 
@@ -789,16 +806,16 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.log_path_label)
 
         buttons = QHBoxLayout()
-        open_logs = QPushButton("Открыть папку логов")
+        open_logs = QPushButton(_("Open the logs folder"))
         open_logs.setObjectName("Ghost")
         open_logs.setCursor(compat.CURSOR_POINTING_HAND)
-        open_logs.setToolTip("Показать папку logs/ в проводнике")
+        open_logs.setToolTip(_("Show logs/ in the file manager"))
         open_logs.clicked.connect(lambda: self._open_logs_folder())
         buttons.addWidget(open_logs)
-        copy_path = QPushButton("Скопировать путь к текущему логу")
+        copy_path = QPushButton(_("Copy the current log path"))
         copy_path.setObjectName("Ghost")
         copy_path.setCursor(compat.CURSOR_POINTING_HAND)
-        copy_path.setToolTip("Скопировать путь к активному лог-файлу в буфер обмена (удобно вставлять в issue)")
+        copy_path.setToolTip(_("Copy the active log file path to the clipboard (handy for issues)"))
         copy_path.clicked.connect(self._copy_log_path)
         buttons.addWidget(copy_path)
         buttons.addStretch(1)
@@ -806,9 +823,9 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(
             make_label(
-                "Совет: если что-то пошло не так — включи логирование, повтори проблему\n"
-                "и приложи свежий файл из logs/ к описанию (Справка → «Сообщить о проблеме»).\n"
-                "Журнал событий в главном окне показывается всегда, независимо от этой настройки.",
+                _("Tip: if something went wrong — enable logging, reproduce the problem\n"
+                  "and attach the fresh file from logs/ to the report (Help → \"Report an issue\").\n"
+                  "The event journal in the main window is always shown, regardless of this setting."),
                 "Muted",
                 word_wrap=True,
             )
@@ -818,7 +835,7 @@ class SettingsDialog(QDialog):
         return page
 
     def _on_file_logging_toggled(self, checked: bool) -> None:
-        """Применяет переключатель лога МГНОВЕННО (без «Сохранить»/перезапуска)."""
+        """Apply the log switch IMMEDIATELY (no Save/restart)."""
         from .. import logutils
 
         path = logutils.set_file_logging(bool(checked))
@@ -826,22 +843,20 @@ class SettingsDialog(QDialog):
         self.settings.save()
         self._refresh_log_path_label()
         if checked and path:
-            self.log_path_label.setText(f"Лог пишется: {path}")
+            self.log_path_label.setText(_("Writing the log: {path}").format(path=path))
 
     def _refresh_log_path_label(self) -> None:
         from .. import logutils
 
         current = logutils.current_log_file()
         if current:
-            self.log_path_label.setText(f"Текущий лог-файл: {current}")
+            self.log_path_label.setText(_("Current log file: {path}").format(path=current))
         else:
             files = logutils.list_log_files()
             if files:
-                self.log_path_label.setText(
-                    f"Логирование выключено. Последний лог: {files[0]}"
-                )
+                self.log_path_label.setText(_("Logging is off. Last log: {path}").format(path=files[0]))
             else:
-                self.log_path_label.setText("Логирование выключено — файлов в logs/ нет.")
+                self.log_path_label.setText(_("Logging is off — no files in logs/."))
 
     def _open_logs_folder(self) -> None:
         from .widgets import open_in_file_manager
@@ -855,11 +870,9 @@ class SettingsDialog(QDialog):
         files = logutils.list_log_files()
         target = current or (files[0] if files else None)
         if target is None:
-            QMessageBox.information(self, "Журнал", "Лог-файлов пока нет — включи логирование.")
+            QMessageBox.information(self, _("Log"), _("No log files yet — enable logging."))
             return
         try:
-            from PySide6.QtWidgets import QApplication
-
             QApplication.clipboard().setText(str(target))
         except Exception:  # noqa: BLE001
             pass
@@ -875,27 +888,27 @@ class SettingsDialog(QDialog):
         layout.addWidget(make_label(f"{APP_NAME} {APP_VERSION}", "H1"))
         layout.addWidget(
             make_label(
-                "Локальное распознавание речи: лекции, видео, подкасты — без облака и без "
-                "отправки данных куда-либо. Видео автоматически превращается в звук.\n\n"
-                "Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi),\n"
-                "Qwen3-ASR и GigaAM (torch), hf-transformers (любые ASR-модели HF).\n"
-                "Всё ставится строго в .venv внутри папки проекта.",
+                _("Local speech recognition: lectures, videos, podcasts — no cloud and no "
+                  "data ever leaves the machine. Video is converted to audio automatically.\n\n"
+                  "Engines: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi),\n"
+                  "Qwen3-ASR and GigaAM (torch), hf-transformers (any HF ASR model).\n"
+                  "Everything is installed strictly inside the project folder."),
                 "Dim",
                 word_wrap=True,
             )
         )
 
         for text, url in (
-            ("Репозиторий и документация", REPO_URL),
+            (_("Repository and documentation"), REPO_URL),
             ("faster-whisper", "https://github.com/SYSTRAN/faster-whisper"),
             ("whisper.cpp", "https://github.com/ggml-org/whisper.cpp"),
-            ("Vosk и модели", "https://alphacephei.com/vosk/models"),
-            ("Каталог моделей Hugging Face", "https://huggingface.co/models?pipeline_tag=automatic-speech-recognition"),
+            (_("Vosk and models"), "https://alphacephei.com/vosk/models"),
+            (_("Hugging Face model catalog"), "https://huggingface.co/models?pipeline_tag=automatic-speech-recognition"),
         ):
             button = QPushButton(f"{text} ↗")
             button.setObjectName("Link")
             button.setCursor(compat.CURSOR_POINTING_HAND)
-            button.clicked.connect(lambda _=False, link=url: open_url(link))
+            button.clicked.connect(lambda _checked=False, link=url: open_url(link))
             layout.addWidget(button, alignment=compat.ALIGN_LEFT)
 
         layout.addStretch(1)
@@ -903,6 +916,10 @@ class SettingsDialog(QDialog):
 
     # ------------------------------------------------------------------ #
     def _save_and_accept(self) -> None:
+        new_ui_language = self.ui_language_combo.currentData() or ""
+        language_changed = new_ui_language != (self.settings.ui_language or "")
+
+        self.settings.ui_language = new_ui_language
         self.settings.language = self.language_combo.currentData() or ""
         self.settings.translate_to_english = self.translate_check.isChecked()
         self.settings.use_vad = self.vad_check.isChecked()
@@ -918,21 +935,50 @@ class SettingsDialog(QDialog):
         self.settings.batch_size = self.batch_spin.value()
         self.settings.cpu_threads = self.threads_spin.value()
         self.settings.parallel_files = self.parallel_spin.value()
+
+        restart_now = False
+        if language_changed:
+            answer = QMessageBox.question(
+                self, _("Interface language"),
+                _("The new interface language takes effect after a restart.\n"
+                  "Restart the application now?"),
+                compat.message_box_yes() | compat.message_box_no(),
+                compat.message_box_yes(),
+            )
+            restart_now = answer == compat.message_box_yes()
+
         self.settings.save()
         self.accept()
 
+        if restart_now:
+            self._restart_requested = True
+            QTimer.singleShot(0, self._restart_application)
+
+    def _restart_application(self) -> None:
+        from ..core.relaunch import restart_app
+
+        if restart_app():
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        else:
+            QMessageBox.information(
+                self, _("Interface language"),
+                _("Automatic restart failed. Please close the application and start it again."),
+            )
+
 
 # --------------------------------------------------------------------------- #
-#  Информация о модели
+#  Model information
 # --------------------------------------------------------------------------- #
 
 
 class ModelInfoDialog(QDialog):
-    """Вся техническая информация о модели по кнопке «ℹ» в карточке."""
+    """Full technical model information (the "ℹ" button on a card)."""
 
     def __init__(self, entry: ModelEntry, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(entry.name)
+        self.setWindowTitle(entry.display_name)
         self.setModal(True)
         self.setMinimumSize(640, 520)
         self.resize(720, 620)
@@ -950,25 +996,25 @@ class ModelInfoDialog(QDialog):
         root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(10)
 
-        root.addWidget(make_label(entry.name, "H1"))
+        root.addWidget(make_label(entry.display_name, "H1"))
 
         rows = [
-            ("ID (папка в models/)", entry.id),
-            ("Движок", entry.engine_label),
-            ("Производитель", entry.vendor or "—"),
-            ("Источник", entry.source or "—"),
-            ("Подпапка", entry.subfolder or "—"),
-            ("Число параметров", entry.params_text),
-            ("Квантование (формат весов)", entry.quantization_text),
-            ("Год релиза", entry.released_year_text),
-            ("Размер скачивания", entry.size_text),
-            ("Занимает на диске", paths.human_size(entry.installed_size_bytes) if entry.installed else "—"),
-            ("Память в работе", entry.memory_text),
-            ("Языки", entry.languages_text),
-            ("Точность / скорость", f"{stars(entry.quality)} / {stars(entry.speed)}"),
-            ("Теги", ", ".join(entry.tags) if entry.tags else "—"),
-            ("Лицензия", entry.license or "—"),
-            ("Установлена", "да: " + str(entry.install_dir) if entry.installed else "нет"),
+            (_("ID (folder in models/)"), entry.id),
+            (_("Engine"), _(entry.engine_label)),
+            (_("Vendor"), _(entry.vendor) if entry.vendor else "—"),
+            (_("Source"), entry.source or "—"),
+            (_("Subfolder"), entry.subfolder or "—"),
+            (_("Parameter count"), entry.params_text),
+            (_("Quantization (weight format)"), entry.quantization_text),
+            (_("Release year"), entry.released_year_text),
+            (_("Download size"), entry.size_text),
+            (_("Disk usage"), paths.human_size(entry.installed_size_bytes) if entry.installed else "—"),
+            (_("Memory in use"), entry.memory_text),
+            (_("Languages"), entry.languages_text),
+            (_("Accuracy / speed"), f"{stars(entry.quality)} / {stars(entry.speed)}"),
+            (_("Tags"), ", ".join(_(tag) for tag in entry.tags) if entry.tags else "—"),
+            (_("License"), entry.license or "—"),
+            (_("Installed"), _("yes: {}").format(entry.install_dir) if entry.installed else _("no")),
         ]
         table = QFormLayout()
         table.setSpacing(6)
@@ -979,15 +1025,15 @@ class ModelInfoDialog(QDialog):
         root.addLayout(table)
 
         if entry.recommended_for:
-            hint = make_label("Кому подходит: " + entry.recommended_for, "Dim", word_wrap=True)
+            hint = make_label(_("Best for: ") + _(entry.recommended_for), "Dim", word_wrap=True)
             root.addWidget(hint)
 
-        description = make_label(entry.description or "", "Dim", word_wrap=True)
+        description = make_label(_(entry.description or ""), "Dim", word_wrap=True)
         description.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
         root.addWidget(description)
 
         if entry.defaults:
-            root.addWidget(make_label("Параметры по умолчанию: " + str(entry.defaults), "Muted", word_wrap=True))
+            root.addWidget(make_label(_("Default parameters: ") + str(entry.defaults), "Muted", word_wrap=True))
 
         root.addStretch(1)
         scroll.setWidget(page)
@@ -995,14 +1041,14 @@ class ModelInfoDialog(QDialog):
 
         buttons = QHBoxLayout()
         if entry.url:
-            link = QPushButton("Открыть страницу модели ↗")
+            link = QPushButton(_("Open the model page ↗"))
             link.setObjectName("Ghost")
             link.setCursor(compat.CURSOR_POINTING_HAND)
-            link.setToolTip("Откроется страница модели в браузере (Hugging Face / сайт автора)")
+            link.setToolTip(_("Opens the model page in the browser (Hugging Face / author site)"))
             link.clicked.connect(lambda: open_url(entry.url))
             buttons.addWidget(link)
         buttons.addStretch(1)
-        close = QPushButton("Закрыть")
+        close = QPushButton(_("Close"))
         close.setObjectName("Primary")
         close.setCursor(compat.CURSOR_POINTING_HAND)
         close.clicked.connect(self.accept)
@@ -1011,23 +1057,23 @@ class ModelInfoDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-#  Диагностика и восстановление (целостность программы)
+#  Diagnostics and recovery (program integrity)
 # --------------------------------------------------------------------------- #
 
 
 class DiagnosticsDialog(QDialog):
-    """Сервис → Диагностика и восстановление.
+    """Tools → Diagnostics & recovery.
 
-    Проверяет три уровня устойчивости программы:
-      1. файлы самого проекта (удалил случайно — восстановим с GitHub);
-      2. рабочие папки (models/, outputs/… — создаются автоматически);
-      3. окружение .venv (не хватает библиотек — починим; лишние пакеты —
-         предложим удалить, чтобы освободить место).
+    Checks three levels of program resilience:
+      1. project files (accidentally deleted — restored from GitHub);
+      2. working folders (models/, outputs/… — created automatically);
+      3. the environment (missing libraries — repaired; extra packages —
+         offered for deletion to free space).
     """
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Диагностика и восстановление")
+        self.setWindowTitle(_("Diagnostics & recovery"))
         self.setModal(True)
         self.setMinimumSize(700, 640)
         self.report: dict = {}
@@ -1044,12 +1090,12 @@ class DiagnosticsDialog(QDialog):
         outer.setContentsMargins(20, 18, 20, 16)
         outer.setSpacing(10)
 
-        outer.addWidget(make_label("Состояние программы", "H1"))
+        outer.addWidget(make_label(_("Program state"), "H1"))
         outer.addWidget(
             make_label(
-                "Проверка файлов проекта, рабочих папок и библиотек в .venv. "
-                "Здесь ничего не ломается само: программа только сообщает о проблемах "
-                "и предлагает исправить их одной кнопкой.",
+                _("Checks project files, working folders and environment libraries. "
+                  "Nothing breaks by itself here: the app only reports problems and "
+                  "offers one-click fixes."),
                 "Dim",
                 word_wrap=True,
             )
@@ -1064,55 +1110,55 @@ class DiagnosticsDialog(QDialog):
         root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(12)
 
-        # --- 1. файлы проекта
-        files_box = QGroupBox("Файлы программы")
+        # --- 1. project files
+        files_box = QGroupBox(_("Program files"))
         files_layout = QVBoxLayout(files_box)
-        self.files_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        self.files_status = make_label(_("Checking…"), "Muted", word_wrap=True)
         files_layout.addWidget(self.files_status)
         self.files_list = make_label("", "Dim", word_wrap=True)
         self.files_list.setTextInteractionFlags(compat.TEXT_SELECTABLE_BY_MOUSE)
         self.files_list.setVisible(False)
         files_layout.addWidget(self.files_list)
-        self.restore_button = QPushButton("Восстановить недостающие файлы с GitHub")
+        self.restore_button = QPushButton(_("Restore missing files from GitHub"))
         self.restore_button.setObjectName("Primary")
         self.restore_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.restore_button.setToolTip(
-            "Скачает удалённые файлы программы заново (несколько сотен килобайт).\n"
-            "Модели, результаты и настройки не затрагиваются."
-        )
+        self.restore_button.setToolTip(_(
+            "Re-downloads deleted program files (a few hundred kilobytes).\n"
+            "Models, results and settings are not affected."
+        ))
         self.restore_button.setVisible(False)
         self.restore_button.clicked.connect(self._restore_files)
         files_layout.addWidget(self.restore_button, alignment=compat.ALIGN_LEFT)
         root.addWidget(files_box)
 
-        # --- 2. папки
-        folders_box = QGroupBox("Рабочие папки")
+        # --- 2. folders
+        folders_box = QGroupBox(_("Working folders"))
         folders_layout = QVBoxLayout(folders_box)
-        self.folders_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        self.folders_status = make_label(_("Checking…"), "Muted", word_wrap=True)
         folders_layout.addWidget(self.folders_status)
         folders_layout.addWidget(
             make_label(
-                "Эти папки создаются автоматически, когда нужны. Их отсутствие "
-                "не ошибка: например, models/ появится при первом скачивании модели.",
+                _("These folders are created automatically when needed. Their absence "
+                  "is not an error: e.g. models/ appears on the first model download."),
                 "Dim",
                 word_wrap=True,
             )
         )
         root.addWidget(folders_box)
 
-        # --- 3. окружение
-        venv_box = QGroupBox("Окружение (.venv)")
+        # --- 3. environment
+        venv_box = QGroupBox(_("Environment"))
         venv_layout = QVBoxLayout(venv_box)
-        self.venv_status = make_label("Проверяю…", "Muted", word_wrap=True)
+        self.venv_status = make_label(_("Checking…"), "Muted", word_wrap=True)
         self.venv_status.setWordWrap(True)
         venv_layout.addWidget(self.venv_status)
-        self.repair_button = QPushButton("Починить окружение (доустановить недостающее)")
+        self.repair_button = QPushButton(_("Repair the environment (install what is missing)"))
         self.repair_button.setObjectName("Primary")
         self.repair_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.repair_button.setToolTip(
-            "Перепроверит базовые библиотеки в .venv и доустановит отсутствующие.\n"
-            "Системный Python не затрагивается."
-        )
+        self.repair_button.setToolTip(_(
+            "Re-checks the base libraries in the project environment and installs missing ones.\n"
+            "The system Python is not affected."
+        ))
         self.repair_button.setVisible(False)
         self.repair_button.clicked.connect(self._repair_env)
         venv_layout.addWidget(self.repair_button, alignment=compat.ALIGN_LEFT)
@@ -1123,14 +1169,14 @@ class DiagnosticsDialog(QDialog):
         self.extra_list = QListWidget()
         self.extra_list.setVisible(False)
         self.extra_list.setMaximumHeight(180)
-        self.extra_list.setToolTip(
-            "Пакеты, которые не требуются ни программе, ни другим установленным\n"
-            "пакетам. Отметь галочками то, что удалить. Если ставил их сам для\n"
-            "других задач — оставь."
-        )
+        self.extra_list.setToolTip(_(
+            "Packages required neither by the app nor by other installed packages.\n"
+            "Check the ones to delete. If you installed them yourself for other\n"
+            "tasks — leave them."
+        ))
         self.extra_list.itemChanged.connect(self._update_delete_button)
         venv_layout.addWidget(self.extra_list)
-        self.delete_button = QPushButton("Удалить выбранные пакеты")
+        self.delete_button = QPushButton(_("Delete selected packages"))
         self.delete_button.setObjectName("Danger")
         self.delete_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.delete_button.setVisible(False)
@@ -1143,14 +1189,14 @@ class DiagnosticsDialog(QDialog):
         outer.addWidget(scroll, stretch=1)
 
         buttons = QHBoxLayout()
-        self.refresh_button = QPushButton("⟳ Перепроверить")
+        self.refresh_button = QPushButton(_("⟳ Re-check"))
         self.refresh_button.setObjectName("Ghost")
         self.refresh_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.refresh_button.setToolTip("Запустить проверку заново")
+        self.refresh_button.setToolTip(_("Run the check again"))
         self.refresh_button.clicked.connect(self._start_audit)
         buttons.addWidget(self.refresh_button)
         buttons.addStretch(1)
-        close = QPushButton("Закрыть")
+        close = QPushButton(_("Close"))
         close.setObjectName("Primary")
         close.setCursor(compat.CURSOR_POINTING_HAND)
         close.clicked.connect(self.accept)
@@ -1159,7 +1205,7 @@ class DiagnosticsDialog(QDialog):
 
     # ------------------------------------------------------------------ #
     def done(self, result: int) -> None:
-        """Перед закрытием (крестик/Esc/«Закрыть») глушим все свои потоки."""
+        """Silence all own threads before closing (X/Esc/Close)."""
         from .workers import stop_worker
 
         stop_worker(self.audit_worker, 3000, "EnvAuditWorker")
@@ -1176,8 +1222,8 @@ class DiagnosticsDialog(QDialog):
         from .workers import EnvAuditWorker
 
         self.refresh_button.setEnabled(False)
-        self.files_status.setText("Проверяю файлы программы…")
-        self.venv_status.setText("Проверяю окружение .venv… (pip list занимает несколько секунд)")
+        self.files_status.setText(_("Checking program files…"))
+        self.venv_status.setText(_("Checking the environment… (pip list takes a few seconds)"))
         worker = EnvAuditWorker(self)
         worker.finishedWith.connect(self._on_audit)
         self.audit_worker = worker
@@ -1191,54 +1237,56 @@ class DiagnosticsDialog(QDialog):
         self.report = dict(report or {})
 
         if self.report.get("error"):
-            self.files_status.setText(f"Не удалось завершить проверку: {self.report['error']}")
+            self.files_status.setText(_("Check could not finish: {err}").format(err=self.report["error"]))
             return
 
-        # --- файлы
+        # --- files
         missing = list(self.report.get("missing_files") or [])
         if missing:
-            self.files_status.setText(
-                f"⚠ Отсутствует файлов: {len(missing)}. Программа может работать "
-                "неполноценно — восстанови их (нужен интернет, вес ~сотни КБ)."
-            )
+            self.files_status.setText(_(
+                "⚠ Missing files: {n}. The app may work incompletely — restore them "
+                "(internet required, ~hundreds of KB)."
+            ).format(n=len(missing)))
             self.files_list.setText("  • " + "\n  • ".join(missing[:30]))
             self.files_list.setVisible(True)
             self.restore_button.setVisible(True)
         else:
-            self.files_status.setText("✓ Все файлы программы на месте")
+            self.files_status.setText(_("✓ All program files are present"))
             self.files_list.setVisible(False)
             self.restore_button.setVisible(False)
 
-        # --- папки
+        # --- folders
         folders = list(self.report.get("folders") or [])
-        lines = [f"• {item['name']} — {item['status']} ({item['purpose']})" for item in folders]
+        lines = [
+            _("• {name} — {status} ({purpose})").format(
+                name=item["name"], status=_(item["status"]), purpose=_(item["purpose"]))
+            for item in folders
+        ]
         self.folders_status.setText("\n".join(lines) or "—")
 
-        # --- venv
+        # --- environment
         base_missing = list(self.report.get("base_missing") or [])
         python = str(self.report.get("python") or "")
         if base_missing:
-            self.venv_status.setText(
-                f"⚠ Не хватает базовых библиотек: {', '.join(base_missing)}\n"
-                f"Интерпретатор: {python}"
-            )
+            self.venv_status.setText(_(
+                "⚠ Missing base libraries: {list}\nInterpreter: {py}"
+            ).format(list=", ".join(base_missing), py=python))
             self.repair_button.setVisible(True)
         else:
-            self.venv_status.setText(f"✓ Все базовые библиотеки установлены\nИнтерпретатор: {python}")
+            self.venv_status.setText(_("✓ All base libraries are installed\nInterpreter: {py}").format(py=python))
             self.repair_button.setVisible(False)
 
-        # --- лишние пакеты
+        # --- extra packages
         extra = list(self.report.get("extra_packages") or [])
         self.extra_list.clear()
         if extra:
             from ..paths import human_size
 
             total = sum(int(item.get("size_bytes") or 0) for item in extra)
-            self.extra_hint.setText(
-                f"Пакеты, которые программе не нужны (не требуются ни ей, ни другим "
-                f"пакетам): {len(extra)} шт., всего {human_size(total)}. "
-                "Удалять не обязательно — это только экономия места."
-            )
+            self.extra_hint.setText(_(
+                "Packages the app does not need (required neither by it nor by other "
+                "packages): {n} item(s), {size} total. Deleting is optional — it only saves space."
+            ).format(n=len(extra), size=human_size(total)))
             self.extra_hint.setVisible(True)
             self.extra_list.setVisible(True)
             self.delete_button.setVisible(True)
@@ -1253,7 +1301,7 @@ class DiagnosticsDialog(QDialog):
                 self.extra_list.addItem(entry)
             self._update_delete_button()
         else:
-            self.extra_hint.setText("Лишних пакетов в .venv не найдено.")
+            self.extra_hint.setText(_("No extra packages found in the environment."))
             self.extra_hint.setVisible(True)
             self.extra_list.setVisible(False)
             self.delete_button.setVisible(False)
@@ -1277,10 +1325,11 @@ class DiagnosticsDialog(QDialog):
             if item.get("name") in names:
                 total += int(item.get("size_bytes") or 0)
         if names:
-            self.delete_button.setText(f"Удалить выбранные ({len(names)} шт., ~{human_size(total)})")
+            self.delete_button.setText(_("Delete selected ({n} item(s), ~{size})").format(
+                n=len(names), size=human_size(total)))
             self.delete_button.setEnabled(True)
         else:
-            self.delete_button.setText("Удалить выбранные пакеты")
+            self.delete_button.setText(_("Delete selected packages"))
             self.delete_button.setEnabled(False)
 
     # ------------------------------------------------------------------ #
@@ -1293,8 +1342,8 @@ class DiagnosticsDialog(QDialog):
         from .workers import FileRestoreWorker
 
         dialog = ProgressDialog(
-            "Восстановление файлов",
-            f"Скачиваем {len(missing)} файл(ов) из репозитория проекта…",
+            _("Restoring files"),
+            _("Downloading {n} file(s) from the project repository…").format(n=len(missing)),
             parent=self,
         )
         worker = FileRestoreWorker(missing, self)
@@ -1308,15 +1357,15 @@ class DiagnosticsDialog(QDialog):
         dialog.exec()
 
     def _on_restore_done(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
-        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.finish(_("Done") if ok else _("Stopped"))
         dialog.accept()
         worker, self.restore_worker = self.restore_worker, None
         if worker is not None:
             worker.deleteLater()
         if ok:
-            QMessageBox.information(self, "Восстановление", message)
+            QMessageBox.information(self, _("Recovery"), message)
         else:
-            QMessageBox.warning(self, "Восстановление", message)
+            QMessageBox.warning(self, _("Recovery"), message)
         self._start_audit()
 
     def _repair_env(self) -> None:
@@ -1324,26 +1373,26 @@ class DiagnosticsDialog(QDialog):
         requirements = paths.ROOT_DIR / "requirements" / "base.txt"
         if not requirements.is_file():
             QMessageBox.warning(
-                self, "Ремонт окружения",
-                f"Файл {requirements} отсутствует.\n"
-                "Сначала восстанови файлы программы (кнопка выше).",
+                self, _("Environment repair"),
+                _("The file {req} is missing.\nFirst restore the program files (button above).").format(req=requirements),
             )
             return
         if window is not None and hasattr(window, "install_packages_interactive"):
             self.accept()
-            window.install_packages_interactive(["-r", str(requirements)], "Ремонт окружения (.venv)")
+            window.install_packages_interactive(["-r", str(requirements)], _("Environment repair"))
         else:
-            QMessageBox.information(self, "Ремонт окружения", "Запусти ремонт из главного окна программы.")
+            QMessageBox.information(self, _("Environment repair"), _("Run the repair from the main window."))
 
     def _delete_extra(self) -> None:
         names = self._selected_extra()
         if not names:
             return
         answer = QMessageBox.question(
-            self, "Удаление пакетов",
-            "Удалить из .venv выбранные пакеты?\n\n  • " + "\n  • ".join(names[:20])
+            self, _("Deleting packages"),
+            _("Delete the selected packages from the environment?\n\n  • ")
+            + "\n  • ".join(names[:20])
             + ("\n  …" if len(names) > 20 else "")
-            + "\n\nПрограмме они не нужны; системный Python не затрагивается.",
+            + _("\n\nThe app does not need them; the system Python is not affected."),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_no(),
         )
@@ -1353,8 +1402,8 @@ class DiagnosticsDialog(QDialog):
             return
         from .workers import PackageInstaller
 
-        dialog = ProgressDialog("Удаление пакетов", ", ".join(names), parent=self)
-        worker = PackageInstaller(names, "Удаление пакетов", self, mode="uninstall")
+        dialog = ProgressDialog(_("Deleting packages"), ", ".join(names), parent=self)
+        worker = PackageInstaller(names, _("Deleting packages"), self, mode="uninstall")
         worker.outputLine.connect(dialog.append_log)
         worker.progress.connect(lambda fraction, status: dialog.set_fraction(fraction))
         worker.progress.connect(lambda fraction, status: dialog.set_status(status))
@@ -1366,12 +1415,12 @@ class DiagnosticsDialog(QDialog):
         dialog.exec()
 
     def _on_delete_done(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
-        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.finish(_("Done") if ok else _("Stopped"))
         dialog.accept()
         worker, self.package_worker = self.package_worker, None
         if worker is not None:
             worker.deleteLater()
         self.package_dialog = None
         if not ok:
-            QMessageBox.warning(self, "Удаление", message)
+            QMessageBox.warning(self, _("Deletion"), message)
         self._start_audit()

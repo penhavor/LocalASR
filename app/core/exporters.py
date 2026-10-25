@@ -1,4 +1,4 @@
-"""Экспорт результата: .txt, .txt с таймкодами, .srt, .vtt, .json, .md."""
+"""Result export: .txt, .txt with timecodes, .srt, .vtt, .json, .md."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from .. import paths
+from ..i18n import _
 from .postprocess import (
     Segment,
     format_timestamp,
@@ -26,7 +27,7 @@ def render(
     meta: Optional[Dict] = None,
     paragraphs: bool = True,
 ) -> str:
-    """Готовит содержимое файла нужного формата (строка)."""
+    """Render the file content for the requested format."""
     meta = meta or {}
     segments = list(segments)
 
@@ -53,7 +54,7 @@ def render(
     if fmt == "json":
         return render_json(segments, meta)
 
-    raise ValueError(f"Неизвестный формат экспорта: {fmt}")
+    raise ValueError(_("Unknown export format: {}").format(fmt))
 
 
 def render_srt(segments: Sequence[Segment], max_chars: int = 84, max_seconds: float = 6.0) -> str:
@@ -114,7 +115,7 @@ def export(
     meta: Optional[Dict] = None,
     paragraphs: bool = True,
 ) -> Path:
-    """Пишет результат в файл (атомарно, UTF-8). Возвращает путь."""
+    """Write the result to a file (atomic, UTF-8). Returns the path."""
     out_path = Path(out_path)
     text = render(segments, fmt, meta=meta, paragraphs=paragraphs)
     paths.atomic_write_text(out_path, text, encoding="utf-8")
@@ -131,19 +132,12 @@ def export_all_formats(
     overwrite: bool = False,
     labels: Optional[Dict[str, str]] = None,
 ) -> List[Path]:
-    """Экспорт сразу в несколько форматов.
+    """Export to several formats at once.
 
-    Именование (единое правило для всех результатов):
-      * ВСЕГДА «<имя оригинала> <ГГГГ-ММ-ДД ЧЧ-ММ-СС>.txt» — дата и время в
-        имени делают каждый запуск уникальным: файлы разных прогонов никогда
-        не перетираются и легко отличить, где чей результат;
-      * несколько форматов одного запуска делят ОДНУ метку времени:
-        «лекция 1 2026-10-24 15-30-05.txt», «лекция 1 2026-10-24 15-30-05.srt»;
-      * у двух форматов одно расширение (txt и txt-time) -> добавляется метка
-        из `labels`: «лекция 1 (таймкоды) 2026-10-24 15-30-05.txt»;
-      * редчайшая коллизия (два экспорта в одну секунду) -> счётчик «(2)»;
-      * overwrite=True (CLI --overwrite) -> чистое имя «<stem>.txt» и
-        перезапись: для тех, кому нужен детерминированный путь.
+    Naming rule: "<original name> <YYYY-MM-DD HH-MM-SS>.<ext>" — the stamp
+    makes every run unique; formats of one run share one stamp; formats that
+    collide by extension (txt/txt-time) get a `labels` tag; a rare same-second
+    collision gets a "(2)" counter; overwrite=True writes the plain name.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -151,7 +145,6 @@ def export_all_formats(
     unique_formats = list(dict.fromkeys(formats))
     written: List[Path] = []
     taken: set[str] = set()
-    # одна метка времени на весь вызов: файлы одного прогона группируются
     stamp = paths.datetime_stamp()
 
     for fmt in unique_formats:

@@ -1,7 +1,7 @@
-"""Фоновые потоки Qt: установка пакетов, скачивание моделей, распознавание.
+"""Qt background threads: package installs, model downloads, recognition.
 
-Всё тяжёлое выполняется ЗДЕСЬ, а не в GUI-потоке: интерфейс не подвисает,
-прогресс приходит сигналами, отмена — через флаг.
+All heavy work happens HERE, not in the GUI thread: the interface stays
+responsive, progress arrives via signals, cancellation via a flag.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from ..core.downloader import InstallError
 from ..core.ffmpeg import decode_audio, find_ffmpeg
 from ..core.models_catalog import ModelCatalog, ModelEntry
 from ..constants import MAX_PREFETCH, SAMPLE_RATE
+from ..i18n import _
 from ..logutils import get_logger
 from ..settings import Settings
 
@@ -35,16 +36,16 @@ log = get_logger("workers")
 
 
 def venv_python() -> str:
-    """Интерпретатор, в который ставим пакеты (мы сами внутри .venv)."""
+    """Interpreter packages are installed into (we are inside it ourselves)."""
     return sys.executable or str(paths.venv_dir() / "Scripts" / "python.exe")
 
 
 def stop_worker(worker: Optional[QThread], wait_ms: int = 4000, label: str = "") -> None:
-    """Гарантированно останавливает QThread (используется при закрытии окна).
+    """Reliably stop a QThread (used when the window closes).
 
-    Порядок: cancel() (если есть) → wait → terminate. Без terminate() поток,
-    застрявший в сетевом ретрае или subprocess, доживал до «QThread: Destroyed
-    while thread is still running» в момент удаления объектов Qt.
+    Order: cancel() (if any) -> wait -> terminate. Without terminate() a
+    thread stuck in a network retry or subprocess outlived Qt object
+    deletion ("QThread: Destroyed while thread is still running").
     """
     if worker is None:
         return
@@ -59,21 +60,21 @@ def stop_worker(worker: Optional[QThread], wait_ms: int = 4000, label: str = "")
                 pass
         if worker.wait(wait_ms):
             return
-        log.warning("Воркер %s не остановился за %d мс — завершаю принудительно",
+        log.warning(_("Worker %s did not stop in %d ms — terminating forcibly"),
                     label or type(worker).__name__, wait_ms)
         worker.terminate()
         worker.wait(2000)
     except RuntimeError:
-        pass    # C++-объект уже удалён
+        pass    # the C++ object is already deleted
 
 
 # --------------------------------------------------------------------------- #
-#  Установка пакетов в .venv
+#  Package installation into the project environment
 # --------------------------------------------------------------------------- #
 
 
 class PackageInstaller(QThread):
-    """Ставит (или удаляет — mode="uninstall") pip-пакеты строго в .venv проекта."""
+    """Install (or remove — mode="uninstall") pip packages strictly into the project env."""
 
     outputLine = Signal(str)
     progress = Signal(float, str)
@@ -89,18 +90,18 @@ class PackageInstaller(QThread):
     ) -> None:
         super().__init__(parent)
         self.packages = list(packages)
-        self.title = title or ("Удаление пакетов" if mode == "uninstall" else "Установка пакетов")
+        self.title = title or (_("Uninstalling packages") if mode == "uninstall" else _("Installing packages"))
         self.mode = mode
         self._cancel = False
         self._proc: Optional[subprocess.Popen] = None
-        # что удалить ПЕРЕД установкой (например, CPU-сборку torch перед
-        # CUDA-сборкой: иначе pip скажет «already satisfied» и ничего не поставит)
+        # what to remove BEFORE installing (e.g. the CPU torch build before
+        # the CUDA one: otherwise pip says "already satisfied" and installs nothing)
         self.pre_uninstall = list(pre_uninstall or [])
 
     def cancel(self) -> None:
         self._cancel = True
-        # убиваем дочерний pip/uv сразу: иначе поток висит на чтении stdout,
-        # пока пакетник молчит (резолвит зависимости), и окно не закрывается
+        # kill the child pip/uv immediately: otherwise the thread hangs
+        # reading stdout while the resolver is silent and the window stays
         proc = self._proc
         if proc is not None and proc.poll() is None:
             try:
@@ -112,11 +113,11 @@ class PackageInstaller(QThread):
     def run(self) -> None:  # noqa: D102
         started = time.time()
         python = venv_python()
-        self.progress.emit(0.02, f"Проверяю окружение: {python}")
+        self.progress.emit(0.02, _("Checking the environment: {py}").format(py=python))
         self.outputLine.emit(f"python: {python}")
 
         if not self.packages:
-            self.finishedWith.emit(True, "Нечего устанавливать")
+            self.finishedWith.emit(True, _("Nothing to install"))
             return
 
         env = os.environ.copy()
@@ -126,17 +127,17 @@ class PackageInstaller(QThread):
 
         if self.mode == "uninstall":
             cmd = [python, "-m", "pip", "uninstall", "-y", *self.packages]
-            self.progress.emit(0.05, "Удаляю пакеты…")
+            self.progress.emit(0.05, _("Uninstalling packages…"))
             self.outputLine.emit("$ " + " ".join(cmd))
             code = self._stream(cmd, env)
             if self._cancel:
-                self.finishedWith.emit(False, "Удаление отменено")
+                self.finishedWith.emit(False, _("Uninstall cancelled"))
                 return
             if code != 0:
-                self.finishedWith.emit(False, f"pip uninstall завершился с ошибкой (код {code})")
+                self.finishedWith.emit(False, _("pip uninstall failed (code {code})").format(code=code))
                 return
-            self.progress.emit(1.0, "Готово")
-            self.finishedWith.emit(True, f"Удалено за {time.time() - started:.0f} с")
+            self.progress.emit(1.0, _("Done"))
+            self.finishedWith.emit(True, _("Uninstalled in {:.0f} s").format(time.time() - started))
             return
 
         requirements_file = next((p for p in self.packages if p.startswith("-r ")), "")
@@ -146,11 +147,11 @@ class PackageInstaller(QThread):
             uv = self._find_uv(python)
             if uv and not requirements_file:
                 cmd = [uv, "pip", "install", "--python", python, *self.packages]
-                # uv по умолчанию берёт пакет из ПЕРВОГО индекса, где тот есть
-                # (first-index): с дополнительным CUDA-индексом PyTorch он взял
-                # бы CPU-сборку torch с PyPI. unsafe-best-match заставляет
-                # сравнить версии во всех индексах — и выбрать +cu126, которая
-                # по PEP 440 старше чистой версии. pip в этом не нуждается.
+                # uv takes a package from the FIRST index that has it: with an
+                # extra PyTorch CUDA index it would take the CPU torch from
+                # PyPI. unsafe-best-match compares versions across indexes and
+                # picks +cu126 (newer than the plain version per PEP 440).
+                # pip does not need this.
                 if "--extra-index-url" in self.packages:
                     cmd += ["--index-strategy", "unsafe-best-match"]
             else:
@@ -161,22 +162,22 @@ class PackageInstaller(QThread):
                 ]
 
         if self.pre_uninstall:
-            self.progress.emit(0.03, "Удаляю старую версию: " + ", ".join(self.pre_uninstall))
+            self.progress.emit(0.03, _("Removing the old version: ") + ", ".join(self.pre_uninstall))
             uninstall_cmd = [python, "-m", "pip", "uninstall", "-y", *self.pre_uninstall]
             self.outputLine.emit("$ " + " ".join(uninstall_cmd))
-            self._stream(uninstall_cmd, env)   # код возврата не важен: пакета могло и не быть
+            self._stream(uninstall_cmd, env)   # return code does not matter: it may be absent
 
-        self.progress.emit(0.05, "Запускаю установку…")
+        self.progress.emit(0.05, _("Starting the installation…"))
         self.outputLine.emit("$ " + " ".join(cmd))
 
         code = self._stream(cmd, env)
         if self._cancel:
-            self.finishedWith.emit(False, "Установка отменена")
+            self.finishedWith.emit(False, _("Install cancelled"))
             return
         if code != 0:
-            # uv иногда не может разрешить окружение — пробуем обычный pip
+            # uv sometimes cannot resolve the environment — try plain pip
             if cmd[0] != python:
-                self.outputLine.emit("Первый способ не сработал, пробую pip…")
+                self.outputLine.emit(_("First method failed, trying pip…"))
                 code = self._stream(
                     [python, "-m", "pip", "install", "--disable-pip-version-check",
                      "--no-input", "--prefer-binary", *self.packages],
@@ -189,26 +190,26 @@ class PackageInstaller(QThread):
                 log_hint = str(current) if current else str(paths.logs_dir())
                 self.finishedWith.emit(
                     False,
-                    f"Установка завершилась с ошибкой (код {code}).\n"
-                    f"Подробности: {log_hint}\n"
-                    "(подробный лог включается в Сервис → Настройки → «Журнал и диагностика»)",
+                    _("Installation failed (code {code}).\nDetails: {log}\n"
+                      "(the verbose log is enabled in Tools → Settings → 'Logging & diagnostics')"
+                      ).format(code=code, log=log_hint),
                 )
                 return
 
-        self.progress.emit(1.0, "Готово")
-        # если transformers уже импортирован в этом процессе (например, до этого
-        # грузили GigaAM), его lru-кеши доступности устарели: только что
-        # установленные пакеты (accelerate и т.п.) ими «не видны». Сбрасываем —
-        # следующий запуск модели подхватит свежие пакеты БЕЗ перезапуска.
+        self.progress.emit(1.0, _("Done"))
+        # if transformers was already imported in this process (e.g. GigaAM
+        # was loaded before), its availability lru caches are stale: freshly
+        # installed packages (accelerate etc.) are "invisible" to them. Reset —
+        # the next model run picks up the new packages WITHOUT a restart.
         try:
             if "transformers" in sys.modules:
                 from ..asr.torch_engines import reset_transformers_caches
 
                 cleared = reset_transformers_caches()
-                log.debug("После установки пакетов сброшено lru-кэшей transformers: %d", cleared)
+                log.debug("transformers lru caches cleared after install: %d", cleared)
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось сбросить кэши transformers после установки: %s", exc)
-        self.finishedWith.emit(True, f"Установлено за {time.time() - started:.0f} с")
+            log.debug("Failed to clear transformers caches after install: %s", exc)
+        self.finishedWith.emit(True, _("Installed in {:.0f} s").format(time.time() - started))
 
     # ------------------------------------------------------------------ #
     def _stream(self, cmd: List[str], env: Dict[str, str]) -> int:
@@ -227,7 +228,7 @@ class PackageInstaller(QThread):
                 creationflags=creationflags,
             )
         except OSError as exc:
-            self.outputLine.emit(f"!! не удалось запустить: {exc}")
+            self.outputLine.emit(_("!! failed to start: {exc}").format(exc=exc))
             return 127
 
         self._proc = proc
@@ -261,7 +262,7 @@ class PackageInstaller(QThread):
 
 
 # --------------------------------------------------------------------------- #
-#  Скачивание модели
+#  Model download
 # --------------------------------------------------------------------------- #
 
 
@@ -280,12 +281,12 @@ class ModelDownloadWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:  # noqa: D102
-        name = self.entry.name
-        log.debug("ModelDownloadWorker запущен: %s (source=%s, root=%s)",
+        name = self.entry.display_name
+        log.debug("ModelDownloadWorker started: %s (source=%s, root=%s)",
                   self.entry.id, self.entry.source, self.root)
-        self.progress.emit(0.0, f"Подготовка к скачиванию: {name}")
-        self.outputLine.emit(f"Модель: {name} ({self.entry.id})")
-        self.outputLine.emit(f"Источник: {self.entry.source}")
+        self.progress.emit(0.0, _("Preparing the download: {name}").format(name=name))
+        self.outputLine.emit(_("Model: {name} ({id})").format(name=name, id=self.entry.id))
+        self.outputLine.emit(_("Source: {source}").format(source=self.entry.source))
 
         try:
             result = downloader.install_model(
@@ -298,34 +299,34 @@ class ModelDownloadWorker(QThread):
                 cancel=lambda: self._cancel,
             )
         except downloader.net.DownloadCancelled:  # type: ignore[attr-defined]
-            self.finishedWith.emit(False, "Скачивание отменено. Недокачанные файлы можно продолжить позже.", None)
+            self.finishedWith.emit(False, _("Download cancelled. Incomplete files can be resumed later."), None)
             return
         except InstallError as exc:
             self.finishedWith.emit(False, str(exc), None)
             return
         except Exception as exc:  # noqa: BLE001
-            log.error("Сбой установки модели: %s\n%s", exc, traceback.format_exc())
+            log.error("Model install failed: %s\n%s", exc, traceback.format_exc())
             self.finishedWith.emit(False, f"{type(exc).__name__}: {exc}", None)
             return
 
         if self._cancel:
-            self.finishedWith.emit(False, "Скачивание отменено", None)
+            self.finishedWith.emit(False, _("Download cancelled"), None)
             return
 
         size_text = paths.human_size(result.downloaded_bytes)
-        self.progress.emit(1.0, "Готово")
-        self.outputLine.emit(
-            f"Установлено в {result.directory} ({size_text} за {result.duration_seconds:.0f} с)"
-        )
+        self.progress.emit(1.0, _("Done"))
+        self.outputLine.emit(_("Installed into {dir} ({size} in {t:.0f} s)").format(
+            dir=result.directory, size=size_text, t=result.duration_seconds))
         self.finishedWith.emit(
             True,
-            f"«{name}» установлена в {result.directory.name}/ ({size_text})",
+            _("{name} installed into {dir}/ ({size})").format(
+                name=name, dir=result.directory.name, size=size_text),
             result.entry,
         )
 
 
 # --------------------------------------------------------------------------- #
-#  Обновление каталога из сети
+#  Remote catalog refresh
 # --------------------------------------------------------------------------- #
 
 
@@ -338,22 +339,22 @@ class CatalogRefreshWorker(QThread):
             updated = catalog.refresh_remote(force=True)
             count = len(catalog.entries)
             if updated:
-                self.finishedWith.emit(True, f"Каталог обновлён: {count} моделей")
+                self.finishedWith.emit(True, _("Catalog updated: {n} models").format(n=count))
             else:
-                self.finishedWith.emit(False, f"Обновлений нет (использую локальный каталог, {count} моделей)")
+                self.finishedWith.emit(False, _("No updates (using the local catalog, {n} models)").format(n=count))
         except Exception as exc:  # noqa: BLE001
-            self.finishedWith.emit(False, f"Не удалось обновить каталог: {exc}")
+            self.finishedWith.emit(False, _("Failed to update the catalog: {exc}").format(exc=exc))
 
 
 # --------------------------------------------------------------------------- #
-#  Диагностика целостности (файлы проекта + аудит .venv)
+#  Integrity diagnostics (project files + environment audit)
 # --------------------------------------------------------------------------- #
 
 
 class EnvAuditWorker(QThread):
-    """Проверяет файлы проекта, папки и пакеты .venv (см. core/integrity.py)."""
+    """Check project files, folders and env packages (see core/integrity.py)."""
 
-    finishedWith = Signal(object)   # dict-отчёт
+    finishedWith = Signal(object)   # dict report
 
     def run(self) -> None:  # noqa: D102
         from ..core import integrity
@@ -361,7 +362,7 @@ class EnvAuditWorker(QThread):
         try:
             report = integrity.full_audit()
         except Exception as exc:  # noqa: BLE001
-            log.error("Сбой диагностики: %s\n%s", exc, traceback.format_exc())
+            log.error("Diagnostics failed: %s\n%s", exc, traceback.format_exc())
             report = {
                 "python": "",
                 "missing_files": [],
@@ -374,7 +375,7 @@ class EnvAuditWorker(QThread):
 
 
 class FileRestoreWorker(QThread):
-    """Скачивает отсутствующие файлы программы с GitHub."""
+    """Download missing program files from GitHub."""
 
     outputLine = Signal(str)
     progress = Signal(float, str)
@@ -392,9 +393,9 @@ class FileRestoreWorker(QThread):
         from ..core import integrity
 
         if not self.files:
-            self.finishedWith.emit(True, "Восстанавливать нечего — все файлы на месте")
+            self.finishedWith.emit(True, _("Nothing to restore — all files are present"))
             return
-        self.progress.emit(0.0, f"Восстановление {len(self.files)} файл(ов) с GitHub…")
+        self.progress.emit(0.0, _("Restoring {n} file(s) from GitHub…").format(n=len(self.files)))
         restored, failed = integrity.restore_files(
             self.files,
             progress=lambda fraction, status: (
@@ -406,25 +407,26 @@ class FileRestoreWorker(QThread):
         if failed:
             self.finishedWith.emit(
                 False,
-                f"Восстановлено: {len(restored)}, с ошибкой: {len(failed)}\n" + "\n".join(failed[:8]),
+                _("Restored: {ok}, failed: {fail}\n").format(ok=len(restored), fail=len(failed))
+                + "\n".join(failed[:8]),
             )
         else:
-            self.progress.emit(1.0, "Готово")
-            self.finishedWith.emit(True, f"Восстановлено файлов: {len(restored)}")
+            self.progress.emit(1.0, _("Done"))
+            self.finishedWith.emit(True, _("Files restored: {n}").format(n=len(restored)))
 
 
 # --------------------------------------------------------------------------- #
-#  Зонд: видит ли torch из .venv CUDA (в отдельном процессе!)
+#  Probe: does the env's torch see CUDA (in a separate process!)
 # --------------------------------------------------------------------------- #
 
 
 class TorchCudaProbeWorker(QThread):
-    """Проверяет subprocess'ом, стоит ли в .venv torch и видит ли он CUDA.
+    """Check via subprocess whether torch is installed and sees CUDA.
 
-    Почему не в процессе GUI:
-      * import torch блокирует на секунды — нельзя в GUI-потоке;
-      * импортированный torch «фиксирует» сборку (CPU/CUDA) на всю сессию,
-        а нам нужно знать состояние диска, не трогая текущий процесс.
+    Why not in the GUI process:
+      * import torch blocks for seconds — not allowed in the GUI thread;
+      * an imported torch "pins" the build (CPU/CUDA) for the whole session,
+        and we need the on-disk state without touching this process.
     """
 
     probed = Signal(bool, bool, str)   # torch_installed, cuda_available, detail
@@ -463,7 +465,7 @@ class TorchCudaProbeWorker(QThread):
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            # ждём кусочками по 0.5 с: закрытие окна не должно ждать весь таймаут
+            # wait in 0.5 s slices: closing the window must not wait the full timeout
             deadline = time.time() + 180
             out_text, err_text = "", ""
             while time.time() < deadline:
@@ -485,10 +487,10 @@ class TorchCudaProbeWorker(QThread):
                         bool(data.get("installed")), bool(data.get("cuda")), detail
                     )
                     return
-            log.debug("Зонд torch не дал результата: rc=%s stderr=%s",
+            log.debug("torch probe produced no result: rc=%s stderr=%s",
                       proc.returncode if proc else "?", (err_text or "")[-300:])
         except Exception as exc:  # noqa: BLE001
-            log.debug("Зонд torch не запустился: %s", exc)
+            log.debug("torch probe did not start: %s", exc)
             if proc is not None and proc.poll() is None:
                 try:
                     proc.kill()
@@ -499,20 +501,20 @@ class TorchCudaProbeWorker(QThread):
 
 
 # --------------------------------------------------------------------------- #
-#  Распознавание очереди файлов
+#  File queue recognition
 # --------------------------------------------------------------------------- #
 
 
 class TranscribeWorker(QThread):
-    """Обрабатывает очередь файлов.
+    """Process the file queue.
 
-    Сигналы:
-      overallProgress(done, total)      — общий прогресс по файлам
-      fileProgress(index, fraction, text) — прогресс текущего файла
-      segmentReady(index, text, start, end) — «живая» лента текста
+    Signals:
+      overallProgress(done, total)        — overall file progress
+      fileProgress(index, fraction, text) — current file progress
+      segmentReady(index, text, start, end) — live text feed
       fileFinished(index, FileResult)
       finishedWith(ok_count, fail_count, seconds)
-      engineMissing(engine, packages)   — движок не установлен
+      engineMissing(engine, packages)     — engine not installed
     """
 
     overallProgress = Signal(int, int)
@@ -536,7 +538,7 @@ class TranscribeWorker(QThread):
         self.options = options
         self.settings = settings
         self._cancel = threading.Event()
-        #: движку не хватило библиотек — GUI покажет диалог установки и повторит
+        #: the engine lacked libraries — the GUI shows an install dialog and retries
         self.engine_missing = False
 
     # ------------------------------------------------------------------ #
@@ -551,7 +553,7 @@ class TranscribeWorker(QThread):
     def run(self) -> None:  # noqa: D102
         started = time.time()
         log.debug(
-            "TranscribeWorker запущен: файлов=%d, модель=%s, движок=%s, parallel=%s",
+            "TranscribeWorker started: files=%d, model=%s, engine=%s, parallel=%s",
             len(self.files), self.options.model.name, self.options.model.engine,
             self.settings.parallel_files,
         )
@@ -562,7 +564,7 @@ class TranscribeWorker(QThread):
 
             entry = self.options.model
             if not entry.installed or not entry.install_dir:
-                self.failed.emit(f"Модель «{entry.name}» не установлена")
+                self.failed.emit(_("Model {name} is not installed").format(name=entry.display_name))
                 return
 
             try:
@@ -571,26 +573,27 @@ class TranscribeWorker(QThread):
                 self.engineMissing.emit(exc.engine, list(exc.packages))
                 return
 
-            # Пакеты движка могли установить ПРЯМО ВО ВРЕМЯ работы программы
-            # (штатный сценарий «установка по требованию»). transformers кэширует
-            # проверки доступности (lru_cache): без сброса он продолжит считать
-            # свежеустановленный accelerate отсутствующим, и загрузка модели
-            # упадёт с «requires accelerate». Сброс безопасен и дёшев.
+            # Engine packages may have been installed WHILE the app was
+            # running (install-on-demand). transformers caches availability
+            # checks (lru_cache): without a reset it keeps treating a freshly
+            # installed accelerate as missing and model loading dies with
+            # "requires accelerate". Resetting is safe and cheap.
             try:
                 if "transformers" in sys.modules:
                     from ..asr.torch_engines import reset_transformers_caches
 
                     cleared = reset_transformers_caches()
                     if cleared:
-                        log.debug("Перед загрузкой движка сброшено lru-кэшей transformers: %d", cleared)
+                        log.debug("transformers lru caches cleared before engine load: %d", cleared)
             except Exception as exc:  # noqa: BLE001
-                log.debug("Сброс кэшей transformers не выполнен: %s", exc)
+                log.debug("transformers cache reset failed: %s", exc)
 
             hardware = registry.hardware()
-            log.debug("Железо для задачи: %s", hardware.get("summary", "").replace("\n", " | "))
+            log.debug("Hardware for the job: %s", hardware.get("summary", "").replace("\n", " | "))
             self.logLine.emit(hardware.get("summary", "").replace("\n", " | "))
             ffmpeg = find_ffmpeg()
-            self.logLine.emit(f"ffmpeg: {ffmpeg or 'НЕ НАЙДЕН (будет использован PyAV)'}")
+            self.logLine.emit(_("ffmpeg: {path}").format(path=ffmpeg) if ffmpeg
+                              else _("ffmpeg: NOT FOUND (PyAV will be used)"))
 
             parallel = max(1, min(4, int(self.settings.parallel_files or 1)))
             if parallel == 1:
@@ -599,13 +602,13 @@ class TranscribeWorker(QThread):
                 ok, fail = self._run_parallel(parallel)
 
             log.debug(
-                "TranscribeWorker завершён за %.1f с: ok=%d fail=%d cancel=%s",
+                "TranscribeWorker finished in %.1f s: ok=%d fail=%d cancel=%s",
                 time.time() - started, ok, fail, self.cancelled,
             )
             self.finishedWith.emit(ok, fail, time.time() - started)
         except Exception as exc:  # noqa: BLE001
-            # полный стектрейс — в лог; пользователю показываем только суть
-            log.error("Сбой воркера: %s\n%s", exc, traceback.format_exc())
+            # full traceback goes to the log; the user sees only the gist
+            log.error("Worker crashed: %s\n%s", exc, traceback.format_exc())
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             try:
@@ -618,13 +621,13 @@ class TranscribeWorker(QThread):
         ok = fail = 0
         total = len(self.files)
 
-        # Префетч декодирования: пока модель считает файл N, соседний поток уже
-        # вытаскивает звук из файла N+1. Включаем только если RAM хватает —
-        # декодированная 3-часовая лекция сама по себе весит ~700 МБ.
+        # Decode prefetch: while the model computes file N, a side thread
+        # already extracts audio from file N+1. Enabled only when RAM allows —
+        # a decoded 3-hour lecture weighs ~700 MB by itself.
         prefetch_depth = self._prefetch_depth()
         self.logLine.emit(
-            f"Префетч декодирования: {prefetch_depth} файл(ов) вперёд"
-            if prefetch_depth else "Префетч декодирования выключен (мало свободной памяти)"
+            _("Decode prefetch: {n} file(s) ahead").format(n=prefetch_depth)
+            if prefetch_depth else _("Decode prefetch disabled (low free memory)")
         )
 
         executor: Optional[ThreadPoolExecutor] = None
@@ -637,7 +640,7 @@ class TranscribeWorker(QThread):
 
         for index, source in enumerate(self.files):
             if self.cancelled:
-                self.logLine.emit("Отменено пользователем")
+                self.logLine.emit(_("Cancelled by user"))
                 break
             self.overallProgress.emit(index, total)
 
@@ -654,7 +657,7 @@ class TranscribeWorker(QThread):
                 result = FileResult(source=source, error=decode_error)
                 fail += 1
                 self.fileFinished.emit(index, result)
-                self.logLine.emit(f"✗ {source.name}: {decode_error}")
+                self.logLine.emit(_("✗ {name}: {error}").format(name=source.name, error=decode_error))
                 continue
 
             try:
@@ -668,8 +671,8 @@ class TranscribeWorker(QThread):
                     },
                 )
             except EngineNotInstalled as exc:
-                # Коду модели не хватило библиотеки: не стектрейс, а диалог
-                # установки с автопродолжением задачи после установки.
+                # Model code lacked a library: show an install dialog with
+                # auto-continuation of the job after the install, not a traceback.
                 self.engine_missing = True
                 self.engineMissing.emit(exc.engine, list(exc.packages))
                 break
@@ -684,7 +687,7 @@ class TranscribeWorker(QThread):
         return ok, fail
 
     def _prefetch_depth(self) -> int:
-        """Сколько файлов декодировать заранее (0 = выключить)."""
+        """How many files to decode ahead of time (0 = disable)."""
         if self.cancelled:
             return 0
         try:
@@ -695,7 +698,7 @@ class TranscribeWorker(QThread):
             return MAX_PREFETCH
         if not available:
             return MAX_PREFETCH
-        # нужен запас: модель + один декодируемый файл (~800 МБ на час аудио)
+        # need headroom: model + one file being decoded (~800 MB per audio hour)
         if available - model_ram < 2400:
             return 0
         if available - model_ram < 4800:
@@ -710,7 +713,7 @@ class TranscribeWorker(QThread):
 
         def handle(index: int, source: Path) -> FileResult:
             if self.cancelled:
-                return FileResult(source=source, error="отменено")
+                return FileResult(source=source, error=_("cancelled"))
             try:
                 engine = thread_engine(
                     self.options.model,
@@ -724,7 +727,7 @@ class TranscribeWorker(QThread):
             except EngineNotInstalled as exc:
                 self.engine_missing = True
                 self.engineMissing.emit(exc.engine, list(exc.packages))
-                return FileResult(source=source, error="не хватает компонентов движка")
+                return FileResult(source=source, error=_("missing engine components"))
             return self._process_one(index, source, None, 0.0, engine)
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="asr") as pool:
@@ -740,10 +743,10 @@ class TranscribeWorker(QThread):
                     fail += int(not result.ok)
                     self.fileFinished.emit(index, result)
                     self.overallProgress.emit(ok + fail, total)
-            # выгружаем модели ВНУТРИ рабочих потоков: кэш движков лежит в их
-            # thread-local, и вызов release из нашего потока не доставал его —
-            # память (в т.ч. VRAM) висела до смерти потоков
-            for _ in range(workers):
+            # unload models INSIDE the worker threads: the engine cache lives
+            # in their thread-local storage and a release call from our thread
+            # could not reach it — memory (incl. VRAM) hung until thread death
+            for _i in range(workers):
                 pool.submit(release_thread_engines)
 
         self.overallProgress.emit(total, total)
@@ -780,23 +783,24 @@ class TranscribeWorker(QThread):
             self.engineMissing.emit(exc.engine, list(exc.packages))
             result = FileResult(source=source, error=str(exc))
         except Exception as exc:  # noqa: BLE001
-            log.error("Ошибка обработки %s: %s\n%s", source.name, exc, traceback.format_exc())
+            log.error("Processing error for %s: %s\n%s", source.name, exc, traceback.format_exc())
             result = FileResult(source=source, error=f"{type(exc).__name__}: {exc}")
 
         if result.ok:
             outputs = ", ".join(p.name for p in result.outputs)
             self.logLine.emit(
-                f"✓ {source.name} → {outputs} · {result.words} слов · {result.speed_x:.1f}× · "
-                f"{result.elapsed_seconds:.0f} с"
-                + (f" · отброшено сегментов: {result.dropped}" if result.dropped else "")
+                _("✓ {name} → {outputs} · {words} words · {speed:.1f}× · {t:.0f} s").format(
+                    name=source.name, outputs=outputs, words=result.words,
+                    speed=result.speed_x, t=result.elapsed_seconds)
+                + (_(" · dropped segments: {n}").format(n=result.dropped) if result.dropped else "")
             )
         else:
-            self.logLine.emit(f"✗ {source.name}: {result.error}")
+            self.logLine.emit(_("✗ {name}: {error}").format(name=source.name, error=result.error))
         self.fileFinished.emit(index, result)
         return result
 
     def _decode_one(self, source: Path) -> tuple[Any, float, str]:
-        """Префетч: декодируем звук, пока модель занята предыдущим файлом."""
+        """Prefetch: decode audio while the model is busy with the previous file."""
         try:
             audio = decode_audio(source, SAMPLE_RATE, cancel=lambda: self.cancelled)
             duration = len(audio) / SAMPLE_RATE

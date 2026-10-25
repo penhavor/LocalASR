@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Тест УНИВЕРСАЛЬНОСТИ движков LocalASR.
+"""LocalASR engine UNIVERSALITY test.
 
-Программа обязана корректно работать не с одной моделью, а с любыми:
-  * матрица detect_engine: CT2 / GGML / Vosk / HF-config / Qwen / GigaAM;
-  * Vosk и whisper.cpp прогоняются на фейковых биндингах (контракт библиотек);
-  * GigaAM НЕИЗВЕСТНОЙ структуры (без decoding/head) падает в stock-путь
-    model.transcribe() вместо быстрого — универсальность для новых поколений;
-  * универсальный HF-движок на РЕАЛЬНОЙ модели (openai/whisper-tiny):
-    длинное аудио режется на куски, сегменты тайлятся, текст — строки.
-    (Без сети/transformers этот шаг пропускается: остальные шаги самодостаточны.)
+The program must work with any models, not just one:
+  * detect_engine matrix: CT2 / GGML / Vosk / HF-config / Qwen / GigaAM;
+  * Vosk and whisper.cpp run on fake bindings (library contracts);
+  * a GigaAM of UNKNOWN structure (no decoding/head) falls back to the stock
+    model.transcribe() path instead of the fast one — future generations safe;
+  * the universal HF engine on a REAL model (openai/whisper-tiny): long audio
+    is chunked, segments tile, texts are strings. (Skipped without
+    network/transformers: the other steps are self-contained.)
 
-Запуск:  cd <корень проекта> && python tests/test_engines_universal.py
+Run:  cd <project root> && python tests/test_engines_universal.py
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _audio(seconds: float = 10.0, seed: int = 0) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-#  1) Матрица определения движка по содержимому папки
+#  1) Engine detection matrix by folder content
 # --------------------------------------------------------------------------- #
 
 
@@ -103,11 +103,11 @@ def test_detect_engine_matrix() -> None:
         junk.mkdir()
         (junk / "readme.txt").write_text("hi", encoding="utf-8")
         assert detect_engine(junk) == ""
-    print("  ✓ detect_engine: CT2/GGML/Vosk/HF/Qwen/GigaAM/мусор")
+    print("  ✓ detect_engine: CT2/GGML/Vosk/HF/Qwen/GigaAM/junk")
 
 
 # --------------------------------------------------------------------------- #
-#  2) Vosk на фейковом биндинге (контракт библиотеки vosk)
+#  2) Vosk on a fake binding (the vosk library contract)
 # --------------------------------------------------------------------------- #
 
 
@@ -126,12 +126,12 @@ def _fake_vosk_module():
             self.grammar = grammar
             self._blocks = 0
 
-        def SetWords(self, flag):  # noqa: N802 - контракт vosk
+        def SetWords(self, flag):  # noqa: N802 - vosk contract
             self.words = flag
 
         def AcceptWaveform(self, data):  # noqa: N802
             self._blocks += 1
-            return self._blocks % 2 == 0   # «сегмент» каждые два блока
+            return self._blocks % 2 == 0   # a "segment" every two blocks
 
         def Result(self):
             return json.dumps(
@@ -172,21 +172,21 @@ def test_vosk_engine_on_fake_binding() -> None:
             engine.load(ModelRef(model_id="v", name="V", engine=ENGINE_VOSK, path=folder), {})
             result = engine.transcribe(_audio(10.0), options={}, duration=10.0)
         texts = [s.text for s in result.segments]
-        assert texts, "vosk не дал сегментов"
+        assert texts, "vosk produced no segments"
         assert all(isinstance(t, str) and t for t in texts)
-        # минимальная пунктуация для беспунктуационного движка
+        # minimal punctuation for a punctuation-free engine
         assert all(t[-1] in ".!," for t in texts), texts
-        assert result.segments[0].words, "word-таймкоды не доехали"
+        assert result.segments[0].words, "word timestamps did not arrive"
     finally:
         if saved is None:
             sys.modules.pop("vosk", None)
         else:
             sys.modules["vosk"] = saved
-    print("  ✓ Vosk: контракт библиотеки соблюдён, сегменты+пунктуация на месте")
+    print("  ✓ Vosk: library contract honored, segments+punctuation present")
 
 
 # --------------------------------------------------------------------------- #
-#  3) whisper.cpp на фейковом pywhispercpp
+#  3) whisper.cpp on a fake pywhispercpp
 # --------------------------------------------------------------------------- #
 
 
@@ -245,11 +245,11 @@ def test_whispercpp_engine_on_fake_binding() -> None:
                 sys.modules.pop(key, None)
             else:
                 sys.modules[key] = saved
-    print("  ✓ whisper.cpp: callback-поток сегментов и таймкоды (t0/t1 в сотых сек) верны")
+    print("  ✓ whisper.cpp: callback segment stream and timecodes (t0/t1 in 1/100 s) correct")
 
 
 # --------------------------------------------------------------------------- #
-#  4) GigaAM НЕИЗВЕСТНОЙ структуры -> stock-путь, быстрый отключён
+#  4) GigaAM of UNKNOWN structure -> stock path, fast path off
 # --------------------------------------------------------------------------- #
 
 
@@ -257,7 +257,7 @@ def test_gigaam_unknown_structure_falls_back_to_stock() -> None:
     from app.asr.torch_engines import GigaAMEngine
 
     class UnknownInner:
-        """Поколение модели без decoding/head — быстрый путь неприменим."""
+        """A model generation without decoding/head — the fast path does not apply."""
 
     class StockModel:
         calls = 0
@@ -277,11 +277,11 @@ def test_gigaam_unknown_structure_falls_back_to_stock() -> None:
     assert StockModel.calls == 2, StockModel.calls
     assert [s.text for s in segments] == ["текст из родного transcribe"] * 2
     assert segments[0].start == 0.0 and segments[-1].end == 45.0
-    print("  ✓ GigaAM неизвестного поколения: быстрый путь отключён, stock-путь тайлит куски")
+    print("  ✓ GigaAM of an unknown generation: fast path off, stock path tiles chunks")
 
 
 # --------------------------------------------------------------------------- #
-#  5) Универсальный HF-движок на реальной модели + реальном чанкинге
+#  5) Universal HF engine on a real model + real chunking
 # --------------------------------------------------------------------------- #
 
 
@@ -300,26 +300,26 @@ def test_hf_engine_real_model() -> None:
     try:
         import transformers  # noqa: F401
     except ImportError:
-        print("  - HF-шаг пропущен: нет transformers")
+        print("  - SKIP: no transformers")
         return
     if _ram_gb() < 0.9:
-        print("  - HF-шаг пропущен: мало RAM для реального инференса в песочнице")
+        print("  - SKIP: not enough RAM for real inference in the sandbox")
         return
     audio_path = Path(ROOT).parent / "audio" / "hf_chunk_test.wav"
     if not audio_path.is_file():
-        print("  - HF-шаг пропущен: нет audio/hf_chunk_test.wav")
+        print("  - SKIP: no audio/hf_chunk_test.wav")
         return
 
-    # декодируем СОБСТВЕННЫМ путём программы (ffmpeg или PyAV-фолбэк)
+    # decode via the program's OWN path (ffmpeg or the PyAV fallback)
     from app.core.ffmpeg import decode_audio
 
     try:
         audio = np.ascontiguousarray(np.asarray(decode_audio(audio_path, SR), dtype=np.float32))
     except Exception as exc:  # noqa: BLE001
-        print(f"  - HF-шаг пропущен: декодер недоступен: {exc}")
+        print(f"  - SKIP: decoder unavailable: {exc}")
         return
     if len(audio) < 30 * SR:
-        print("  - HF-шаг пропущен: аудио короче 30 с")
+        print("  - SKIP: audio shorter than 30 s")
         return
 
     from app.asr.hf_pipeline_engine import HFPipelineEngine
@@ -331,28 +331,28 @@ def test_hf_engine_real_model() -> None:
                      path=Path(os.environ.get("HF_TINY_CACHE", "openai/whisper-tiny"))),
             {"device": "cpu"},
         )
-    except Exception as exc:  # noqa: BLE001 - нет сети/диска: не валим весь тест
-        print(f"  - HF-шаг пропущен: {type(exc).__name__}: {str(exc)[:120]}")
+    except Exception as exc:  # noqa: BLE001 - no network/disk: do not fail the whole test
+        print(f"  - SKIP: {type(exc).__name__}: {str(exc)[:120]}")
         return
 
     duration = len(audio) / SR
-    # greedy и без батчей: тест универсальности должен жить даже в 1 ГБ RAM;
-    # качество текста здесь не проверяется — только контракт движка и чанкинга
+    # greedy and without batches: the universality test must live in 1 GB RAM;
+    # text quality is NOT checked here — only the engine and chunking contract
     result = engine.transcribe(
         audio, options={"language": "ru", "beam_size": 1, "vad": False, "batched": False},
         duration=duration,
     )
     segs = result.segments
-    assert segs, "HF-движок не дал сегментов"
-    # тайлинг: куски идут встык и покрывают всё аудио (допуск 0.2 c)
+    assert segs, "the HF engine produced no segments"
+    # tiling: chunks go back to back and cover all audio (0.2 s tolerance)
     assert segs[0].start == 0.0
     assert abs(segs[-1].end - duration) < 0.5, (segs[-1].end, duration)
     for a, b in zip(segs, segs[1:]):
         assert abs(a.end - b.start) < 1e-6, (a.end, b.start)
     assert all(isinstance(s.text, str) and s.text.strip() for s in segs)
-    assert len(segs) >= 2, f"40 c аудио должны дать >=2 кусков, получено {len(segs)}"
-    print(f"  ✓ HF-движок (whisper-tiny): {len(segs)} куска на {duration:.0f} c, "
-          f"тайлинг и строки корректны")
+    assert len(segs) >= 2, f"40 s of audio must give >=2 chunks, got {len(segs)}"
+    print(f"  ✓ HF engine (whisper-tiny): {len(segs)} chunks over {duration:.0f} s, "
+          f"tiling and strings correct")
 
 
 if __name__ == "__main__":
@@ -361,4 +361,4 @@ if __name__ == "__main__":
     test_whispercpp_engine_on_fake_binding()
     test_gigaam_unknown_structure_falls_back_to_stock()
     test_hf_engine_real_model()
-    print("\nТЕСТ УНИВЕРСАЛЬНОСТИ ПРОЙДЕН")
+    print("\nUNIVERSALITY TEST PASSED")

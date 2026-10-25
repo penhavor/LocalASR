@@ -1,28 +1,22 @@
-"""Движки на PyTorch/transformers: Qwen3-ASR (Alibaba) и GigaAM (Sber).
+"""PyTorch/transformers engines: Qwen3-ASR (Alibaba) and GigaAM (Sber).
 
-Обе модели скачиваются из Hugging Face в папку models/ как обычные репозитории
-transformers, а инференс идёт локально через torch:
+Both models are downloaded from Hugging Face into models/ as regular
+transformers repos; inference runs locally via torch.
 
-* Qwen3-ASR — мультимодальная модель (аудио-энкодер + Qwen3-LM): 30 языков,
-  автоопределение языка, punctuation из коробки. Работает через
+* Qwen3-ASR — multimodal model (audio encoder + Qwen3-LM): 30 languages,
+  language autodetection, built-in punctuation. Works through
   ``AutoProcessor.apply_transcription_request`` + ``generate``.
-* GigaAM — conformer-модель Сбера (CTC/RNNT, best-in-class на русском).
-  Грузится через ``AutoModel.from_pretrained(..., trust_remote_code=True)``;
-  родной ``transcribe`` умеет только ≤25 секунд и на каждом вызове гоняет
-  ffmpeg через subprocess (на Windows это мигающие консоли), поэтому длинные
-  записи мы режем сами и считаем БЫСТРЫМ путём:
-    1. куски по ~20 секунд собираются в батчи (энкодер грузит GPU целиком,
-       а не по одному куску);
-    2. RNNT-декодирование выполняется на CPU в несколько потоков — без
-       синхронизации GPU↔CPU на каждый токен (родной цикл .item() тормозит);
-    3. временные WAV не пишутся вовсе — тензоры идут в модель напрямую.
-  Если структура модели нестандартная (другое поколение GigaAM и т.п.) —
-  автоматический откат на «родной» покадровый путь с пропатченным загрузчиком
-  звука (без subprocess/ffmpeg).
+* GigaAM — Sber's conformer model (CTC/RNNT, best-in-class for Russian).
+  Loaded via ``AutoModel.from_pretrained(..., trust_remote_code=True)``.
+  The stock ``transcribe`` only handles <=25 s and spawns ffmpeg via
+  subprocess on every call (flashing consoles on Windows), so long audio is
+  chunked locally and computed the FAST way: encoder batches, multi-threaded
+  CPU RNNT decoding (no per-token GPU<->CPU sync), no temporary WAV files.
+  A non-standard model structure falls back to the stock per-chunk path with
+  a patched audio loader (no subprocess/ffmpeg).
 
-Длинное аудио оба движка получают кусками (у тишины), чтобы:
-  * не съедать гигабайты памяти на трёхчасовой лекции;
-  * показывать живой прогресс и поддерживать отмену.
+Both engines feed on silence-split chunks to avoid eating gigabytes of RAM
+on a 3-hour lecture and to report live progress and support cancellation.
 """
 
 from __future__ import annotations
@@ -43,6 +37,7 @@ import numpy as np
 
 from ..constants import ENGINE_GIGAAM, ENGINE_QWEN_ASR, SAMPLE_RATE
 from ..core.postprocess import Segment
+from ..i18n import _
 from ..logutils import get_logger
 from .base import (
     ASREngine,
@@ -56,43 +51,40 @@ from .base import (
 
 log = get_logger("asr.torch")
 
-# Максимальная длина куска для каждого движка (секунды)
-QWEN_CHUNK_SECONDS = 120.0     # Qwen3-ASR умеет длинные окна, но 120 с —
-#                                безопасный потолок для потребительских GPU
-#                                (6 ГБ VRAM): при нехватке памяти кусок
-#                                автоматически делится пополам (см. _infer_qwen)
-QWEN_SPLIT_FLOOR_SECONDS = 5.0 # предел OOM-деления: куски короче не режем
-GIGAAM_CHUNK_SECONDS = 20.0    # родной transcribe GigaAM ограничен ~25 секундами
+# Maximum chunk length per engine (seconds)
+QWEN_CHUNK_SECONDS = 120.0     # Qwen3-ASR handles long windows, but 120 s is
+#                                a safe cap for consumer GPUs (6 GB VRAM):
+#                                on OOM the chunk is split in half (_infer_qwen)
+QWEN_SPLIT_FLOOR_SECONDS = 5.0 # OOM-split floor: shorter chunks are not split
+GIGAAM_CHUNK_SECONDS = 20.0    # stock GigaAM transcribe is limited to ~25 s
 
-# Куски короче этого на модели лучше не подавать: на обрывках <1 с
-# seq2seq-модели галлюцинируют («Спасибо за просмотр»), а CTC/RNNT выдают
-# мусорные токены. Короткий хвост вместо отдельного куска сливается с
-# предыдущим (см. _merge_short_tail) — содержимое при этом не теряется.
+# Do not feed chunks shorter than this: on <1 s scraps seq2seq models
+# hallucinate ("Thanks for watching") and CTC/RNNT emit junk tokens. A short
+# tail is merged into the previous chunk (_merge_short_tail) — no content lost.
 MIN_CHUNK_SECONDS = 1.0
 
-# Батчинг GigaAM: сколько ~20-секундных кусков уходит в один forward энкодера
+# GigaAM batching: ~20 s chunks per encoder forward group
 GIGAAM_DEFAULT_BATCH = 8
 GIGAAM_MAX_BATCH = 16
 
 
 # --------------------------------------------------------------------------- #
-#  Нарезка аудио по тишине
+#  Silence-based audio chunking
 # ---------------------------------------------------------------------------
 
 
 def _moving_energy_min_index(segment: np.ndarray, win: int) -> int:
-    """Индекс окна наименьшей энергии (RMS) — O(n) через кумулятивные суммы.
+    """Index of the lowest-energy (RMS) window — O(n) via cumulative sums.
 
-    Замена np.convolve(segment², ones(win)/win, 'valid'): «наивная» свёртка
-    стоит O(n·win) и на 20-секундных кусках съедала секунды чистого CPU
-    на каждый кусок (заметная доля всего распознавания). argmin суммы окна
-    равен argmin RMS, поэтому результат побайтово совпадает со старым.
+    Replaces np.convolve(segment^2, ones(win)/win, 'valid'): the naive
+    convolution costs O(n*win). argmin of the window sum equals argmin RMS,
+    so the result is identical.
     """
     if win <= 0 or segment.size <= win:
         return -1
     square = np.square(segment, dtype=np.float32)
     cumulative = np.cumsum(square)
-    # sums[i] = сумма square[i:i+win] — ровно как «valid»-свёртка с ones(win)
+    # sums[i] = sum of square[i:i+win] — same as a 'valid' convolution
     sums = cumulative[win - 1:]
     sums[1:] -= cumulative[:-win]
     return int(np.argmin(sums))
@@ -104,18 +96,14 @@ def _merge_short_tail(
     chunk_seconds: float,
     search_seconds: float,
 ) -> List[Tuple[int, int]]:
-    """Сливает короткий хвостовой кусок (<1 с) с предыдущим.
+    """Merge a short tail chunk (<1 s) into the previous one.
 
-    Последний кусок может оказаться обрывком в пару сотен миллисекунд —
-    ровно тем входом, на котором модели придумывают «спасибо за просмотр»
-    и мусорные токены. Слияние разрешено, пока объединённый кусок не выйдет
-    за безопасный лимит `chunk + search + MIN_CHUNK`:
-      * HF (27 с + 1.5 с)   -> максимум 29.5 с — строго короче 30-секундного
-                               окна Whisper, т.е. short-form режим сохраняется;
-      * GigaAM (20 с + 1 с) -> максимум 22 с при родном лимите ~25 с;
-      * Qwen (300 с + 2 с)  -> жёсткого лимита нет.
-    Если слияние всё же вывело бы за лимит — хвост остаётся отдельным куском
-    (потерять контент хуже, чем рискнуть огрехом на коротком фрагменте).
+    The last chunk can be a few hundred ms — exactly the input that makes
+    models invent "thanks for watching" and junk tokens. Merging is allowed
+    while the combined chunk stays under `chunk + search + MIN_CHUNK`
+    (HF: max 29.5 s < Whisper's 30 s window; GigaAM: max 22 s < ~25 s limit).
+    If merging would exceed the limit, the tail stays a separate chunk
+    (losing content is worse than a small artifact on a short fragment).
     """
     if len(bounds) < 2:
         return bounds
@@ -137,8 +125,8 @@ def iter_silence_chunks(
     search_seconds: float = 2.0,
     window_seconds: float = 0.4,
 ) -> Iterator[Tuple[int, int]]:
-    """Генератор границ (start, end) в сэмплах: куски до chunk_seconds,
-    граница ищется в окрестности ±search_seconds по минимуму громкости."""
+    """Yield (start, end) bounds in samples: chunks up to chunk_seconds with
+    boundaries searched within +-search_seconds at the volume minimum."""
     total = len(audio)
     if total == 0:
         return
@@ -169,12 +157,11 @@ def _vad_pause_points(
     sample_rate: int,
     min_pause_ms: int = 300,
 ) -> Optional[List[int]]:
-    """Центры речевых пауз (в сэмплах) от Silero VAD.
+    """Speech pause centers (in samples) from Silero VAD.
 
-    None — VAD недоступен (нет faster-whisper/onnxruntime, ошибка модели):
-    вызывающий код откатывается на энергетическую нарезку.
-    Модель silero_vad_v6.onnx лежит внутри пакета faster-whisper — интернет
-    для неё НЕ нужен.
+    None when VAD is unavailable (no faster-whisper/onnxruntime, model
+    error): the caller falls back to energy-based chunking. The
+    silero_vad_v6.onnx model ships inside faster-whisper — no internet.
     """
     try:
         from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -184,11 +171,11 @@ def _vad_pause_points(
         options = VadOptions(
             min_speech_duration_ms=100,
             min_silence_duration_ms=min_pause_ms,
-            speech_pad_ms=0,          # нужна честная граница, без расширения
+            speech_pad_ms=0,          # want an honest boundary, no padding
         )
         speeches = get_speech_timestamps(audio, vad_options=options, sampling_rate=sample_rate)
     except Exception as exc:  # noqa: BLE001
-        log.debug("Silero VAD не отработал — буду резать по минимуму громкости: %s", exc)
+        log.debug("Silero VAD failed — will cut at the volume minimum: %s", exc)
         return None
     points: List[int] = []
     for previous, following in zip(speeches, speeches[1:]):
@@ -207,15 +194,12 @@ def iter_smart_chunks(
     use_vad: bool = True,
     min_pause_ms: int = 200,
 ) -> Iterator[Tuple[int, int]]:
-    """Границы кусков, которые НЕ режут слова посередине.
+    """Chunk boundaries that do NOT cut words in half.
 
-    Приоритет: центры пауз, найденных Silero VAD (позднейшая пауза в окне
-    [половина куска, chunk+search]). Если VAD недоступен или в окне нет ни
-    одной паузы (непрерывная речь/музыка) — минимум громкости, как раньше.
-
-    Это сильно улучшает текст на «трудных» записях (видео с музыкой, шумом,
-    быстрой речью без пауз): ровный энергетический рез режет слова, и модель
-    выдаёт обрывки («уси.» + «Ный раствор» вместо «усилительный раствор»).
+    Preference: pause centers found by Silero VAD (the latest pause in
+    [half chunk, chunk+search]). Without VAD or without pauses in the
+    window (continuous speech/music) — the volume minimum. Greatly improves
+    text on hard recordings (music, noise, fast pauseless speech).
     """
     total = len(audio)
     if total == 0:
@@ -243,9 +227,9 @@ def iter_smart_chunks(
         index_hi = bisect.bisect_right(points, hi)
         end = 0
         if index_hi > index_lo:
-            end = points[index_hi - 1]        # самая поздняя пауза окна
+            end = points[index_hi - 1]        # the latest pause in the window
         else:
-            # непрерывная речь: энергетический минимум в узком окне у цели
+            # continuous speech: energy minimum in a narrow window near target
             seg_lo = max(start + win, target - search)
             seg_hi = min(total, target + search)
             if seg_hi - seg_lo > win:
@@ -261,10 +245,10 @@ def iter_smart_chunks(
 
 
 def _build_gigaam_manual(mod: Any, config: Any, folder: Path) -> Any:
-    """Собирает GigaAM вручную: init на cpu + явная загрузка весов.
+    """Assemble GigaAM manually: init on cpu + explicit weight loading.
 
-    Обход meta-инициализации transformers v5, с которой hydra-внутренности
-    (mel-фильтры, регистры RNNT) создаются на cpu и ловят конфликт устройств.
+    Works around transformers v5 meta-initialization where hydra internals
+    (mel filters, RNNT registers) are created on cpu and hit a device clash.
     """
     import torch
 
@@ -278,32 +262,30 @@ def _build_gigaam_manual(mod: Any, config: Any, folder: Path) -> Any:
         state = load_file(str(safetensors))
     elif weights.is_file():
         try:
-            # mmap заметно снижает пик памяти на больших моделях
+            # mmap noticeably lowers peak memory on large models
             state = torch.load(str(weights), map_location="cpu", weights_only=True, mmap=True)
         except (RuntimeError, OSError, ValueError):
             state = torch.load(str(weights), map_location="cpu", weights_only=True)
     else:
-        raise EngineError(f"В {folder} нет ни pytorch_model.bin, ни model.safetensors")
+        raise EngineError(_("Neither pytorch_model.bin nor model.safetensors in {folder}").format(folder=folder))
     missing, unexpected = model.load_state_dict(state, strict=False)
-    # префикс base_model_prefix может отличаться — пробуем со снятием «model.»
+    # base_model_prefix may differ — retry after stripping "model."
     if unexpected and all(key.startswith("model.") for key in unexpected):
         state = {key[len("model."):]: value for key, value in state.items()}
         missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
-        raise EngineError(
-            f"В весах GigaAM не хватает {len(missing)} тензоров (например {missing[:3]})"
-        )
+        raise EngineError(_(
+            "GigaAM weights are missing {n} tensors (e.g. {examples})"
+        ).format(n=len(missing), examples=missing[:3]))
     return model
 
 
 def decode_item_text(item: Any) -> str:
-    """Достаёт текст из результата декодера.
+    """Extract text from a decoder result.
 
-    Новые версии modeling_gigaam.py возвращают из CTC/RNNT-декода кортеж
-    ``(text, token_ids, token_frames)``; старые — голую строку. Naive
-    ``str(tuple)`` раньше писал в файл целиком repr кортежа вместе со
-    списками индексов («('текст', [45, 33, …])») — отсюда «мусорный» вывод.
-    Здесь берём первый строковой элемент кортежа/списка, строку — как есть.
+    Recent modeling_gigaam.py returns a ``(text, token_ids, token_frames)``
+    tuple from CTC/RNNT decode; older ones a bare string. Take the first
+    string element of a tuple/list; a string passes through.
     """
     if isinstance(item, (tuple, list)):
         for part in item:
@@ -314,7 +296,7 @@ def decode_item_text(item: Any) -> str:
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
-    """Пишет mono float32 → WAV s16le (стандартная библиотека, без зависимостей)."""
+    """Write mono float32 -> WAV s16le (stdlib only)."""
     pcm = np.clip(audio, -1.0, 1.0)
     data = (pcm * 32767.0).astype("<i2")
     with wave.open(str(path), "wb") as fh:
@@ -325,10 +307,10 @@ def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
 
 
 def missing_files_hint(exc: BaseException) -> str:
-    """Подсказка к ошибкам «в папке модели нет такого-то файла».
+    """Hint for "model folder lacks file X" errors.
 
-    Типичная причина — прерванное скачивание (сеть моргнула, установку отменили).
-    Вместо голого стектрейса объясняем пользователю, что делать.
+    Typical cause: an interrupted download. Explains what to do instead of
+    showing a bare traceback.
     """
     low = str(exc).lower()
     markers = (
@@ -337,42 +319,40 @@ def missing_files_hint(exc: BaseException) -> str:
         "feature extractor", "processor_config.json",
     )
     if any(marker in low for marker in markers):
-        return (
-            "\n\nПохоже, файлы модели скачаны не полностью или папка повреждена "
-            "(такое случается при обрыве сети во время установки).\n"
-            "Что делать: удали модель (карточка модели → «Удалить») и установи заново — "
-            "целые файлы будут пропущены, докачается только недостающее."
+        return _(
+            "\n\nThe model files appear incomplete or the folder is damaged "
+            "(this happens when the network drops during installation).\n"
+            "What to do: delete the model (model card → Delete) and install it again — "
+            "complete files will be skipped, only the missing ones re-downloaded."
         )
     return ""
 
 
 def transformers_version_hint(exc: BaseException, model_kind: str, min_version: str) -> str:
-    """Подсказка, если установленный transformers слишком старый для модели."""
+    """Hint when the installed transformers is too old for the model."""
     low = str(exc).lower()
     if any(marker in low for marker in (
         "unrecognized", "not recognized", "unknown model", "keyerror", "does not support",
         "has no attribute", "invalid model type",
     )):
-        return (
-            f"\n\nУстановленный transformers не знает «{model_kind}» — нужен transformers>={min_version}.\n"
-            "Обнови его: программа сама предложит установку при следующем запуске модели "
-            "(или: Сервис → Диагностика и восстановление).\n"
-            "ВАЖНО: если новая версия transformers была установлена только что, ПЕРЕЗАПУСТИ "
-            "программу — уже импортированная старая версия остаётся в памяти процесса до перезапуска."
-        )
+        return _(
+            "\n\nThe installed transformers does not know \"{kind}\" — transformers>={ver} is required.\n"
+            "Update it: the app will offer the installation on the next model run "
+            "(or: Tools → Diagnostics & recovery).\n"
+            "IMPORTANT: if the new transformers version was just installed, RESTART the "
+            "app — an already imported old version stays in process memory until restart."
+        ).format(kind=model_kind, ver=min_version)
     return ""
 
 
 def reset_transformers_caches() -> int:
-    """Сбрасывает lru-кеши проверок «пакет доступен?» внутри transformers.
+    """Reset the "package available?" lru caches inside transformers.
 
-    transformers кэширует результаты is_accelerate_available()/is_torch_available()
-    и подобных проверок (lru_cache на всю жизнь процесса). Если пакет установили
-    ПРЯМО ВО ВРЕМЯ работы программы (штатный сценарий: движок ставится по
-    требованию), кэш продолжает отвечать «недоступно» — загрузка Qwen3-ASR падала
-    с «requires `accelerate`» на свежеустановленный accelerate. Сброс кэшей во
-    всех загруженных модулях transformers возвращает проверки в актуальное
-    состояние БЕЗ перезапуска программы. Возвращает число сброшенных кэшей.
+    transformers caches is_accelerate_available()/is_torch_available() results
+    for the whole process lifetime. When a package is installed WHILE the app
+    is running (the normal install-on-demand flow), the cache keeps answering
+    "unavailable". Clearing the caches in all loaded transformers modules
+    refreshes the checks WITHOUT restarting. Returns the number cleared.
     """
     cleared = 0
     seen: set = set()
@@ -386,10 +366,10 @@ def reset_transformers_caches() -> int:
         except TypeError:
             continue
         for attr in attributes:
-            # Классы и модули не трогаем: ленивые объекты transformers при
-            # ЛЮБОМ getattr пытаются импортировать бэкенды и строят сообщения
-            # requires_backends (секунды на атрибут). Все нужные lru_cache —
-            # функции; обход без них занимает ~0.1 с.
+            # Skip classes and modules: lazy transformers objects try to
+            # import backends on ANY getattr and build requires_backends
+            # messages (seconds per attribute). All needed lru_caches are
+            # functions; walking without the others takes ~0.1 s.
             if isinstance(attr, (type, types.ModuleType)):
                 continue
             try:
@@ -397,7 +377,7 @@ def reset_transformers_caches() -> int:
                     continue
                 cache_clear = getattr(attr, "cache_clear", None)
                 if cache_clear is None or not callable(getattr(attr, "cache_info", None)):
-                    continue    # это не lru_cache-обёртка
+                    continue    # not an lru_cache wrapper
             except Exception:  # noqa: BLE001
                 continue
             seen.add(id(attr))
@@ -407,36 +387,36 @@ def reset_transformers_caches() -> int:
             except Exception:  # noqa: BLE001
                 continue
     if cleared:
-        log.debug("transformers: сброшено lru-кэшей доступности: %d", cleared)
+        log.debug("transformers: availability lru caches cleared: %d", cleared)
     return cleared
 
 
 def read_wav_mono(path: Path, sample_rate: int):
-    """Читает WAV s16le в torch-тензор float32 (без ffmpeg и subprocess)."""
+    """Read WAV s16le into a float32 torch tensor (no ffmpeg/subprocess)."""
     import torch
 
     with wave.open(str(path), "rb") as fh:
         params_ok = fh.getnchannels() == 1 and fh.getsampwidth() == 2
         raw = fh.readframes(fh.getnframes())
     if not params_ok:
-        raise ValueError(f"Ожидался моно s16le WAV: {path}")
+        raise ValueError(_("Expected a mono s16le WAV: {path}").format(path=path))
     audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     return torch.from_numpy(audio)
 
 
 def safe_load_audio(path: Any, sample_rate: int = SAMPLE_RATE):
-    """Безопасная замена gigaam.load_audio: НИКАКИХ subprocess/ffmpeg-консолей.
+    """Safe replacement for gigaam.load_audio: NO subprocess/ffmpeg consoles.
 
-    Родной load_audio модели запускает ``ffmpeg`` через subprocess.run без
-    CREATE_NO_WINDOW — из pythonw.exe это показывает чёрное окно консоли на
-    каждый кусок аудио. Здесь: WAV читаем стандартным wave, всё остальное —
-    нашим декодером (он ffmpeg запускает невидимо).
+    The model's native load_audio runs ``ffmpeg`` via subprocess.run without
+    CREATE_NO_WINDOW — from pythonw.exe that flashes a black console per audio
+    chunk. Here: WAV via stdlib wave, everything else via our decoder (which
+    launches ffmpeg invisibly).
     """
     path = Path(str(path))
     if path.suffix.lower() == ".wav":
         try:
             return read_wav_mono(path, sample_rate)
-        except Exception:  # noqa: BLE001 - не наш WAV (другой формат семплов)
+        except Exception:  # noqa: BLE001 - not our WAV (different sample format)
             pass
     from ..core.ffmpeg import decode_audio
 
@@ -447,29 +427,29 @@ def safe_load_audio(path: Any, sample_rate: int = SAMPLE_RATE):
 
 
 # --------------------------------------------------------------------------- #
-#  Общий базовый класс для torch-движков
+#  Shared base class for torch engines
 # --------------------------------------------------------------------------- #
 
 
 class TorchASREngine(ASREngine):
-    """Общее: проверка доступности, устройство, разгрузка памяти."""
+    """Shared: availability check, device selection, memory release."""
 
     chunk_seconds: float = 60.0
-    #: все модули, без которых движок не заведётся (GUI предложит доустановку)
+    #: all modules without which the engine will not start (GUI offers install)
     import_names: Tuple[str, ...] = ("torch", "transformers")
 
     @classmethod
     def is_available(cls) -> bool:
         return all(importlib.util.find_spec(name) is not None for name in cls.import_names)
 
-    # -- вспомогательное -------------------------------------------------- #
+    # -- helpers --------------------------------------------------------------- #
     def _pick_device(self, hardware: Dict[str, Any]) -> Tuple[str, Any]:
         import torch
 
         wanted = str(hardware.get("device") or "auto")
-        # torch носит CUDA-рантайм с собой (pip-wheel), поэтому ему НЕ нужна
-        # проверка ctranslate2 (hardware["cuda_ok"]) — она про другой движок.
-        # Достаточно torch.cuda.is_available().
+        # torch ships the CUDA runtime in its pip wheel, so the ctranslate2
+        # check (hardware["cuda_ok"]) does not apply — torch.cuda.is_available()
+        # is sufficient.
         if wanted == "cuda":
             use_cuda = torch.cuda.is_available()
         elif wanted == "cpu":
@@ -497,7 +477,7 @@ class TorchASREngine(ASREngine):
 
     def _ensure_model(self) -> Any:
         if self._model is None:
-            raise EngineError(f"Модель движка {self.name} не загружена")
+            raise EngineError(_("Model of engine {name} is not loaded").format(name=self.name))
         return self._model
 
     def __init__(self) -> None:
@@ -512,8 +492,8 @@ class TorchASREngine(ASREngine):
 
 class QwenASREngine(TorchASREngine):
     name = ENGINE_QWEN_ASR
-    # qwen3_asr появился в transformers 5.13.0 (2026-07-03) — более ранние
-    # 5.x модель НЕ знают, поэтому пин строгий
+    # qwen3_asr appeared in transformers 5.13.0 — earlier 5.x do NOT know the
+    # model, hence the strict pin
     packages = ["torch>=2.6", "transformers>=5.13", "accelerate>=1.0", "soundfile>=0.12"]
     import_name = "transformers"
     import_names = ("torch", "transformers", "accelerate")
@@ -523,11 +503,11 @@ class QwenASREngine(TorchASREngine):
     # ------------------------------------------------------------------ #
     @classmethod
     def is_available(cls) -> bool:
-        """Доступность = пакеты на месте И transformers знает qwen3_asr.
+        """Available = packages present AND transformers knows qwen3_asr.
 
-        Версию проверяем через метаданные (importlib.metadata) — БЕЗ импорта
-        transformers: импорт тяжёлый, а is_available() дёргается из GUI
-        (вкладка «Движки», кнопка «РАБОТАТЬ») и не должна подвешивать окно.
+        The version is checked via importlib.metadata WITHOUT importing
+        transformers: the import is heavy and is_available() is called from
+        the GUI (Engines tab, RUN button) — it must not hang the window.
         """
         if not super().is_available():
             return False
@@ -548,23 +528,21 @@ class QwenASREngine(TorchASREngine):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _from_pretrained_dtype(auto_cls: Any, path: str, dtype: Any, **kwargs: Any) -> Any:
-        """from_pretrained с учётом переименования torch_dtype -> dtype в 5.10+."""
+        """from_pretrained accounting for the torch_dtype -> dtype rename in 5.10+."""
         try:
             return auto_cls.from_pretrained(path, dtype=dtype, **kwargs)
         except TypeError:
-            # transformers < 5.10: аргумент назывался torch_dtype
+            # transformers < 5.10: the argument was called torch_dtype
             return auto_cls.from_pretrained(path, torch_dtype=dtype, **kwargs)
 
     def _load_qwen_model(self, auto_cls: Any, path: str, dtype: Any, device: str) -> Any:
-        """Загрузка весов с тройной страховкой от «accelerate-казусов».
+        """Weight loading with a triple safety net for accelerate quirks.
 
-        Каскад:
-          1. device_map=device (быстрый путь, нужен accelerate);
-          2. при «requires accelerate» — сброс lru-кэшей transformers
-             (пакет могли установить только что, прямо во время работы
-             программы, а кэш помнит старое «нет») и повтор;
-          3. если accelerate реально нет/невидим — загрузка БЕЗ device_map
-             и обычный .to(device): для одной видеокарты результат тот же.
+        Cascade: 1) device_map=device (fast path, needs accelerate);
+        2) on "requires accelerate" — reset transformers lru caches (the
+        package may have just been installed while the app runs) and retry;
+        3) if accelerate is truly absent — load WITHOUT device_map and use
+        plain .to(device): identical result for a single GPU.
         """
         if importlib.util.find_spec("accelerate") is not None:
             try:
@@ -574,18 +552,18 @@ class QwenASREngine(TorchASREngine):
                     raise
                 cleared = reset_transformers_caches()
                 log.warning(
-                    "transformers не увидел установленный accelerate (устаревший lru_cache, "
-                    "сброшено кэшей: %d) — повторяю загрузку", cleared,
+                    _("transformers did not see the installed accelerate (stale lru_cache, "
+                      "caches cleared: %d) — retrying the load"), cleared,
                 )
                 try:
                     return self._from_pretrained_dtype(auto_cls, path, dtype, device_map=device)
                 except ValueError as exc2:
                     if "accelerate" not in str(exc2).lower():
                         raise
-                    log.warning("accelerate по-прежнему недоступен — гружу без device_map (.to(%s))", device)
+                    log.warning(_("accelerate still unavailable — loading without device_map (.to(%s))"), device)
         else:
-            log.info("accelerate не установлен — гружу Qwen3-ASR без device_map (.to(%s))", device)
-        # запасной путь БЕЗ accelerate: загрузка на CPU и перенос на устройство
+            log.info(_("accelerate is not installed — loading Qwen3-ASR without device_map (.to(%s))"), device)
+        # fallback path WITHOUT accelerate: load on CPU, then move to device
         model = self._from_pretrained_dtype(auto_cls, path, dtype)
         return model.to(device)
 
@@ -595,15 +573,15 @@ class QwenASREngine(TorchASREngine):
         try:
             from transformers import AutoModelForMultimodalLM, AutoProcessor
         except Exception as exc:  # noqa: BLE001
-            raise EngineError(
-                f"Не удалось импортировать torch/transformers: {exc}\n"
-                "Недостающие компоненты программа предложит установить автоматически "
-                "при запуске модели (или: Сервис → Диагностика и восстановление)."
-            ) from exc
+            raise EngineError(_(
+                "Failed to import torch/transformers: {exc}\n"
+                "Missing components are offered for automatic installation when a model "
+                "is started (or: Tools → Diagnostics & recovery)."
+            ).format(exc=exc)) from exc
 
         path = str(model.resolved_path)
         device, dtype = self._pick_device(hardware)
-        log.debug("Qwen3-ASR: загружаю %s (device=%s, dtype=%s)", path, device, dtype)
+        log.debug("Qwen3-ASR: loading %s (device=%s, dtype=%s)", path, device, dtype)
         started = time.time()
         try:
             self._processor = AutoProcessor.from_pretrained(path)
@@ -611,47 +589,47 @@ class QwenASREngine(TorchASREngine):
             self._model.eval()
         except Exception as exc:  # noqa: BLE001
             hint = missing_files_hint(exc) or transformers_version_hint(exc, "Qwen3-ASR", "5.13")
-            log.error("Qwen3-ASR не загрузился из %s: %s", path, exc, exc_info=True)
-            raise EngineError(f"Не удалось загрузить Qwen3-ASR из {path}: {exc}{hint}") from exc
+            log.error("Qwen3-ASR failed to load from %s: %s", path, exc, exc_info=True)
+            raise EngineError(_("Failed to load Qwen3-ASR from {path}: {exc}{hint}").format(
+                path=path, exc=exc, hint=hint)) from exc
         self.loaded_model_id = model.model_id
         log.info(
-            "Qwen3-ASR загружен: %s (%s, %s) за %.1f с",
+            _("Qwen3-ASR loaded: %s (%s, %s) in %.1f s"),
             model.model_id, device, self.compute_type, time.time() - started,
         )
 
     # ------------------------------------------------------------------ #
     def _qwen_inputs(self, chunk: np.ndarray, language: Optional[str], prompt: Optional[str]) -> Any:
-        """Готовит входы модели через apply_transcription_request.
+        """Prepare model inputs via apply_transcription_request.
 
-        ВАЖНО: аудио передаётся МАССИВОМ 16 кГц (именно это принимает
-        transformers 5.x — make_list_of_audio ждёт numpy/torch-массив, путь
-        или URL). Вариант «кортеж (массив, sample_rate)» из старых примеров
-        приводит к «Invalid input type. Must be a single audio…» — этот баг
-        здесь исправлен.
+        IMPORTANT: audio is passed as a 16 kHz ARRAY (transformers 5.x
+        make_list_of_audio accepts a numpy/torch array, path or URL). The
+        "(array, sample_rate) tuple" style from old examples triggers
+        "Invalid input type. Must be a single audio…".
         """
         apply = getattr(self._processor, "apply_transcription_request", None)
         if apply is None:
-            raise EngineError(
-                "Установленный transformers не поддерживает apply_transcription_request "
-                "для Qwen3-ASR — обнови transformers (нужен >= 5.13)."
-            )
+            raise EngineError(_(
+                "The installed transformers does not support apply_transcription_request "
+                "for Qwen3-ASR — update transformers (>= 5.13 required)."
+            ))
         try:
             return apply(audio=chunk, language=language, prompt=prompt)
         except TypeError as exc:
-            # страховка от смены сигнатуры между версиями transformers
+            # guard against signature changes between transformers versions
             text = str(exc)
             if "prompt" in text:
-                log.debug("apply_transcription_request без prompt: %s", exc)
+                log.debug("apply_transcription_request without prompt: %s", exc)
                 return apply(audio=chunk, language=language)
             if "language" in text:
-                log.debug("apply_transcription_request без language: %s", exc)
+                log.debug("apply_transcription_request without language: %s", exc)
                 return apply(audio=chunk)
             raise
 
     def _infer_qwen_once(
         self, model: Any, chunk: np.ndarray, language: Optional[str], prompt: Optional[str],
     ) -> Tuple[str, str]:
-        """Один forward+generate на кусок. Возвращает (текст, язык)."""
+        """One forward+generate per chunk. Returns (text, language)."""
         import torch
 
         inputs = self._qwen_inputs(chunk, language, prompt)
@@ -661,11 +639,11 @@ class QwenASREngine(TorchASREngine):
         generated = output_ids[:, inputs["input_ids"].shape[1]:]
         decode = getattr(self._processor, "decode", None)
         if decode is None:
-            raise EngineError("Процессор Qwen3-ASR без decode() — обнови transformers (>= 5.13)")
+            raise EngineError(_("Qwen3-ASR processor has no decode() — update transformers (>= 5.13)"))
         try:
             parsed = decode(generated, return_format="parsed")[0]
         except (TypeError, ValueError):
-            # совсем старые/новые варианты API: декодируем «сыро» и чистим маркеры
+            # very old/new API variants: decode raw and strip markers
             raw = decode(generated, skip_special_tokens=True)
             text = raw[0] if isinstance(raw, (list, tuple)) else str(raw)
             parsed = {"transcription": text, "language": ""}
@@ -695,12 +673,12 @@ class QwenASREngine(TorchASREngine):
         prompt: Optional[str],
         offset_seconds: float,
     ) -> Tuple[str, str]:
-        """Распознаёт кусок; при нехватке VRAM делит его пополам (рекурсивно).
+        """Recognize a chunk; on VRAM shortage split it in half (recursively).
 
-        Потребительские GPU (6 ГБ VRAM) не всегда тянут 120-секундное окно
-        энкодера Qwen3-ASR — вместо падения «CUDA out of memory» кусок
-        режется пополам и половинки считаются по отдельности (тексты
-        склеиваются). Предел деления — QWEN_SPLIT_FLOOR_SECONDS.
+        Consumer GPUs (6 GB VRAM) do not always fit the 120 s Qwen3-ASR
+        encoder window — instead of a "CUDA out of memory" crash the chunk is
+        halved and both parts are computed separately (texts are joined).
+        Split floor: QWEN_SPLIT_FLOOR_SECONDS.
         """
         import torch
 
@@ -718,7 +696,7 @@ class QwenASREngine(TorchASREngine):
                 pass
             mid = len(chunk) // 2
             log.warning(
-                "Qwen3-ASR: не хватило VRAM на кусок %.1f с (около %.1f с) — делю пополам и повторяю",
+                _("Qwen3-ASR: not enough VRAM for a %.1f s chunk (at %.1f s) — splitting in half and retrying"),
                 len(chunk) / SAMPLE_RATE, offset_seconds,
             )
             left = self._infer_qwen(model, np.ascontiguousarray(chunk[:mid]), language, prompt, offset_seconds)
@@ -750,8 +728,8 @@ class QwenASREngine(TorchASREngine):
         prompt_parts = [options.get("initial_prompt") or "", options.get("hotwords") or ""]
         prompt = " ".join(part.strip() for part in prompt_parts if part.strip()) or None
 
-        # нарезка по паузам (VAD, как у остальных движков): куски не режут
-        # слова посередине, а короткие хвосты сливаются с предыдущим куском
+        # pause-based chunking (VAD, like the other engines): chunks do not
+        # cut words in half, short tails merge into the previous chunk
         bounds = list(
             iter_smart_chunks(
                 audio, SAMPLE_RATE, self.chunk_seconds, search_seconds=2.0,
@@ -759,8 +737,8 @@ class QwenASREngine(TorchASREngine):
             )
         )
         log.debug(
-            "Qwen3-ASR: %d кусков (язык=%s, prompt=%s, аудио %.1f с)",
-            len(bounds), language or "авто", bool(prompt), duration,
+            "Qwen3-ASR: %d chunks (language=%s, prompt=%s, audio %.1f s)",
+            len(bounds), language or "auto", bool(prompt), duration,
         )
 
         segments: List[Segment] = []
@@ -769,7 +747,7 @@ class QwenASREngine(TorchASREngine):
 
         for start, end in bounds:
             if cancel and cancel():
-                warnings.append("Распознавание остановлено пользователем")
+                warnings.append(_("Recognition stopped by user"))
                 break
             chunk = audio[start:end]
             chunk_started = time.time()
@@ -778,20 +756,21 @@ class QwenASREngine(TorchASREngine):
             except Exception as exc:  # noqa: BLE001
                 hint = ""
                 if self._is_cuda_oom(exc):
-                    hint = (
-                        "\n\nНе хватило видеопамяти даже на минимальный кусок. "
-                        "Попробуй модель Qwen3-ASR 0.6B или другое устройство "
-                        "(Сервис → Настройки → «Скорость и железо»)."
+                    hint = _(
+                        "\n\nNot enough VRAM even for the minimal chunk. "
+                        "Try the Qwen3-ASR 0.6B model or another device "
+                        "(Tools → Settings → \"Speed & hardware\")."
                     )
                 log.error(
-                    "Qwen3-ASR сбой на куске %.1f–%.1f с: %s",
+                    "Qwen3-ASR failed on chunk %.1f–%.1f s: %s",
                     start / SAMPLE_RATE, end / SAMPLE_RATE, exc, exc_info=True,
                 )
-                raise EngineError(f"Qwen3-ASR не смог распознать фрагмент: {exc}{hint}") from exc
+                raise EngineError(_("Qwen3-ASR could not recognize the chunk: {exc}{hint}").format(
+                    exc=exc, hint=hint)) from exc
 
             language_detected = detected or language_detected
             log.debug(
-                "Qwen3-ASR: кусок %.1f–%.1f с -> %d симв. за %.1f с",
+                "Qwen3-ASR: chunk %.1f–%.1f s -> %d chars in %.1f s",
                 start / SAMPLE_RATE, end / SAMPLE_RATE, len(text), time.time() - chunk_started,
             )
             if text:
@@ -801,10 +780,11 @@ class QwenASREngine(TorchASREngine):
                     on_segment(segment)
 
             if progress:
-                progress(end / total, f"Распознаю: {end / SAMPLE_RATE:.0f} с из {duration:.0f} с")
+                progress(end / total, _("Recognizing: {done:.0f} s of {total:.0f} s").format(
+                    done=end / SAMPLE_RATE, total=duration))
 
         if options.get("word_timestamps"):
-            warnings.append("Qwen3-ASR не даёт таймкоды слов — сегменты по кускам аудио")
+            warnings.append(_("Qwen3-ASR provides no word timestamps — segments follow audio chunks"))
 
         return TranscriptResult(
             segments=segments,
@@ -834,13 +814,13 @@ def _rnnt_greedy_one(
     max_symbols: int,
     tokenizer: Any,
 ) -> str:
-    """RNNT greedy-декодирование ОДНОЙ последовательности на CPU.
+    """RNNT greedy decoding of ONE sequence on CPU.
 
-    Математически повторяет GigaAM RNNTGreedyDecoding._greedy_decode, но:
-      * проекция энкодера (joint.enc) уже посчитана батчем на GPU;
-      * LSTM/joint работают на CPU в float32 — нет синхронизации GPU↔CPU
-        на каждый токен (главный тормоз родного пути);
-      * функцию можно запускать параллельно в нескольких потоках.
+    Mathematically repeats GigaAM RNNTGreedyDecoding._greedy_decode, but:
+      * the encoder projection (joint.enc) is already computed on GPU;
+      * LSTM/joint run on CPU in float32 — no per-token GPU<->CPU sync
+        (the main bottleneck of the native path);
+      * safe to run in parallel across threads.
     """
     import torch
 
@@ -858,9 +838,9 @@ def _rnnt_greedy_one(
                 token = int(logits.argmax(dim=-1).item())
                 if token == blank_id:
                     not_blank = False
-                    # ВАЖНО: на blank состояние LSTM НЕ обновляется — ровно как
-                    # в родном _greedy_decode (dec_state = hidden только при
-                    # эмиссии токена). Иначе декод «съедает» слоги.
+                    # IMPORTANT: on blank the LSTM state is NOT updated — exactly
+                    # like the native _greedy_decode (dec_state = hidden only on
+                    # token emission). Otherwise decoding "eats" syllables.
                 else:
                     hyp.append(token)
                     state = hidden
@@ -880,8 +860,8 @@ class GigaAMEngine(TorchASREngine):
         "sentencepiece>=0.2.2",
     ]
     import_name = "transformers"
-    # soundfile проверяем явно: его импортирует сам код модели
-    # (modeling_gigaam.py), без него загрузка падает ModuleNotFoundError
+    # soundfile is checked explicitly: the model code (modeling_gigaam.py)
+    # imports it; without it loading dies with ModuleNotFoundError
     import_names = ("torch", "transformers", "torchaudio", "hydra", "omegaconf", "sentencepiece", "soundfile")
     chunk_seconds = GIGAAM_CHUNK_SECONDS
 
@@ -896,14 +876,14 @@ class GigaAMEngine(TorchASREngine):
         try:
             from transformers import AutoModel
         except Exception as exc:  # noqa: BLE001
-            raise EngineError(
-                f"Не удалось импортировать transformers: {exc}\n"
-                "Недостающие компоненты программа предложит установить автоматически "
-                "при запуске модели (или: Сервис → Диагностика и восстановление)."
-            ) from exc
+            raise EngineError(_(
+                "Failed to import transformers: {exc}\n"
+                "Missing components are offered for automatic installation when a model "
+                "is started (or: Tools → Diagnostics & recovery)."
+            ).format(exc=exc)) from exc
 
-        # Код GigaAM внутри вызывает ffmpeg из PATH — подскажем ему наш бинарник
-        # (пригодится только запасному пути; быстрый путь ffmpeg не использует)
+        # GigaAM code calls ffmpeg from PATH internally — point it to our
+        # binary (only the fallback path needs it; the fast path does not)
         try:
             from ..core.ffmpeg import find_ffmpeg
 
@@ -918,76 +898,77 @@ class GigaAMEngine(TorchASREngine):
 
         path = str(model.resolved_path)
         device, dtype = self._pick_device(hardware)
-        # ВАЖНО: dtype при from_pretrained не передаём — внутренности модели
-        # (mel-фильтры и т.п.) создаются hydra на cpu и конфликтуют с meta-
-        # инициализацией transformers. Точность применяем после загрузки.
+        # IMPORTANT: dtype is NOT passed to from_pretrained — model internals
+        # (mel filters etc.) are created by hydra on cpu and clash with
+        # transformers meta-initialization. Precision is applied after load.
         try:
             loaded = AutoModel.from_pretrained(
                 path, trust_remote_code=True, low_cpu_mem_usage=False
             )
         except ImportError as exc:
-            # modeling_gigaam.py лениво импортирует pyannote (только для ихнего
-            # longform с HF-токеном). Нам longform не нужен: длинные записи мы
-            # режем сами, поэтому грузим модуль напрямую, без проверки transformers.
-            log.info("AutoModel требует %s — гружу modeling_gigaam.py напрямую", exc)
+            # modeling_gigaam.py lazily imports pyannote (only for their
+            # longform with an HF token). We do not need longform: long audio
+            # is chunked locally, so load the module directly.
+            log.info("AutoModel requires %s — loading modeling_gigaam.py directly", exc)
             loaded = self._load_direct(path, dtype)
         except Exception as exc:  # noqa: BLE001
             try:
                 loaded = self._load_direct(path, dtype)
             except Exception as direct_exc:  # noqa: BLE001
-                log.error("GigaAM не загрузился из %s: %s / %s", path, exc, direct_exc, exc_info=True)
-                raise EngineError(
-                    f"Не удалось загрузить GigaAM из {path}: {exc} / {direct_exc}\n"
-                    "Нужны пакеты: torch, torchaudio, transformers, hydra-core, omegaconf, sentencepiece."
+                log.error("GigaAM failed to load from %s: %s / %s", path, exc, direct_exc, exc_info=True)
+                raise EngineError(_(
+                    "Failed to load GigaAM from {path}: {exc} / {direct}\n"
+                    "Required packages: torch, torchaudio, transformers, hydra-core, omegaconf, sentencepiece."
+                ).format(path=path, exc=exc, direct=direct_exc)
                     + missing_files_hint(direct_exc)
                 ) from exc
         try:
             loaded = loaded.to(device)
-            # ВАЖНО: веса на GPU НЕ кастим в fp16. Родной GigaAM.forward сам
-            # включает torch.autocast(fp16) вокруг энкодера, а его rotary-PE
-            # (pe-буфер) всегда создаётся в fp32: на fp16-весах произведение
-            # q(fp16)×cos(fp32) даёт fp32 и linear_q падает с dtype-mismatch.
-            # fp32-веса + autocast = схема вендора: быстро и без крашей.
+            # IMPORTANT: do NOT cast GPU weights to fp16. Native GigaAM.forward
+            # enables torch.autocast(fp16) around the encoder itself, and its
+            # rotary PE buffer is always fp32: with fp16 weights q(fp16)*cos(fp32)
+            # yields fp32 and linear_q crashes with a dtype mismatch.
+            # fp32 weights + autocast = the vendor's scheme: fast and crash-free.
             if device == "cuda":
                 self.compute_type = "float32+autocast(fp16)"
             loaded.eval()
         except Exception as exc:  # noqa: BLE001
-            raise EngineError(f"Не удалось перевести GigaAM на {device}: {exc}") from exc
+            raise EngineError(_("Failed to move GigaAM to {device}: {exc}").format(device=device, exc=exc)) from exc
         self._model = loaded
         self._rnnt_kit = None
         self._fast_batch = GIGAAM_DEFAULT_BATCH
         self._patch_audio_loader()
         self.loaded_model_id = model.model_id
-        log.info("GigaAM загружен: %s (%s, %s)", model.model_id, device, self.compute_type)
+        log.info(_("GigaAM loaded: %s (%s, %s)"), model.model_id, device, self.compute_type)
 
     # ------------------------------------------------------------------ #
     @staticmethod
     def _load_direct(path: str, dtype: Any = None) -> Any:
-        """Загрузка modeling_gigaam.py напрямую (без dynamic-module проверки)."""
+        """Load modeling_gigaam.py directly (no dynamic-module check)."""
         import importlib.util as iu
 
         module_path = Path(path) / "modeling_gigaam.py"
         if not module_path.is_file():
-            raise EngineError(f"В {path} нет modeling_gigaam.py")
+            raise EngineError(_("No modeling_gigaam.py in {path}").format(path=path))
         spec = iu.spec_from_file_location("localasr_gigaam_modeling", str(module_path))
         if spec is None or spec.loader is None:
-            raise EngineError(f"Не удалось прочитать {module_path}")
+            raise EngineError(_("Failed to read {path}").format(path=module_path))
         mod = iu.module_from_spec(spec)
         sys.modules[spec.name] = mod
         try:
             spec.loader.exec_module(mod)
             config = mod.GigaAMConfig.from_pretrained(path)
             try:
-                # low_cpu_mem_usage=False: иначе transformers создаёт модель на
-                # meta-устройстве, а hydra-внутренности (mel-фильтры) — на cpu,
-                # и загрузка падает с «Tensor on device cpu is not on meta»
+                # low_cpu_mem_usage=False: otherwise transformers creates the
+                # model on the meta device while hydra internals (mel filters)
+                # are on cpu, and loading dies with "Tensor on device cpu is not on meta"
                 return mod.GigaAMModel.from_pretrained(
                     path, config=config, low_cpu_mem_usage=False
                 )
             except Exception as exc:  # noqa: BLE001
-                # transformers v5 всё равно может увести init на meta-устройство:
-                # собираем модель вручную и накладываем веса сами
-                log.info("from_pretrained не смог (%s) — собираю GigaAM вручную", exc)
+                # transformers v5 may still push init to the meta device:
+                # assemble the model manually and apply weights ourselves
+                log.info("from_pretrained failed (%s) — assembling GigaAM manually", exc)
                 return _build_gigaam_manual(mod, config, Path(path))
         except Exception:
             sys.modules.pop(spec.name, None)
@@ -995,13 +976,13 @@ class GigaAMEngine(TorchASREngine):
 
     # ------------------------------------------------------------------ #
     def _patch_audio_loader(self) -> None:
-        """Подменяет load_audio ВО ВСЕХ копиях модуля модели (без ffmpeg-консолей).
+        """Replace load_audio in ALL copies of the model module (no ffmpeg consoles).
 
-        modeling_gigaam.py делает ``sys.path.append(DIR_NAME)``, и hydra затем
-        импортирует ``modeling_gigaam`` ЗАНОВО — получается вторая копия модуля,
-        чей load_audio (subprocess+ffmpeg) оставался непропатченным и показывал
-        чёрное окно консоли на каждый кусок аудио. Патчим все найденные копии:
-        внешний класс, внутренний (hydra) класс и все модули с таким именем.
+        modeling_gigaam.py does ``sys.path.append(DIR_NAME)`` and hydra then
+        re-imports ``modeling_gigaam`` — a second module copy whose load_audio
+        (subprocess+ffmpeg) stayed unpatched and flashed a console per chunk.
+        Patch every copy found: the outer class, the inner (hydra) class and
+        all modules with that name.
         """
         patched = 0
         seen: set = set()
@@ -1023,24 +1004,24 @@ class GigaAMEngine(TorchASREngine):
             if hasattr(module, "load_audio"):
                 module.load_audio = safe_load_audio
                 patched += 1
-        log.debug("load_audio пропатчен в %d модулях GigaAM", patched)
+        log.debug("load_audio patched in %d GigaAM modules", patched)
 
     def unload(self) -> None:
         self._rnnt_kit = None
         super().unload()
 
     # ------------------------------------------------------------------ #
-    #  Быстрый путь: батчи + CPU-декодирование RNNT
+    #  Fast path: groups + CPU RNNT decoding
     # ------------------------------------------------------------------ #
     def _inner_asr(self) -> Any:
-        """Внутренняя GigaAMASR (self._model.model) или None."""
+        """The inner GigaAMASR (self._model.model) or None."""
         inner = getattr(self._model, "model", None)
         if inner is None or not hasattr(inner, "forward"):
             return None
         return inner
 
     def _fast_kind(self, inner: Any) -> str:
-        """'rnnt' | 'ctc' | '' — поддерживает ли структура быстрый путь."""
+        """'rnnt' | 'ctc' | '' — whether the structure supports the fast path."""
         decoding = getattr(inner, "decoding", None)
         head = getattr(inner, "head", None)
         if decoding is None or head is None:
@@ -1064,7 +1045,7 @@ class GigaAMEngine(TorchASREngine):
         return ""
 
     def _rnnt_cpu_kit(self, inner: Any) -> Tuple[Any, ...]:
-        """Копии мелких RNNT-сетей (decoder/pred/joint_net) на CPU в float32."""
+        """CPU float32 copies of the small RNNT nets (decoder/pred/joint_net)."""
         if self._rnnt_kit is not None:
             return self._rnnt_kit
         import torch
@@ -1075,9 +1056,9 @@ class GigaAMEngine(TorchASREngine):
             pred = copy.deepcopy(head.joint.pred).cpu().float().eval()
             joint_net = copy.deepcopy(head.joint.joint_net).cpu().float().eval()
 
-        # Родной predict() для первого шага создаёт torch.zeros(...) с ГЛОБАЛЬНЫМ
-        # default dtype — если окружение сменило его (например, на fp16), нули
-        # разойдутся с fp32-весами копии. Подменяем на явный dtype весов.
+        # Native predict() creates torch.zeros(...) for the first step with the
+        # GLOBAL default dtype — if the environment changed it (e.g. to fp16),
+        # the zeros mismatch the copy's fp32 weights. Use the weights' dtype.
         kit_dtype = next(decoder.parameters()).dtype
         original_predict = decoder.predict
 
@@ -1095,13 +1076,13 @@ class GigaAMEngine(TorchASREngine):
         return self._rnnt_kit
 
     def _forward_single(self, inner: Any, piece: np.ndarray) -> Tuple[Any, Any]:
-        """Forward энкодера на ОДИН кусок: (encoded (1,C,T), length (1,)).
+        """Encoder forward for ONE chunk: (encoded (1,C,T), length (1,)).
 
-        ВАЖНО: именно поштучно, без батч-паддинга. Энкодер GigaAM не полностью
-        маскирует паддинг внутри conv-модулей, поэтому в батче короткие куски
-        «отравляются» нулевым хвостом соседа (замер: до 70% относительной
-        ошибки против поштучного forward) — текст плывёт. Поштучный forward
-        побайтово совпадает с родным prepare_wav+forward модели.
+        IMPORTANT: one by one, no batch padding. The GigaAM encoder does not
+        fully mask padding inside conv modules, so in a batch short chunks are
+        "poisoned" by the neighbor's zero tail (measured: up to 70% relative
+        error vs single forward) — text drifts. Single forward matches the
+        model's native prepare_wav+forward byte for byte.
         """
         import torch
 
@@ -1112,11 +1093,11 @@ class GigaAMEngine(TorchASREngine):
         return inner.forward(wav, length)
 
     def _decode_group(self, inner: Any, kind: str, encoded_items: List[Tuple[Any, Any]]) -> List[str]:
-        """Декодирует список (encoded, length) — по одному на кусок.
+        """Decode a list of (encoded, length) — one per chunk.
 
-        RNNT: проекция joint.enc считается на устройстве модели, дальше greedy-
-        цикл идёт на CPU в несколько потоков (без GPU-синхронизаций на токен).
-        CTC: родной векторизованный декод GigaAM по каждому куску.
+        RNNT: the joint.enc projection runs on the model device, then the
+        greedy loop runs on CPU in several threads (no per-token GPU sync).
+        CTC: GigaAM's native vectorized decode per chunk.
         """
         import torch
 
@@ -1148,9 +1129,9 @@ class GigaAMEngine(TorchASREngine):
         if workers <= 1:
             return [_rnnt_greedy_one(*task) for task in tasks]
 
-        # LSTM-шаг крошечный: внутриоперационный параллелизм torch только
-        # мешает — выключаем его на время декодирования и распараллеливаем
-        # по последовательностям (torch отпускает GIL в своих операциях).
+        # The LSTM step is tiny: intra-op torch parallelism only gets in the
+        # way — disable it for decoding and parallelize across sequences
+        # (torch releases the GIL in its ops).
         previous_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         try:
@@ -1205,8 +1186,8 @@ class GigaAMEngine(TorchASREngine):
         used_fast = False
         if kind:
             if kind == "rnnt":
-                # копии маленьких RNNT-сетей для CPU-декодирования готовим
-                # ЗАРАНЕЕ (вне inference_mode), чтобы тензоры были «обычными»
+                # prepare the small RNNT net copies for CPU decoding IN
+                # ADVANCE (outside inference_mode) so tensors are "normal"
                 self._rnnt_cpu_kit(inner)
             try:
                 self._transcribe_fast(
@@ -1216,10 +1197,9 @@ class GigaAMEngine(TorchASREngine):
                 used_fast = True
             except Exception as exc:  # noqa: BLE001
                 if segments:
-                    # уже есть результат — падать на весь файл из-за быстрого
-                    # пути не стоит, но и молчать нельзя
-                    raise EngineError(f"GigaAM: сбой быстрого пути: {exc}") from exc
-                log.warning("Быстрый путь GigaAM недоступен (%s) — иду последовательным", exc)
+                    # results exist — do not fail the whole file silently
+                    raise EngineError(_("GigaAM: fast path failed: {exc}").format(exc=exc)) from exc
+                log.warning(_("GigaAM fast path unavailable (%s) — falling back to sequential"), exc)
                 if self._is_oom(exc):
                     try:
                         torch.cuda.empty_cache()
@@ -1234,7 +1214,7 @@ class GigaAMEngine(TorchASREngine):
             )
 
         if options.get("word_timestamps"):
-            warnings.append("GigaAM использован без таймкодов слов (режим chunks)")
+            warnings.append(_("GigaAM used without word timestamps (chunks mode)"))
 
         return TranscriptResult(
             segments=segments,
@@ -1261,19 +1241,20 @@ class GigaAMEngine(TorchASREngine):
         if progress:
             progress(
                 min(1.0, end_sample / max(total, 1)),
-                f"Распознаю: {end_sample / SAMPLE_RATE:.0f} с из {duration:.0f} с",
+                _("Recognizing: {done:.0f} s of {total:.0f} s").format(
+                    done=end_sample / SAMPLE_RATE, total=duration),
             )
 
     def _transcribe_fast(
         self, inner, kind, audio, bounds, total, duration,
         segments, warnings, progress, on_segment, cancel,
     ) -> None:
-        """Группами: энкодер ПОКУЧНО (без паддинга!), декод — параллельно.
+        """In groups: encoder ONE BY ONE (no padding!), decoding in parallel.
 
-        Группа из N кусков: сначала N поштучных forward'ов энкодера (точно как
-        в родном пути), затем все N декодируются разом — RNNT в пуле потоков
-        на CPU. Скорость даёт именно параллельный декод без GPU-синхронизаций;
-        батчинг энкодера отключён из-за неполной маскировки паддинга в модели.
+        A group of N chunks: N single encoder forwards (exactly like the
+        native path), then all N decoded at once — RNNT in a CPU thread pool.
+        The speed comes from parallel decoding without GPU sync; encoder
+        batching is off due to incomplete padding masking in the model.
         """
         import torch
 
@@ -1281,7 +1262,7 @@ class GigaAMEngine(TorchASREngine):
         count = len(bounds)
         while index < count:
             if cancel and cancel():
-                warnings.append("Распознавание остановлено пользователем")
+                warnings.append(_("Recognition stopped by user"))
                 return
             take = max(1, min(self._fast_batch, count - index))
             group_bounds = bounds[index: index + take]
@@ -1289,9 +1270,9 @@ class GigaAMEngine(TorchASREngine):
             encoded_items: List[Tuple[Any, Any]] = []
             for start_sample, end_sample in group_bounds:
                 if cancel and cancel():
-                    warnings.append("Распознавание остановлено пользователем")
+                    warnings.append(_("Recognition stopped by user"))
                     return
-                while True:  # OOM: чистим кэш и пробуем ещё раз
+                while True:  # OOM: clear the cache and retry
                     try:
                         with torch.inference_mode():
                             encoded_items.append(
@@ -1301,7 +1282,7 @@ class GigaAMEngine(TorchASREngine):
                     except Exception as exc:  # noqa: BLE001
                         if not self._is_oom(exc):
                             raise
-                        log.warning("GPU не хватило памяти на кусок — очищаю кэш и повторяю")
+                        log.warning(_("GPU ran out of memory for a chunk — clearing cache and retrying"))
                         try:
                             torch.cuda.empty_cache()
                         except Exception:  # noqa: BLE001
@@ -1319,10 +1300,10 @@ class GigaAMEngine(TorchASREngine):
     def _transcribe_stock(
         self, audio, bounds, total, duration, segments, warnings, progress, on_segment, cancel,
     ) -> None:
-        """Запасной путь: родной model.transcribe() по одному куску через WAV.
+        """Fallback path: the native model.transcribe() per chunk via WAV.
 
-        load_audio в модулях модели пропатчен на safe_load_audio, поэтому
-        subprocess/ffmpeg здесь не запускается и консоль не мигает.
+        load_audio in the model modules is patched to safe_load_audio, so no
+        subprocess/ffmpeg is spawned and no console flashes.
         """
         model = self._ensure_model()
         tmp_path: Optional[Path] = None
@@ -1333,13 +1314,13 @@ class GigaAMEngine(TorchASREngine):
 
             for start, end in bounds:
                 if cancel and cancel():
-                    warnings.append("Распознавание остановлено пользователем")
+                    warnings.append(_("Recognition stopped by user"))
                     return
                 write_wav(tmp_path, audio[start:end], SAMPLE_RATE)
                 try:
                     text = model.transcribe(str(tmp_path))
                 except Exception as exc:  # noqa: BLE001
-                    raise EngineError(f"GigaAM не смог распознать фрагмент: {exc}") from exc
+                    raise EngineError(_("GigaAM could not recognize the chunk: {exc}").format(exc=exc)) from exc
                 self._emit(segments, start, end, text, on_segment)
                 self._report(progress, end, total, duration)
         finally:

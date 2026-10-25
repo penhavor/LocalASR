@@ -1,18 +1,19 @@
-# LocalASR — базовые зависимости (ставятся автоматически при первом запуске).
+# LocalASR — base dependencies (installed automatically on first launch).
 #
-# Всё устанавливается СТРОГО внутрь .venv проекта. Системный Python не трогается.
-# Комментарии важны: bootstrap.py читает этот файл как «отпечаток» окружения,
-# поэтому любое изменение = автоматическая доустановка при следующем запуске.
+# Everything is installed STRICTLY into the project environment (bundled
+# runtime/python on Windows, .venv otherwise). The system Python is untouched.
+# bootstrap.py hashes this file as the environment fingerprint: any edit
+# triggers an automatic re-install on the next launch.
 
-# GUI (не Tkinter — как и договаривались)
+# GUI (not Tkinter, by design)
 PySide6>=6.7,<6.13
 
-# Основной движок распознавания: CTranslate2-сборка Whisper (в 4 раза быстрее
-# оригинального openai/whisper, с int8-квантованием и Silero VAD из коробки).
+# Primary recognition engine: CTranslate2 build of Whisper (~4x faster than
+# openai/whisper, with int8 quantization and Silero VAD out of the box).
 faster-whisper>=1.2.0,<1.3
 
-# faster-whisper тянет их сам, но фиксируем явно, чтобы резолвер не поставил
-# несовместимые версии:
+# faster-whisper pulls these itself; pinned explicitly so the resolver cannot
+# install incompatible versions:
 ctranslate2>=4.5,<5
 av>=13.0
 numpy>=1.26,<3
@@ -21,9 +22,9 @@ onnxruntime>=1.17,<2
 huggingface_hub>=0.26
 tqdm>=4.66
 
-# HTTP: скачивание моделей, проверка обновлений каталога
+# HTTP: model downloads, catalog update checks
 requests>=2.31
 
-# ffmpeg: извлечение звука из видео. Пакет содержит готовый бинарник, поэтому
-# системный ffmpeg ставить НЕ нужно (но если он есть в PATH — используется он).
+# ffmpeg: audio extraction from video. The package ships a ready binary, so
+# a system ffmpeg is NOT required (but if present in PATH, it is used).
 imageio-ffmpeg>=0.5.1

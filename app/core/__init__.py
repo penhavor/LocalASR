@@ -1,1 +1,1 @@
-"""Ядро приложения: железо, звук, модели, сеть."""
+"""Application core: hardware, audio, models, network."""

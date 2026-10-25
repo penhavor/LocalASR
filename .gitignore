@@ -1,17 +1,18 @@
-# --- окружение проекта (создаётся bootstrap'ом, в git не нужно) ---
+# --- project environment (created by bootstrap; never committed) ---
 .venv/
 venv/
 env/
 
-# --- пользовательские данные ---
-models/*
-!models/.gitkeep
-outputs/*
-!outputs/.gitkeep
+# --- user data (folders appear on demand while the app runs) ---
+models/
+outputs/
 logs/
 settings/
 .cache/
 *.log
+
+# --- portable runtime: downloaded by RUN.bat on the first run ---
+runtime/
 
 # --- Python ---
 __pycache__/
@@ -26,7 +27,7 @@ dist/
 .coverage
 htmlcov/
 
-# --- ОС / редакторы ---
+# --- OS / editors ---
 .DS_Store
 Thumbs.db
 desktop.ini
@@ -34,6 +35,9 @@ desktop.ini
 .vscode/
 *.swp
 
-# --- артефакты сборки exe (если соберёшь) ---
+# --- dev scratch (not part of the project) ---
+.devtools/
+
+# --- exe build artifacts (if you build one) ---
 *.spec.bak
 release/

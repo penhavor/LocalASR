@@ -1,14 +1,13 @@
-"""Каталог моделей: что можно скачать, сколько весит, какие языки, что советовать.
+"""Model catalog: what can be downloaded, sizes, languages, recommendations.
 
-Каталог лежит в `resources/models_catalog.json` и работает офлайн. При наличии
-сети приложение раз в сутки пытается подтянуть свежую версию, но это не
-обязательное условие работы — всё самое важное есть в локальном файле.
+The catalog lives in resources/models_catalog.json and works offline. When
+online, a fresh copy is fetched at most once a day — optional, everything
+essential is in the local file.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,9 +25,9 @@ from ..constants import (
     ENGINE_QWEN_ASR,
     ENGINE_VOSK,
     ENGINE_WHISPERCPP,
-    ENGINES,
     MODELS_DIRNAME,
 )
+from ..i18n import _
 from ..logutils import get_logger
 
 log = get_logger("catalog")
@@ -37,45 +36,50 @@ META_FILENAME = "installed.json"
 
 
 # --------------------------------------------------------------------------- #
-#  Запись каталога
+#  Catalog entry
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class ModelEntry:
-    id: str                                   # уникальный идентификатор = имя папки в models/
-    name: str                                 # человекочитаемое название
+    id: str                                   # unique id = folder name in models/
+    name: str                                 # human-readable name
     engine: str = ENGINE_FASTER_WHISPER
-    source: str = ""                          # HF-репозиторий, прямой URL или локальный путь
-    subfolder: str = ""                       # подпапка внутри HF-репозитория (ct2_int8_float16 …)
-    revision: str = "main"                    # ветка/тег/коммит HF
-    file: str = ""                            # если модель — один файл (ggml-*.bin, *.zip)
-    size_bytes: Optional[int] = None          # размер при скачивании
-    ram_mb: int = 0                           # потребление памяти в рантайме
-    vram_mb: int = 0                          # потребление VRAM (0 = только CPU)
+    source: str = ""                          # HF repo, direct URL or local path
+    subfolder: str = ""                       # subfolder inside the HF repo (ct2_int8_float16 …)
+    revision: str = "main"                    # HF branch/tag/commit
+    file: str = ""                            # single-file models (ggml-*.bin, *.zip)
+    size_bytes: Optional[int] = None          # download size
+    ram_mb: int = 0                           # runtime RAM usage
+    vram_mb: int = 0                          # VRAM usage (0 = CPU only)
     languages: List[str] = field(default_factory=list)
     languages_note: str = ""
-    quality: int = 3                          # 1..5 — точность
-    speed: int = 3                            # 1..5 — скорость (5 = быстрее всех)
+    quality: int = 3                          # 1..5 accuracy
+    speed: int = 3                            # 1..5 speed (5 = fastest)
     tags: List[str] = field(default_factory=list)
     license: str = ""
     description: str = ""
-    vendor: str = ""                          # кто сделал модель (OpenAI, Qwen, Sber…)
-    params_b: Optional[float] = None          # число параметров, млрд (None = неизвестно)
-    quantization: str = ""                    # формат весов: int8 / float16 / q5_0 / …
-    released_year: int = 0                    # год релиза весов (число; 0 = неизвестно)
-    recommended_for: str = ""                 # короткая приписка «кому подходит»
+    vendor: str = ""                          # model author (OpenAI, Qwen, Sber…)
+    params_b: Optional[float] = None          # parameter count in billions (None = unknown)
+    quantization: str = ""                    # weight format: int8 / float16 / q5_0 / …
+    released_year: int = 0                    # weight release year (0 = unknown)
+    recommended_for: str = ""                 # short "best for" note
     defaults: Dict[str, Any] = field(default_factory=dict)
-    url: str = ""                             # страница модели (кнопка «Открыть»)
+    url: str = ""                             # model page ("Open" button)
 
-    # --- состояние (не относится к каталогу, заполняется при сканировании) -- #
+    # --- runtime state (filled by scanning, not part of the catalog) -------- #
     installed: bool = False
     install_dir: Optional[Path] = None
     installed_size_bytes: int = 0
-    custom: bool = False                      # добавлена пользователем по ссылке
-    local_only: bool = False                  # просто папка в models/, в каталоге её нет
+    custom: bool = False                      # added by the user via link
+    local_only: bool = False                  # a folder in models/ absent from the catalog
 
     # ------------------------------------------------------------------ #
+    @property
+    def display_name(self) -> str:
+        """Localized name for display (catalog names are English msgids)."""
+        return _(self.name)
+
     @property
     def engine_label(self) -> str:
         return ENGINE_LABELS.get(self.engine, self.engine)
@@ -87,12 +91,12 @@ class ModelEntry:
     @property
     def languages_text(self) -> str:
         if self.languages_note:
-            return self.languages_note
+            return _(self.languages_note)
         if not self.languages:
             return "—"
         codes = [str(lang).upper() for lang in self.languages]
         if len(codes) > 6:
-            return ", ".join(codes[:5]) + f" + ещё {len(codes) - 5}"
+            return ", ".join(codes[:5]) + _(" + {} more").format(len(codes) - 5)
         return ", ".join(codes)
 
     @property
@@ -103,19 +107,21 @@ class ModelEntry:
     def memory_text(self) -> str:
         parts = []
         if self.ram_mb:
-            parts.append(f"RAM ≈ {self.ram_mb / 1024:.1f} ГБ".replace(".0 ГБ", " ГБ"))
+            parts.append(_("RAM ≈ {gb:g} {unit}").format(
+                gb=round(self.ram_mb / 1024, 1), unit=_("GB")))
         if self.vram_mb:
-            parts.append(f"VRAM ≈ {self.vram_mb / 1024:.1f} ГБ".replace(".0 ГБ", " ГБ"))
+            parts.append(_("VRAM ≈ {gb:g} {unit}").format(
+                gb=round(self.vram_mb / 1024, 1), unit=_("GB")))
         return " · ".join(parts) or "—"
 
     @property
     def params_text(self) -> str:
-        """Человекочитаемое число параметров: «809 млн», «1.55 млрд»."""
+        """Human-readable parameter count: "809 M", "1.55 B"."""
         if not self.params_b:
             return "—"
         if self.params_b >= 1:
-            return f"{self.params_b:g} млрд"
-        return f"{int(round(self.params_b * 1000))} млн"
+            return _("{:g} B").format(self.params_b)
+        return _("{} M").format(int(round(self.params_b * 1000)))
 
     @property
     def quantization_text(self) -> str:
@@ -139,12 +145,6 @@ class ModelEntry:
     def from_dict(cls, data: Dict[str, Any]) -> "ModelEntry":
         known = set(cls.__dataclass_fields__)  # type: ignore[attr-defined]
         payload = {k: v for k, v in data.items() if k in known}
-        # Старые каталоги/кэши хранили релиз строкой («2023 (актуален в 2026)») —
-        # вытаскиваем оттуда число, чтобы тип поля всегда оставался int.
-        if not payload.get("released_year") and data.get("released"):
-            match = re.search(r"(?:19|20)\d{2}", str(data["released"]))
-            if match:
-                payload["released_year"] = int(match.group(0))
         try:
             payload["released_year"] = int(payload.get("released_year") or 0)
         except (TypeError, ValueError):
@@ -156,14 +156,14 @@ class ModelEntry:
 
 
 # --------------------------------------------------------------------------- #
-#  Определение движка по содержимому
+#  Engine detection by content
 # --------------------------------------------------------------------------- #
 
-#: model_type из config.json -> движок LocalASR
+#: model_type from config.json -> LocalASR engine
 _CONFIG_TYPE_TO_ENGINE = {
     "gigaam": ENGINE_GIGAAM,
     "qwen3_asr": ENGINE_QWEN_ASR,
-    # всё остальное ASR-семейство Hugging Face уходит в универсальный движок
+    # the rest of the Hugging Face ASR family goes to the generic engine
     "whisper": ENGINE_HF,
     "wav2vec2": ENGINE_HF,
     "wav2vec2-bert": ENGINE_HF,
@@ -182,7 +182,7 @@ _CONFIG_TYPE_TO_ENGINE = {
     "distil-whisper": ENGINE_HF,
 }
 
-#: признаки аудио-модели в architectures (для config.json без известного model_type)
+#: audio-model markers in architectures (config.json without a known model_type)
 _AUDIO_ARCH_MARKER = (
     "speech", "asr", "wav2vec", "whisper", "hubert", "conformer", "parakeet",
     "canary", "seamless", "mms", "audio", "ctc", "rnnt", "transducer",
@@ -190,7 +190,7 @@ _AUDIO_ARCH_MARKER = (
 
 
 def engine_from_config(cfg: Any) -> str:
-    """Движок по словарю config.json (transformers-модели). '' — не опознано."""
+    """Engine from a config.json dict (transformers models). "" = not recognized."""
     if not isinstance(cfg, dict):
         return ""
     model_type = str(cfg.get("model_type") or "").lower()
@@ -201,16 +201,16 @@ def engine_from_config(cfg: Any) -> str:
     if any(marker in joined for marker in _AUDIO_ARCH_MARKER):
         return ENGINE_HF
     if isinstance(cfg.get("audio_config"), dict):
-        # мультимодальные модели со звуковым входом (qwen2-audio и т.п.)
+        # multimodal models with an audio input (qwen2-audio etc.)
         return ENGINE_HF
     return ""
 
 
 def detect_engine(folder: Path) -> str:
-    """Определяет движок по файлам в папке модели (или по одному файлу).
+    """Detect the engine by the files in a model folder (or a single file).
 
-    Порядок важен: CT2-сборки Whisper тоже содержат config.json, поэтому
-    сначала ищем их признак — `model.bin`.
+    Order matters: CT2 Whisper builds also contain config.json, so their
+    marker (`model.bin`) is checked first.
     """
     folder = Path(folder)
     if not folder.exists():
@@ -229,14 +229,14 @@ def detect_engine(folder: Path) -> str:
     except OSError:
         return ""
 
-    # 1) CTranslate2 (faster-whisper): model.bin может лежать и в подпапке
+    # 1) CTranslate2 (faster-whisper): model.bin may live in a subfolder
     if "model.bin" in names:
         return ENGINE_FASTER_WHISPER
     for child in folder.iterdir():
         if child.is_dir() and (child / "model.bin").is_file():
             return ENGINE_FASTER_WHISPER
 
-    # 2) transformers-модели: GigaAM, Qwen3-ASR и любые прочие ASR с HF
+    # 2) transformers models: GigaAM, Qwen3-ASR and any other HF ASR
     config = folder / "config.json"
     has_weights = any(
         n.endswith((".safetensors", ".bin", ".pt", ".pth")) and n != "model.bin"
@@ -263,7 +263,7 @@ def detect_engine(folder: Path) -> str:
 
 
 def ct2_subfolder(folder: Path) -> str:
-    """Если CT2-модель лежит в подпапке — вернуть её имя."""
+    """If the CT2 model lives in a subfolder — return its name."""
     folder = Path(folder)
     if (folder / "model.bin").is_file():
         return ""
@@ -277,7 +277,7 @@ def ct2_subfolder(folder: Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  Каталог
+#  Catalog
 # --------------------------------------------------------------------------- #
 
 
@@ -289,7 +289,7 @@ class ModelCatalog:
         self.loaded_from = "built-in"
         self.load()
 
-    # -- загрузка -------------------------------------------------------- #
+    # -- loading ---------------------------------------------------------- #
     def catalog_file(self) -> Optional[Path]:
         return paths.resource_path(CATALOG_FILENAME, self.root)
 
@@ -308,9 +308,9 @@ class ModelCatalog:
                         payload = json.load(fh)
                     if isinstance(payload, dict) and payload.get("models"):
                         data = payload
-                        self.loaded_from = f"кэш сети ({age_hours:.1f} ч назад)"
+                        self.loaded_from = f"network cache ({age_hours:.1f} h old)"
             except (OSError, ValueError) as exc:
-                log.debug("Кэш каталога не читается: %s", exc)
+                log.debug("Catalog cache unreadable: %s", exc)
 
         if data is None:
             local = self.catalog_file()
@@ -322,11 +322,11 @@ class ModelCatalog:
                         data = payload
                         self.loaded_from = str(local)
                 except (OSError, ValueError) as exc:
-                    log.warning("Не удалось прочитать каталог %s: %s", local, exc)
+                    log.warning("Failed to read the catalog %s: %s", local, exc)
 
         if data is None:
             data = {"models": []}
-            self.loaded_from = "каталог не найден (пустой список)"
+            self.loaded_from = "catalog not found (empty list)"
 
         self.entries = {}
         for raw in data.get("models", []) or []:
@@ -335,19 +335,19 @@ class ModelCatalog:
             try:
                 entry = ModelEntry.from_dict(raw)
             except TypeError as exc:
-                log.warning("Пропускаю битую запись каталога %s: %s", raw.get("id"), exc)
+                log.warning("Skipping a broken catalog entry %s: %s", raw.get("id"), exc)
                 continue
             entry.installed = False
             entry.install_dir = None
             self.entries[entry.id] = entry
 
         self.refresh_installed()
-        log.info("Каталог: %d моделей (%s)", len(self.entries), self.loaded_from)
+        log.info(_("Catalog: %d models (%s)"), len(self.entries), self.loaded_from)
 
     def refresh_remote(self, force: bool = False) -> bool:
-        """Пробует обновить каталог из сети. True — если получилось."""
+        """Try to refresh the catalog from the network. True on success."""
         try:
-            from . import net  # локальный импорт: requests нужен не всегда
+            from . import net  # local import: requests is not always needed
         except Exception:  # noqa: BLE001
             return False
 
@@ -367,16 +367,16 @@ class ModelCatalog:
             cache.parent.mkdir(parents=True, exist_ok=True)
             paths.atomic_write_text(cache, json.dumps(payload, ensure_ascii=False))
             self.load()
-            log.info("Каталог обновлён из сети: %d моделей", len(self.entries))
+            log.info(_("Catalog refreshed from the network: %d models"), len(self.entries))
             return True
         except Exception as exc:  # noqa: BLE001
-            log.debug("Обновление каталога из сети недоступно: %s", exc)
+            log.debug("Remote catalog refresh unavailable: %s", exc)
             return False
 
-    # -- сканирование models/ -------------------------------------------- #
+    # -- scanning models/ --------------------------------------------------- #
     def refresh_installed(self) -> None:
-        """Помечает установленные модели и подхватывает папки без метаданных."""
-        # чистим состояние: catalog-записи сбрасываем, «локальные» удаляем
+        """Mark installed models and pick up folders without metadata."""
+        # reset state: catalog entries are cleared, "local" ones removed
         for entry in self.entries.values():
             entry.installed = False
             entry.install_dir = None
@@ -398,29 +398,29 @@ class ModelCatalog:
                     if isinstance(loaded, dict):
                         meta = loaded
                 except (OSError, ValueError) as exc:
-                    log.warning("Битый %s в %s: %s", META_FILENAME, child.name, exc)
-                # установка когда-то завершилась, но маркер снять не удалось —
-                # чистим, чтобы не смущать ни каталог, ни пользователя
+                    log.warning("Broken %s in %s: %s", META_FILENAME, child.name, exc)
+                # an install finished but the marker removal failed — clean it
+                # up so neither the catalog nor the user gets confused
                 try:
                     (child / ".localasr-partial.json").unlink(missing_ok=True)
                 except OSError:
                     pass
 
-            # незавершённая установка (обрыв сети/отмена): маркер есть, а
-            # installed.json нет — такая папка НЕ считается установленной,
-            # иначе GUI предложил бы работать с «полумоделью» без части файлов
+            # incomplete install (network drop/cancel): the marker exists but
+            # installed.json does not — such a folder is NOT installed,
+            # otherwise the GUI would offer a "half model" with missing files
             if not meta and (child / ".localasr-partial.json").is_file():
                 log.warning(
-                    "Пропускаю недокачанную модель %s: установка не была завершена "
-                    "(повторная установка докачает недостающие файлы)",
+                    _("Skipping incompletely downloaded model %s: the install did not "
+                      "finish (reinstalling will resume the missing files)"),
                     child.name,
                 )
                 continue
 
             engine = str(meta.get("engine") or detect_engine(child))
             if not engine:
-                log.debug("Папка %s не похожа на модель — пропускаю", child.name)
-                continue  # папка не похожа на модель — игнорируем
+                log.debug("Folder %s does not look like a model — skipping", child.name)
+                continue  # the folder does not look like a model — ignore
 
             model_id = str(meta.get("id") or child.name)
             entry = self.entries.get(model_id)
@@ -437,7 +437,7 @@ class ModelCatalog:
                     url=str(meta.get("url") or ""),
                     custom=bool(meta.get("custom", not meta)),
                     local_only=not meta,
-                    tags=list(meta.get("tags") or (["локальная"] if not meta else [])),
+                    tags=list(meta.get("tags") or (["local model"] if not meta else [])),
                 )
                 self.entries[model_id] = entry
 
@@ -450,7 +450,7 @@ class ModelCatalog:
             if not entry.size_bytes:
                 entry.size_bytes = entry.installed_size_bytes
 
-    # -- выборки ---------------------------------------------------------- #
+    # -- selections --------------------------------------------------------- #
     def all(self) -> List[ModelEntry]:
         return list(self.entries.values())
 
@@ -459,38 +459,6 @@ class ModelCatalog:
 
     def installed(self) -> List[ModelEntry]:
         return [e for e in self.entries.values() if e.installed]
-
-    def not_installed(self) -> List[ModelEntry]:
-        return [e for e in self.entries.values() if not e.installed]
-
-    def filter(
-        self,
-        engine: str = "",
-        language: str = "",
-        installed_only: bool = False,
-        available_only: bool = False,
-        max_size_bytes: Optional[int] = None,
-        max_ram_mb: Optional[int] = None,
-        russian_only: bool = False,
-    ) -> List[ModelEntry]:
-        result: List[ModelEntry] = []
-        for entry in self.entries.values():
-            if engine and entry.engine != engine:
-                continue
-            if language and language.lower() not in [str(l).lower() for l in entry.languages]:
-                continue
-            if russian_only and not entry.supports_russian:
-                continue
-            if installed_only and not entry.installed:
-                continue
-            if available_only and entry.installed:
-                continue
-            if max_size_bytes and entry.size_bytes and entry.size_bytes > max_size_bytes:
-                continue
-            if max_ram_mb and entry.ram_mb and entry.ram_mb > max_ram_mb:
-                continue
-            result.append(entry)
-        return result
 
     def sorted_for_display(self, entries: Optional[Iterable[ModelEntry]] = None) -> List[ModelEntry]:
         items = list(entries if entries is not None else self.entries.values())
@@ -520,6 +488,3 @@ class ModelCatalog:
             indent=2,
         )
 
-
-def available_engines() -> List[str]:
-    return list(ENGINES)

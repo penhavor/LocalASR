@@ -1,14 +1,14 @@
-# Ускорение NVIDIA GPU (CUDA 12 + cuDNN 9) для движка faster-whisper.
-# Ставится из GUI: Настройки -> Ускорение -> «Включить CUDA» (или вручную:
+# NVIDIA GPU acceleration (CUDA 12 + cuDNN 9) for the faster-whisper engine.
+# Installed from the GUI: Settings -> Speed & hardware / Engines, or manually:
 #   .venv\Scripts\pip install -r requirements/gpu.txt
-# ).
 #
-# ВАЖНО (Windows): помимо этих пакетов нужны системные DLL cuBLAS/cuDNN 9.
-# Самый простой способ — взять готовый архив DLL от Purfview:
+# NOTE (Windows): besides these packages, the system cuBLAS/cuDNN 9 DLLs are
+# required. The easiest source is the ready DLL archive from Purfview:
 #   https://github.com/Purfview/whisper-standalone-win/releases/tag/libs
-# и распаковать его содержимое в папку .venv\Lib\site-packages (или добавить в PATH).
+# unpack its contents into the environment's Lib\site-packages (or add to PATH).
 #
-# Linux: достаточно pip-пакетов ниже + export LD_LIBRARY_PATH (LocalASR сделает сам).
+# Linux: the pip packages below are enough (+ export LD_LIBRARY_PATH,
+# LocalASR does it itself).
 
 nvidia-cublas-cu12>=12.4
 nvidia-cudnn-cu12>=9.1,<10

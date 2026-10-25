@@ -1,15 +1,9 @@
-"""Целостность программы: файлы проекта, папки, пакеты .venv.
+"""Program integrity: project files, folders, environment packages.
 
-Политика простая: программа должна слабо поддаваться деградации.
-  * лёгкие папки (models/, outputs/, logs/, settings/) создаются автоматически —
-    их отсутствие не ошибка;
-  * если удалены файлы самой программы — не падаем, а сообщаем и предлагаем
-    скачать их заново с GitHub (вес — считаные килобайты);
-  * если в .venv не хватает базовых библиотек — предлагаем починить;
-  * если в .venv есть пакеты, которые программе не нужны, — показываем их
-    с размером и предлагаем удалить (исключительно по решению пользователя).
-
-Модуль не импортирует Qt: его одинаково используют GUI-воркеры и CLI.
+Policy: degrade gracefully. Working folders are created on demand; deleted
+program files can be re-downloaded from GitHub; missing base libraries can
+be repaired; unneeded packages are listed with sizes and removed only on
+explicit user choice. The module does not import Qt (used by GUI and CLI).
 """
 
 from __future__ import annotations
@@ -24,6 +18,7 @@ from urllib.parse import quote
 
 from .. import paths
 from ..constants import REPO_RAW_BASE
+from ..i18n import _
 from ..logutils import get_logger
 
 log = get_logger("integrity")
@@ -31,25 +26,25 @@ log = get_logger("integrity")
 ProgressCallback = Callable[[float, str], None]
 CancelToken = Callable[[], bool]
 
-#: Верхнеуровневые дистрибутивы, которые программа ставит сама (база + движки).
-#: Всё, что не здесь и не требуется никем из установленных (pip --not-required),
-#: считается «возможно лишним» — но удаляется ТОЛЬКО по явному выбору пользователя.
+#: Top-level distributions the app installs itself (base + engines).
+#: Anything else that nobody requires (pip --not-required) is "possibly
+#: extra" — removed ONLY on explicit user choice.
 KNOWN_TOP_LEVEL = {
-    # база (requirements/base.txt)
+    # base (requirements/base.txt)
     "pyside6", "pyside6-addons", "pyside6-essentials", "shiboken6",
     "faster-whisper", "ctranslate2", "av", "numpy", "tokenizers",
     "onnxruntime", "huggingface-hub", "tqdm", "requests", "imageio-ffmpeg",
-    # движки по требованию (requirements/extras.txt, engines.json)
+    # on-demand engines (requirements/extras.txt, engines.json)
     "pywhispercpp", "vosk",
     "torch", "torchaudio", "torchvision", "transformers", "accelerate",
     "soundfile", "hydra-core", "omegaconf", "sentencepiece",
     # CUDA
     "triton",
-    # сервис
+    # service
     "pip", "setuptools", "wheel", "uv",
 }
 
-#: префиксы дистрибутивов, которые всегда ожидаемы (CUDA-библиотеки NVIDIA и пр.)
+#: distribution prefixes that are always expected (NVIDIA CUDA libs etc.)
 KNOWN_PREFIXES = ("nvidia-", "cuda-", "cudnn", "localasr")
 
 
@@ -58,26 +53,26 @@ def _normalize(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  Файлы проекта
+#  Project files
 # --------------------------------------------------------------------------- #
 
 
 def _manifest() -> List[str]:
-    """Манифест файлов проекта из bootstrap.py (единый источник истины)."""
+    """Project file manifest from bootstrap.py (single source of truth)."""
     try:
-        root = str(paths.ROOT_DIR)
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        import bootstrap  # noqa: PLC0415 - локальный импорт: bootstrap лежит в корне
+        launcher = str(paths.ROOT_DIR / "launcher")
+        if launcher not in sys.path:
+            sys.path.insert(0, launcher)
+        import bootstrap  # noqa: PLC0415 - local import: bootstrap lives in launcher/
 
         return list(getattr(bootstrap, "PROJECT_FILES", []))
     except Exception as exc:  # noqa: BLE001
-        log.warning("Манифест проекта недоступен: %s", exc)
+        log.warning("Project manifest unavailable: %s", exc)
         return []
 
 
 def missing_project_files(root: Optional[Path] = None) -> List[str]:
-    """Файлы из манифеста, которых нет на диске."""
+    """Manifest files missing on disk."""
     base = Path(root) if root else paths.ROOT_DIR
     missing = []
     for rel in _manifest():
@@ -96,8 +91,8 @@ def restore_files(
     progress: Optional[ProgressCallback] = None,
     cancel: Optional[CancelToken] = None,
 ) -> Tuple[List[str], List[str]]:
-    """Скачивает файлы с GitHub в папку проекта. Возвращает (ok, ошибки)."""
-    from . import net  # локальный импорт: requests нужен не всегда
+    """Download files from GitHub into the project folder. Returns (ok, errors)."""
+    from . import net  # local import: requests is not always needed
 
     base = Path(root) if root else paths.ROOT_DIR
     restored: List[str] = []
@@ -105,7 +100,7 @@ def restore_files(
     total = max(1, len(relpaths))
     for index, rel in enumerate(relpaths):
         if cancel is not None and cancel():
-            failed.append(f"{rel}: отменено")
+            failed.append(_("{rel}: cancelled").format(rel=rel))
             continue
         dest = base / rel
         url = download_url_for(rel)
@@ -114,33 +109,35 @@ def restore_files(
 
             def report(done: int, size: int, speed: float, filename: str, _rel=rel) -> None:
                 if progress is not None:
-                    progress(index / total, f"Скачиваю {_rel}…")
+                    progress(index / total, _("Downloading {rel}…").format(rel=_rel))
 
             net.download_file(url, dest, progress=report, cancel=cancel)
             restored.append(rel)
-            log.info("Восстановлен файл: %s", rel)
+            log.info(_("File restored: %s"), rel)
         except Exception as exc:  # noqa: BLE001
             failed.append(f"{rel}: {exc}")
-            log.warning("Не удалось восстановить %s: %s", rel, exc)
+            log.warning(_("Failed to restore %s: %s"), rel, exc)
         if progress is not None:
-            progress((index + 1) / total, f"{rel} — готово" if rel in restored else f"{rel} — ошибка")
+            progress((index + 1) / total,
+                     _("{rel} — done").format(rel=rel) if rel in restored
+                     else _("{rel} — error").format(rel=rel))
     return restored, failed
 
 
 # --------------------------------------------------------------------------- #
-#  Папки
+#  Folders
 # --------------------------------------------------------------------------- #
 
 
 def folder_status(root: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Состояние рабочих папок. Все они создаются автоматически при нужде."""
+    """Working folder status. All of them are created automatically on demand."""
     base = Path(root) if root else paths.ROOT_DIR
     items = []
     for name, rel, purpose in (
-        ("models/", "models", "скачанные модели"),
-        ("outputs/", "outputs", "результаты распознавания"),
-        ("logs/", "logs", "журналы работы"),
-        ("settings/", "settings", "настройки программы"),
+        ("models/", "models", _("downloaded models")),
+        ("outputs/", "outputs", _("recognition results")),
+        ("logs/", "logs", _("activity logs")),
+        ("settings/", "settings", _("application settings")),
     ):
         path = base / rel
         exists = path.is_dir()
@@ -150,23 +147,23 @@ def folder_status(root: Optional[Path] = None) -> List[Dict[str, Any]]:
                 "path": str(path),
                 "exists": exists,
                 "purpose": purpose,
-                "status": "на месте" if exists else "нет — создастся автоматически",
+                "status": _("present") if exists else _("missing — will be created automatically"),
             }
         )
     return items
 
 
 # --------------------------------------------------------------------------- #
-#  Аудит .venv
+#  Environment audit
 # --------------------------------------------------------------------------- #
 
 
 def _venv_python() -> str:
-    return sys.executable or str(paths.venv_dir() / "Scripts" / "python.exe")
+    return sys.executable or str(paths.env_dir() / "Scripts" / "python.exe")
 
 
 def _run_py(code: str, args: Sequence[str] = (), timeout: int = 120) -> Optional[str]:
-    """Запускает код интерпретатором .venv и возвращает stdout (или None)."""
+    """Run code with the environment interpreter and return stdout (or None)."""
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         out = subprocess.run(
@@ -179,19 +176,19 @@ def _run_py(code: str, args: Sequence[str] = (), timeout: int = 120) -> Optional
             creationflags=creationflags,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("Не удалось запустить проверку в .venv: %s", exc)
+        log.warning("Failed to run the environment check: %s", exc)
         return None
     if out.returncode != 0:
-        log.debug("Проверка в .venv вернула код %s: %s", out.returncode, (out.stderr or "")[-400:])
+        log.debug("Environment check returned code %s: %s", out.returncode, (out.stderr or "")[-400:])
         return None
     return out.stdout or ""
 
 
 def check_base_imports() -> List[str]:
-    """Каких базовых библиотек не хватает (дистрибутивы, как в bootstrap)."""
-    root = str(paths.ROOT_DIR)
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    """Which base libraries are missing (distribution names, like bootstrap)."""
+    launcher = str(paths.ROOT_DIR / "launcher")
+    if launcher not in sys.path:
+        sys.path.insert(0, launcher)
     try:
         import bootstrap
 
@@ -256,11 +253,10 @@ print(json.dumps(out))
 
 
 def find_extra_packages() -> List[Dict[str, Any]]:
-    """Пакеты в .venv, которые не нужны программе (по данным pip --not-required).
+    """Packages the app does not need (per pip --not-required).
 
-    «Не нужен» = никем из установленных пакетов не требуется И отсутствует в
-    списке известных программе дистрибутивов. Транзитивные зависимости сюда не
-    попадают: pip помечает их как требуемые.
+    "Not needed" = required by nobody AND absent from the known distribution
+    list. Transitive deps never land here: pip marks them as required.
     """
     out = _run_py(
         "import json,subprocess,sys\n"
@@ -272,7 +268,7 @@ def find_extra_packages() -> List[Dict[str, Any]]:
     if not out:
         return []
     try:
-        # pip может печатать предупреждения до JSON — ищем первую '['
+        # pip may print warnings before the JSON — find the first '['
         start = out.find("[")
         leaves = json.loads(out[start:]) if start >= 0 else []
     except ValueError:
@@ -313,9 +309,9 @@ def find_extra_packages() -> List[Dict[str, Any]]:
 
 
 def uninstall_packages(names: Sequence[str]) -> Tuple[bool, str]:
-    """pip uninstall -y (строго в .venv). Возвращает (ok, вывод)."""
+    """pip uninstall -y (strictly inside the project env). Returns (ok, output)."""
     if not names:
-        return True, "Нечего удалять"
+        return True, _("Nothing to delete")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         out = subprocess.run(
@@ -328,13 +324,13 @@ def uninstall_packages(names: Sequence[str]) -> Tuple[bool, str]:
             creationflags=creationflags,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"Не удалось запустить pip: {exc}"
+        return False, _("Failed to run pip: {exc}").format(exc=exc)
     text = (out.stdout or "") + (out.stderr or "")
     return out.returncode == 0, text[-2000:]
 
 
 def full_audit() -> Dict[str, Any]:
-    """Полный отчёт для GUI-диагностики (вызывается из фонового воркера)."""
+    """Full report for GUI diagnostics (called from a background worker)."""
     return {
         "python": _venv_python(),
         "missing_files": missing_project_files(),

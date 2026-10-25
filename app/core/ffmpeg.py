@@ -1,13 +1,8 @@
-"""Работа со звуком: поиск ffmpeg, чтение метаданных, декодирование в 16 кГц моно.
+"""Audio handling: find ffmpeg, read metadata, decode to 16 kHz mono.
 
-Видео-файлы «тупо переводятся в звук»: нам нужна только аудиодорожка, поэтому
-декодирование идёт через пайп (`-f f32le`) — без промежуточных WAV на диске.
-
-Порядок поиска декодера:
-  1. системный ffmpeg (самый быстрый, поддерживает всё);
-  2. бинарник из пакета imageio-ffmpeg (ставится вместе с приложением — работает
-     всегда, даже если в системе ffmpeg нет);
-  3. PyAV (чистый Python-биндинг, запасной вариант для экзотики).
+Only the audio track is needed, so decoding goes through a pipe (`-f f32le`)
+without intermediate WAV files. Decoder lookup order: system ffmpeg ->
+imageio-ffmpeg bundled binary -> PyAV fallback.
 """
 
 from __future__ import annotations
@@ -23,6 +18,7 @@ from typing import Callable, List, Optional
 
 from .. import paths
 from ..constants import DECODER_TIMEOUT_PER_HOUR, SAMPLE_RATE
+from ..i18n import _
 from ..logutils import get_logger
 
 log = get_logger("audio")
@@ -35,22 +31,22 @@ _FFMPEG_CACHE: dict[str, Optional[str]] = {}
 
 
 class AudioError(RuntimeError):
-    """Не удалось получить звук из файла."""
+    """Failed to get audio from a file."""
 
 
 # --------------------------------------------------------------------------- #
-#  Поиск ffmpeg
+#  Finding ffmpeg
 # --------------------------------------------------------------------------- #
 
 
 def find_ffmpeg() -> Optional[str]:
-    """Путь к ffmpeg (кэшируется). None — если не нашли вообще ничего."""
+    """Path to ffmpeg (cached). None when nothing was found."""
     if "ffmpeg" in _FFMPEG_CACHE:
         return _FFMPEG_CACHE["ffmpeg"]
 
     exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
 
-    # 1) рядом с проектом (если пользователь положил свой бинарник)
+    # 1) next to the project (a user-provided binary)
     for candidate in (
         paths.ROOT_DIR / "bin" / exe,
         paths.ROOT_DIR / exe,
@@ -60,23 +56,23 @@ def find_ffmpeg() -> Optional[str]:
             _FFMPEG_CACHE["ffmpeg"] = str(candidate)
             return str(candidate)
 
-    # 2) системный
+    # 2) system
     found = shutil.which("ffmpeg")
     if found:
         _FFMPEG_CACHE["ffmpeg"] = found
         return found
 
-    # 3) из пакета imageio-ffmpeg
+    # 3) from the imageio-ffmpeg package
     try:
         import imageio_ffmpeg  # type: ignore
 
         bundled = imageio_ffmpeg.get_ffmpeg_exe()
         if bundled and os.path.isfile(bundled):
             _FFMPEG_CACHE["ffmpeg"] = bundled
-            log.info("Используется ffmpeg из пакета imageio-ffmpeg: %s", bundled)
+            log.info(_("Using ffmpeg from the imageio-ffmpeg package: %s"), bundled)
             return bundled
     except Exception as exc:  # noqa: BLE001
-        log.debug("imageio-ffmpeg недоступен: %s", exc)
+        log.debug("imageio-ffmpeg unavailable: %s", exc)
 
     _FFMPEG_CACHE["ffmpeg"] = None
     return None
@@ -97,16 +93,16 @@ def find_ffprobe() -> Optional[str]:
 def ffmpeg_version() -> str:
     exe = find_ffmpeg()
     if not exe:
-        return "не найден"
+        return _("not found")
     try:
         kwargs: dict = {"capture_output": True, "text": True, "timeout": 15}
         if IS_WINDOWS:
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         out = subprocess.run([exe, "-version"], **kwargs)
         first = (out.stdout or "").splitlines()
-        return first[0] if first else "неизвестно"
+        return first[0] if first else _("unknown")
     except (OSError, subprocess.SubprocessError):
-        return "не удалось определить"
+        return _("could not determine")
 
 
 def has_ffmpeg() -> bool:
@@ -124,14 +120,14 @@ def _popen_kwargs() -> dict:
 
 
 # --------------------------------------------------------------------------- #
-#  Метаданные
+#  Metadata
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class MediaInfo:
     path: Path
-    duration: float = 0.0          # секунды
+    duration: float = 0.0          # seconds
     size_bytes: int = 0
     audio_streams: int = 0
     video_streams: int = 0
@@ -147,7 +143,7 @@ class MediaInfo:
 
 
 def probe(path: str | Path) -> MediaInfo:
-    """Быстрое чтение длительности/потоков. Не декодирует звук целиком."""
+    """Fast duration/stream probe. Does not decode the whole audio."""
     path = Path(path)
     info = MediaInfo(path=path)
     try:
@@ -196,9 +192,9 @@ def probe(path: str | Path) -> MediaInfo:
                 if info.duration > 0 and info.audio_streams > 0:
                     return info
         except Exception as exc:  # noqa: BLE001
-            log.debug("ffprobe не справился с %s: %s", path.name, exc)
+            log.debug("ffprobe failed on %s: %s", path.name, exc)
 
-    # запасной путь: парсим stderr самого ffmpeg
+    # fallback: parse ffmpeg's own stderr
     ffmpeg = find_ffmpeg()
     if ffmpeg:
         try:
@@ -229,12 +225,12 @@ def probe(path: str | Path) -> MediaInfo:
                 layout = rate.group(2)
                 info.channels = 2 if "stereo" in layout else 1 if "mono" in layout else 0
             if info.audio_streams == 0:
-                info.error = "В файле нет аудиодорожки"
+                info.error = _("The file has no audio track")
             return info
         except Exception as exc:  # noqa: BLE001
-            log.debug("ffmpeg -i не справился с %s: %s", path.name, exc)
+            log.debug("ffmpeg -i failed on %s: %s", path.name, exc)
 
-    # последний вариант — PyAV
+    # last resort — PyAV
     try:
         import av  # type: ignore
 
@@ -249,15 +245,15 @@ def probe(path: str | Path) -> MediaInfo:
                 info.sample_rate = int(stream.codec_context.sample_rate or 0)
                 info.channels = int(stream.codec_context.channels or 0)
             if info.audio_streams == 0:
-                info.error = "В файле нет аудиодорожки"
+                info.error = _("The file has no audio track")
         return info
     except Exception as exc:  # noqa: BLE001
-        info.error = f"Не удалось прочитать файл: {exc}"
+        info.error = _("Failed to read the file: {exc}").format(exc=exc)
         return info
 
 
 # --------------------------------------------------------------------------- #
-#  Декодирование
+#  Decoding
 # --------------------------------------------------------------------------- #
 
 
@@ -267,20 +263,20 @@ def decode_audio(
     cancel: Optional[CancelToken] = None,
     progress: Optional[Callable[[float], None]] = None,
 ) -> "object":
-    """Возвращает numpy-массив float32, 1 канал, `sample_rate` Гц.
+    """Return a float32 numpy array, mono, `sample_rate` Hz.
 
-    Бросает AudioError, если звук получить не удалось.
+    Raises AudioError when the audio cannot be obtained.
     """
 
     path = Path(path)
     if not path.is_file():
-        raise AudioError(f"Файл не найден: {path}")
+        raise AudioError(_("File not found: {path}").format(path=path))
 
     info = probe(path)
     if info.error and info.audio_streams == 0:
         raise AudioError(info.error)
     if info.audio_streams == 0 and not info.is_video:
-        raise AudioError("В файле нет аудиодорожки")
+        raise AudioError(_("The file has no audio track"))
 
     ffmpeg = find_ffmpeg()
     if ffmpeg:
@@ -289,9 +285,9 @@ def decode_audio(
                 ffmpeg, path, sample_rate, cancel, progress, info.duration
             )
         except AudioError as exc:
-            log.warning("ffmpeg не смог декодировать %s: %s — пробую PyAV", path.name, exc)
+            log.warning(_("ffmpeg could not decode %s: %s — trying PyAV"), path.name, exc)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Сбой ffmpeg на %s: %s — пробую PyAV", path.name, exc)
+            log.warning(_("ffmpeg failed on %s: %s — trying PyAV"), path.name, exc)
 
     return _decode_with_av(path, sample_rate, cancel, progress, info.duration)
 
@@ -312,9 +308,9 @@ def _decode_with_ffmpeg(
         "-hide_banner",
         "-loglevel", "error",
         "-i", str(path),
-        "-vn",                     # отбрасываем видео — нужен только звук
-        "-sn", "-dn",              # и субтитры/данные
-        "-map", "0:a:0",           # первая аудиодорожка
+        "-vn",                     # drop video — only audio is needed
+        "-sn", "-dn",              # and subtitles/data
+        "-map", "0:a:0",           # first audio track
         "-f", "f32le",
         "-acodec", "pcm_f32le",
         "-ac", "1",
@@ -322,7 +318,7 @@ def _decode_with_ffmpeg(
         "pipe:1",
     ]
 
-    log.info("Декодирую звук: %s", path.name)
+    log.info(_("Decoding audio: %s"), path.name)
     log.debug("ffmpeg cmd: %s", " ".join(cmd))
     proc = subprocess.Popen(
         cmd,
@@ -339,7 +335,7 @@ def _decode_with_ffmpeg(
         while True:
             if cancel is not None and cancel():
                 proc.kill()
-                raise AudioError("Декодирование отменено пользователем")
+                raise AudioError(_("Decoding cancelled by user"))
             block = proc.stdout.read(1024 * 512)
             if not block:
                 break
@@ -353,7 +349,7 @@ def _decode_with_ffmpeg(
             _, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             proc.kill()
-            raise AudioError(f"ffmpeg не завершился за {timeout} с (файл повреждён?)") from exc
+            raise AudioError(_("ffmpeg did not finish in {t} s (file corrupted?)").format(t=timeout)) from exc
     finally:
         if proc.poll() is None:
             try:
@@ -369,19 +365,19 @@ def _decode_with_ffmpeg(
 
     if proc.returncode not in (0, None) and total_bytes == 0:
         message = (stderr or b"").decode("utf-8", "replace").strip()
-        raise AudioError(message or f"ffmpeg вернул код {proc.returncode}")
+        raise AudioError(message or _("ffmpeg returned code {code}").format(code=proc.returncode))
 
     if total_bytes == 0:
         message = (stderr or b"").decode("utf-8", "replace").strip()
-        raise AudioError(message or "ffmpeg не вернул аудиоданные (в файле нет звука?)")
+        raise AudioError(message or _("ffmpeg returned no audio data (no sound in the file?)"))
 
     audio = np.frombuffer(b"".join(chunks), dtype=np.float32)
     if audio.size == 0:
-        raise AudioError("Пустая аудиодорожка")
-    # защита от NaN/inf в битых файлах
+        raise AudioError(_("Empty audio track"))
+    # guard against NaN/inf in broken files
     if not np.all(np.isfinite(audio)):
         audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
-    log.info("Декодировано %.1f мин звука (%.1f МБ)", audio.size / sample_rate / 60, audio.nbytes / 1e6)
+    log.info(_("Decoded %.1f min of audio (%.1f MB)"), audio.size / sample_rate / 60, audio.nbytes / 1e6)
     return audio
 
 
@@ -398,27 +394,26 @@ def _decode_with_av(
         import av  # type: ignore
     except Exception as exc:  # noqa: BLE001
         raise AudioError(
-            "Не найден рабочий декодер звука. Установи ffmpeg или пакет av: "
-            f"{exc}"
+            _("No working audio decoder found. Install ffmpeg or the av package: {exc}").format(exc=exc)
         ) from exc
 
     try:
         container = av.open(str(path))
     except Exception as exc:  # noqa: BLE001
-        raise AudioError(f"PyAV не смог открыть файл: {exc}") from exc
+        raise AudioError(_("PyAV could not open the file: {exc}").format(exc=exc)) from exc
 
     try:
         if not container.streams.audio:
-            raise AudioError("В файле нет аудиодорожки")
+            raise AudioError(_("The file has no audio track"))
         stream = container.streams.audio[0]
-        stream.thread_type = "AUTO"  # многопоточное декодирование
+        stream.thread_type = "AUTO"  # multithreaded decoding
 
         resampler = av.AudioResampler(format="flt", layout="mono", rate=sample_rate)
         pieces: List["np.ndarray"] = []
         decoded = 0
         for frame in container.decode(stream):
             if cancel is not None and cancel():
-                raise AudioError("Декодирование отменено пользователем")
+                raise AudioError(_("Decoding cancelled by user"))
             for out_frame in resampler.resample(frame):
                 array = out_frame.to_ndarray()
                 if array.ndim > 1:
@@ -427,19 +422,19 @@ def _decode_with_av(
                 decoded += array.size
                 if progress is not None and duration > 0:
                     progress(min(1.0, (decoded / sample_rate) / duration))
-        for out_frame in resampler.resample(None):  # «хвост» ресемплера
+        for out_frame in resampler.resample(None):  # resampler tail
             array = out_frame.to_ndarray().reshape(-1)
             pieces.append(array.astype(np.float32, copy=False))
 
         if not pieces:
-            raise AudioError("PyAV не получил аудиоданные")
+            raise AudioError(_("PyAV got no audio data"))
         audio = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
         audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
         return np.ascontiguousarray(audio, dtype=np.float32)
     except AudioError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise AudioError(f"Ошибка декодирования (PyAV): {exc}") from exc
+        raise AudioError(_("Decoding error (PyAV): {exc}").format(exc=exc)) from exc
     finally:
         try:
             container.close()

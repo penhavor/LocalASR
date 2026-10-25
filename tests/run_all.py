@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Единый раннер тестов LocalASR.
+"""Unified LocalASR test runner.
 
-Запускает КАЖДЫЙ tests/test_*.py в отдельном процессе (изоляция Qt/torch/
-состояния модулей), собирает результаты и печатает сводку. Модули, которым
-не хватает тяжёлых зависимостей (torch/PySide6/transformers/…), помечаются
-SKIP — это не ошибка: базовые тесты не требуют ничего кроме numpy.
+Runs EVERY tests/test_*.py in a separate process (Qt/torch/module-state
+isolation), collects the results and prints a summary. Modules missing heavy
+dependencies (torch/PySide6/transformers/…) are marked SKIP — not an error:
+the base tests need nothing but numpy.
 
-Запуск:
-    cd <корень проекта> && python tests/run_all.py            # все тесты
-    cd <корень проекта> && python tests/run_all.py --list     # список
-    cd <корень проекта> && python tests/run_all.py --only net,logging
+Usage:
+    cd <project root> && python tests/run_all.py            # all tests
+    cd <project root> && python tests/run_all.py --list     # list
+    cd <project root> && python tests/run_all.py net,logging
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent
 
-# маркеры «не хватает зависимости» — такие модули считаем пропущенными
+# "missing dependency" markers — such modules count as skipped
 SKIP_MARKERS = ("ModuleNotFoundError", "ImportError", "DLL load failed")
 
 TIMEOUT_SECONDS = int(os.environ.get("LOCALASR_TEST_TIMEOUT", "900"))
@@ -58,18 +58,18 @@ def run_one(path: Path) -> tuple[str, float, str]:
         output = (proc.stdout or "") + (proc.stderr or "")
         code = proc.returncode
     except subprocess.TimeoutExpired:
-        return "FAIL", time.time() - started, f"таймаут {TIMEOUT_SECONDS} с"
+        return "FAIL", time.time() - started, f"timeout after {TIMEOUT_SECONDS} s"
 
     elapsed = time.time() - started
     if code == 0:
-        status = "SKIP" if ("пропущен" in output.lower() and "✓" not in output) else "OK"
+        status = "SKIP" if ("SKIP:" in output and "✓" not in output) else "OK"
         return status, elapsed, output
-    if any(marker in output for marker in SKIP_MARKERS) and "ПРОВАЛЕНО" not in output:
+    if any(marker in output for marker in SKIP_MARKERS) and "FAILED" not in output:
         first = next(
             (line for line in output.splitlines() if any(m in line for m in SKIP_MARKERS)),
             "",
         )
-        return "SKIP", elapsed, f"не хватает зависимости: {first.strip()[:120]}"
+        return "SKIP", elapsed, f"missing dependency: {first.strip()[:120]}"
     tail = "\n".join(output.strip().splitlines()[-25:])
     return "FAIL", elapsed, tail
 
@@ -88,10 +88,10 @@ def main() -> int:
         tests = [p for p in tests if any(w in p.stem.lower() for w in wanted)]
 
     if not tests:
-        print("Тесты не найдены.")
+        print("No tests found.")
         return 2
 
-    print(f"LocalASR: запуск {len(tests)} тестовых модулей (python {sys.version.split()[0]})")
+    print(f"LocalASR: running {len(tests)} test modules (python {sys.version.split()[0]})")
     print("=" * 72)
 
     results: list[tuple[str, str, float]] = []
@@ -101,20 +101,20 @@ def main() -> int:
         if status == "FAIL":
             print(output)
         results.append((path.name, status, elapsed))
-        print(f"    [{status}] {path.name} за {elapsed:.1f} с")
+        print(f"    [{status}] {path.name} in {elapsed:.1f} s")
 
     print("\n" + "=" * 72)
-    print("СВОДКА")
+    print("SUMMARY")
     ok = sum(1 for _, s, _ in results if s == "OK")
     failed = [name for name, s, _ in results if s == "FAIL"]
     skipped = [name for name, s, _ in results if s == "SKIP"]
     for name, status, elapsed in results:
-        print(f"  {status:4}  {name:38} {elapsed:6.1f} с")
-    print(f"\nИтого: {ok} OK, {len(failed)} FAIL, {len(skipped)} SKIP")
+        print(f"  {status:4}  {name:38} {elapsed:6.1f} s")
+    print(f"\nTotal: {ok} OK, {len(failed)} FAIL, {len(skipped)} SKIP")
     if failed:
-        print("Провалены: " + ", ".join(failed))
+        print("Failed: " + ", ".join(failed))
         return 1
-    print("ВСЕ ТЕСТЫ ПРОЙДЕНЫ")
+    print("ALL TESTS PASSED")
     return 0
 
 

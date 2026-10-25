@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Контрактный тест быстрого пути GigaAM без реальных весов.
+"""GigaAM fast-path contract test without real weights.
 
-Прогоняет GigaAMEngine._decode_group (CTC и RNNT) на фейковых объектах,
-которые повторяют КОНТРАКТ modeling_gigaam.py ОБЕИХ поколений:
-  * старое:  decoding.decode(...) -> List[str]
-  * новое:   decoding.decode(...) -> List[Tuple[str, token_ids, token_frames]]
-Если быстрый путь начнёт стринговать кортежи (баг 2026-10-24: в файл падало
-«('текст', [45, 33, …])»), тест упадёт.
+Runs GigaAMEngine._decode_group (CTC and RNNT) on fake objects mirroring
+the modeling_gigaam.py contract of BOTH generations:
+  * old:  decoding.decode(...) -> List[str]
+  * new:  decoding.decode(...) -> List[Tuple[str, token_ids, token_frames]]
+If the fast path ever stringifies tuples (repr leaking into result files),
+this test fails.
 
-Запуск:  cd <корень проекта> && python tests/test_gigaam_decode.py
-Нужен только CPU-torch:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+Run:  cd <project root> && python tests/test_gigaam_decode.py
+Needs CPU torch only:  pip install torch --index-url https://download.pytorch.org/whl/cpu
 """
 from __future__ import annotations
 
@@ -27,18 +27,18 @@ from app.asr.torch_engines import GigaAMEngine, decode_item_text  # noqa: E402
 
 ENC_DIM = 4
 JOINT_DIM = 8
-NUM_CLASSES = 5          # 4 символа + blank
+NUM_CLASSES = 5          # 4 symbols + blank
 BLANK_ID = NUM_CLASSES - 1
 FRAMES = 12
 
 
 # --------------------------------------------------------------------------- #
-#  Феки, повторяющие структуру modeling_gigaam.py
+#  Fakes mirroring the modeling_gigaam.py structure
 # --------------------------------------------------------------------------- #
 
 
 class FakeTokenizer:
-    """Словарь из 4 «символов»; decode склеивает без разделителей."""
+    """A 4-"character" vocabulary; decode joins without separators."""
 
     VOCAB = ["а", "б", "в", "г"]
 
@@ -50,13 +50,13 @@ class FakeTokenizer:
 
 
 class FakeCTCDecoding:
-    """CTC-декод в двух контрактах: строки (старый) и кортежи (новый)."""
+    """CTC decode in two contracts: strings (old) and tuples (new)."""
 
     def __init__(self, contract: str) -> None:
         self.contract = contract
         self.tokenizer = FakeTokenizer()
         self.blank_id = BLANK_ID
-        self._n = 0   # сквозной счётчик кусков (в каждом encoded batch=1)
+        self._n = 0   # running chunk counter (each encoded batch=1)
 
     @torch.inference_mode()
     def decode(self, head, encoded, lengths):
@@ -108,7 +108,7 @@ class FakeRNNTHead(nn.Module):
 
 
 class FakeCTCHead:
-    """Для CTC head только передаётся в decode — содержимое не важно."""
+    """For CTC the head is only passed into decode — contents do not matter."""
 
 
 def make_inner(kind: str, contract: str = "tuple"):
@@ -126,7 +126,7 @@ def make_inner(kind: str, contract: str = "tuple"):
 
 
 def encoded_items(batch: int = 2):
-    """Энкодер GigaAM отдаёт (B, D, T) — channels-first, как в modeling."""
+    """The GigaAM encoder returns (B, D, T) — channels-first, as in modeling."""
     items = []
     for _ in range(batch):
         encoded = torch.randn(1, ENC_DIM, FRAMES)
@@ -136,7 +136,7 @@ def encoded_items(batch: int = 2):
 
 
 # --------------------------------------------------------------------------- #
-#  Тесты
+#  Tests
 # --------------------------------------------------------------------------- #
 
 
@@ -149,35 +149,35 @@ def test_decode_item_text_contract() -> None:
 
 
 def test_ctc_new_contract_tuples() -> None:
-    """Новое поколение: кортежи -> в текст идёт ТОЛЬКО строковая часть."""
+    """New generation: tuples -> only the string part reaches the text."""
     engine = GigaAMEngine()
     texts = engine._decode_group(make_inner("ctc", "tuple"), "ctc", encoded_items())
     assert texts == ["фраза кусок 0", "фраза кусок 1"], texts
     for text in texts:
-        assert "(" not in text and "[" not in text, f"repr протёк в текст: {text!r}"
+        assert "(" not in text and "[" not in text, f"repr leaked into the text: {text!r}"
 
 
 def test_ctc_old_contract_strings() -> None:
-    """Старое поколение: голые строки по-прежнему работают."""
+    """Old generation: bare strings still work."""
     engine = GigaAMEngine()
     texts = engine._decode_group(make_inner("ctc", "str"), "ctc", encoded_items())
     assert texts == ["фраза кусок 0", "фраза кусок 1"], texts
 
 
 def test_rnnt_fast_path_runs() -> None:
-    """RNNT: быстрый CPU-декод на фейках новой структуры даёт строки символов."""
+    """RNNT: fast CPU decode on new-structure fakes yields character strings."""
     torch.manual_seed(0)
     engine = GigaAMEngine()
     texts = engine._decode_group(make_inner("rnnt"), "rnnt", encoded_items(batch=2))
     assert len(texts) == 2
     for text in texts:
         assert isinstance(text, str)
-        assert "(" not in text and "[" not in text, f"repr протёк в текст: {text!r}"
+        assert "(" not in text and "[" not in text, f"repr leaked into the text: {text!r}"
         assert all(ch in FakeTokenizer.VOCAB for ch in text), text
 
 
 def test_emit_segments_clean() -> None:
-    """Сегменты, уходящие в постобработку/файл, не содержат repr-мусора."""
+    """Segments going into post-processing/files carry no repr junk."""
     from app.core.postprocess import Segment
 
     engine = GigaAMEngine()
@@ -193,13 +193,13 @@ def test_emit_segments_clean() -> None:
 
 if __name__ == "__main__":
     test_decode_item_text_contract()
-    print("  ✓ decode_item_text: кортежи и строки")
+    print("  ✓ decode_item_text: tuples and strings")
     test_ctc_new_contract_tuples()
-    print("  ✓ CTC (новый контракт, кортежи) -> чистый текст")
+    print("  ✓ CTC (new contract, tuples) -> clean text")
     test_ctc_old_contract_strings()
-    print("  ✓ CTC (старый контракт, строки) -> чистый текст")
+    print("  ✓ CTC (old contract, strings) -> clean text")
     test_rnnt_fast_path_runs()
-    print("  ✓ RNNT быстрый путь -> строки без repr-мусора")
+    print("  ✓ RNNT fast path -> strings without repr junk")
     test_emit_segments_clean()
-    print("  ✓ сегменты в постобработку чистые")
-    print("\nКОНТРАКТНЫЙ ТЕСТ GIGAM ПРОЙДЕН")
+    print("  ✓ segments into post-processing are clean")
+    print("\nGIGAAM CONTRACT TEST PASSED")

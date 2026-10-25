@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Тесты UI-поведения LocalASR (задачи 1–4 + тумблер логов).
+"""LocalASR UI behavior tests (offscreen, real Qt widgets).
 
-Offscreen-проверки (реальные виджеты Qt, без показа на экране):
-  * колёсико мыши над QComboBox/QSpinBox НЕ меняет значение, а прокручивает
-    страницу (wheel guard);
-  * открытый выпадающий список комбо колёсиком листается (значения кликом);
-  * панель фильтров каталога сворачивается/разворачивается, состояние
-    сохраняется в settings.json (collapsed), на кнопке виден счётчик;
-  * у журнала (log_view) НЕТ всплывающей подсказки;
-  * верхнеуровневые меню (Файлы/Модели/Сервис/Справка) имеют подсказки;
-  * неактивный пункт «Выгрузить модель из памяти» отключён, а тема содержит
-    стиль QMenu::item:disabled (серый вид);
-  * тумблер «Вести подробный лог-файл» в настройках создаёт лог СРАЗУ
-    (без перезапуска) и выключает запись при снятии галочки.
+  * the mouse wheel over QComboBox/QSpinBox does NOT change the value but
+    scrolls the page (wheel guard);
+  * an open combo popup is scrolled by the wheel (values change on click);
+  * the catalog filter panel collapses/expands, the state is saved in
+    settings.json (collapsed) and the button shows an active-filter counter;
+  * the journal (log_view) has NO tooltip;
+  * top-level menus (File/Models/Tools/Help) have tooltips;
+  * the disabled "Unload the model from memory" item is inactive and the
+    theme contains the QMenu::item:disabled style (gray look);
+  * the "Keep a verbose log file" toggle in settings creates the log
+    IMMEDIATELY (no restart) and stops writing when unchecked.
 
-Запуск:  cd <корень проекта> && QT_QPA_PLATFORM=offscreen python tests/test_ui_behaviors.py
+Run:  cd <project root> && QT_QPA_PLATFORM=offscreen python tests/test_ui_behaviors.py
 """
 from __future__ import annotations
 
@@ -30,6 +29,10 @@ os.environ.pop("LOCALASR_LOG", None)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+from app import i18n  # noqa: E402
+
+i18n.init("ru")  # stable UI language for widget-text assertions
 
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
@@ -72,7 +75,7 @@ def make_wheel(widget: QWidget, delta: int = 120) -> QWheelEvent:
 
 
 def test_wheel_guard() -> None:
-    print("== колёсико не меняет значения (wheel guard) ==")
+    print("== the wheel does not change values (wheel guard) ==")
     from app.ui.wheelguard import install_wheel_guard
 
     guard = install_wheel_guard(app)
@@ -101,32 +104,32 @@ def test_wheel_guard() -> None:
         host.show()
         app.processEvents()
 
-        # колесо над комбо: значение НЕ меняется
+        # wheel over the combo: the value does NOT change
         before_index = combo.currentIndex()
         QApplication.sendEvent(combo, make_wheel(combo, -120))
         app.processEvents()
         check(combo.currentIndex() == before_index,
-              f"комбо: значение не изменилось колесом (осталось {combo.currentIndex()})")
+              f"combo: wheel did not change the value (still {combo.currentIndex()})")
 
-        # колесо над спинбоксом: значение НЕ меняется
+        # wheel over the spinbox: the value does NOT change
         before_value = spin.value()
         QApplication.sendEvent(spin, make_wheel(spin, 120))
         QApplication.sendEvent(spin, make_wheel(spin, -120))
         app.processEvents()
-        check(spin.value() == before_value, f"спинбокс: значение не изменилось (осталось {spin.value()})")
+        check(spin.value() == before_value, f"spinbox: value unchanged (still {spin.value()})")
 
-        # событие прокрутки доходит до scroll area (страница листается)
+        # the scroll event reaches the scroll area (the page scrolls)
         bar = scroll.verticalScrollBar()
         bar.setValue(0)
         QApplication.sendEvent(combo, make_wheel(combo, -240))
         app.processEvents()
-        check(bar.value() > 0, f"страница прокрутилась колесом над комбо (bar={bar.value()})")
+        check(bar.value() > 0, f"the page scrolled via the wheel over the combo (bar={bar.value()})")
 
-        # явный выбор мышью/клавиатурой по-прежнему работает
+        # explicit mouse/keyboard selection still works
         combo.setCurrentIndex(2)
-        check(combo.currentIndex() == 2, "явная смена значения работает")
+        check(combo.currentIndex() == 2, "explicit value change works")
         spin.stepUp()
-        check(spin.value() == before_value + 1, "стрелки спинбокса работают")
+        check(spin.value() == before_value + 1, "spinbox arrows work")
         host.close()
     finally:
         app.removeEventFilter(guard)
@@ -134,7 +137,7 @@ def test_wheel_guard() -> None:
 
 
 def test_filters_collapse() -> None:
-    print("== сворачивание фильтров каталога ==")
+    print("== catalog filter collapsing ==")
     from app.core.models_catalog import ModelCatalog
     from app.settings import Settings
     from app.ui.models_panel import ModelListPanel
@@ -146,39 +149,39 @@ def test_filters_collapse() -> None:
         panel.show()
         app.processEvents()
 
-        check(panel.filters_frame.isVisible(), "по умолчанию фильтры РАСКРЫТЫ")
-        check("▾" in panel.filters_toggle.text(), "кнопка показывает «▾ Фильтры»")
+        check(panel.filters_frame.isVisible(), "filters are EXPANDED by default")
+        check("▾" in panel.filters_toggle.text(), "the button shows ▾ Filters")
 
         panel.filters_toggle.click()
         app.processEvents()
-        check(not panel.filters_frame.isVisible(), "после клика фильтры свёрнуты")
-        check("▸" in panel.filters_toggle.text(), "кнопка показывает «▸»")
-        check(settings.catalog_filters.get("collapsed") is True, "состояние сохранено в настройках")
+        check(not panel.filters_frame.isVisible(), "after the click filters are collapsed")
+        check("▸" in panel.filters_toggle.text(), "the button shows ▸")
+        check(settings.catalog_filters.get("collapsed") is True, "state saved in settings")
 
-        # счётчик активных фильтров на свёрнутой кнопке
+        # active-filter counter on the collapsed button
         panel.engine_filter.setCurrentIndex(1)
         panel._apply_filters()
         app.processEvents()
         check("(1)" in panel.filters_toggle.text(),
-              f"на кнопке виден счётчик активных фильтров: {panel.filters_toggle.text()!r}")
+              f"the button shows the active-filter counter: {panel.filters_toggle.text()!r}")
 
-        # новая панель с теми же настройками — фильтры свёрнуты
+        # a new panel with the same settings — filters collapsed
         panel2 = ModelListPanel(catalog, {}, settings=settings)
         panel2.show()
         app.processEvents()
-        check(not panel2.filters_frame.isVisible(), "свёрнутое состояние переживает перезапуск")
+        check(not panel2.filters_frame.isVisible(), "the collapsed state survives a restart")
         panel2.close()
 
-        # разворот обратно
+        # expand back
         panel.filters_toggle.click()
         app.processEvents()
-        check(panel.filters_frame.isVisible(), "повторный клик раскрывает фильтры")
-        check(settings.catalog_filters.get("collapsed") is False, "состояние «раскрыто» сохранено")
+        check(panel.filters_frame.isVisible(), "a second click expands the filters")
+        check(settings.catalog_filters.get("collapsed") is False, "the expanded state is saved")
         panel.close()
 
 
 def test_window_tweaks() -> None:
-    print("== главное окно: тултипы и «Выгрузить модель» ==")
+    print("== main window: tooltips and Unload model ==")
     from app.core.models_catalog import ModelCatalog
     from app.settings import Settings
     from app.ui import theme
@@ -192,16 +195,16 @@ def test_window_tweaks() -> None:
         win.show()
         app.processEvents()
 
-        # журнал БЕЗ подсказки (не отвлекает)
-        check(not win.log_view.toolTip(), "у журнала нет всплывающей подсказки")
+        # the journal has NO tooltip (does not distract)
+        check(not win.log_view.toolTip(), "the journal has no tooltip")
 
-        # верхнеуровневые меню имеют подсказки
+        # top-level menus have tooltips
         menus = {a.text(): a for a in win.menuBar().actions()}
         for title in ("Файлы", "Модели", "Сервис", "Справка"):
             action = menus.get(title)
-            check(action is not None and bool(action.toolTip()), f"меню «{title}» имеет подсказку")
+            check(action is not None and bool(action.toolTip()), f"menu {title} has a tooltip")
 
-        # все пункты меню (кроме разделителей) — с подсказками
+        # all menu items (except separators) have tooltips
         empty = []
         for title, action in menus.items():
             menu = action.menu()
@@ -212,23 +215,23 @@ def test_window_tweaks() -> None:
                     continue
                 if not item.toolTip():
                     empty.append(f"{title} → {item.text()}")
-        check(not empty, f"у всех пунктов меню есть подсказки {empty or ''}")
+        check(not empty, f"all menu items have tooltips {empty or ''}")
 
-        # «Выгрузить модель из памяти»: неактивна без модели + серый стиль в теме
-        check(not win.unload_action.isEnabled(), "«Выгрузить модель» неактивна без загруженной модели")
+        # "Unload the model from memory": inactive without a model + gray theme style
+        check(not win.unload_action.isEnabled(), "Unload model is inactive without a loaded model")
         css = theme.stylesheet()
-        check("QMenu::item:disabled" in css, "в теме есть стиль неактивного пункта меню")
+        check("QMenu::item:disabled" in css, "the theme has the disabled-menu-item style")
         check("color: #4d566b" in css.replace("color:#4d566b", "color: #4d566b"),
-              "неактивные пункты меню серые")
+              "disabled menu items are gray")
 
-        # подсказка журнала на доке тоже пустая
-        check(not win.log_dock.toolTip(), "у дока журнала нет подсказки")
+        # the journal dock tooltip is empty too
+        check(not win.log_dock.toolTip(), "the journal dock has no tooltip")
         win.close()
         app.processEvents()
 
 
 def test_settings_dialog_logging_toggle() -> None:
-    print("== тумблер логов в настройках действует сразу ==")
+    print("== the settings log toggle applies immediately ==")
     from app.settings import Settings
     from app.ui.dialogs import SettingsDialog
 
@@ -238,10 +241,10 @@ def test_settings_dialog_logging_toggle() -> None:
         settings = Settings.load(root)
         dialog = SettingsDialog(settings, {}, None)
 
-        check(hasattr(dialog, "file_logging_check"), "в настройках есть вкладка журнала")
-        check(not dialog.file_logging_check.isChecked(), "по умолчанию логирование выключено")
+        check(hasattr(dialog, "file_logging_check"), "settings have the logging tab")
+        check(not dialog.file_logging_check.isChecked(), "logging is off by default")
 
-        # включение -> файл появляется СРАЗУ
+        # enabling -> the file appears IMMEDIATELY
         import app.paths as app_paths
 
         original_root = app_paths.ROOT_DIR
@@ -250,16 +253,16 @@ def test_settings_dialog_logging_toggle() -> None:
             dialog.file_logging_check.setChecked(True)
             app.processEvents()
             current = logutils.current_log_file()
-            check(current is not None and current.is_file(), f"лог создан сразу: {current and current.name}")
-            check(current is not None and current.parent == root / "logs", "лог лежит в logs/ проекта")
-            check(settings.file_logging is True, "настройка file_logging сохранена")
-            check((root / "settings" / "settings.json").is_file(), "settings.json записан")
+            check(current is not None and current.is_file(), f"log created immediately: {current and current.name}")
+            check(current is not None and current.parent == root / "logs", "the log lives in the project logs/")
+            check(settings.file_logging is True, "the file_logging setting is saved")
+            check((root / "settings" / "settings.json").is_file(), "settings.json written")
 
             dialog.file_logging_check.setChecked(False)
             app.processEvents()
-            check(logutils.current_log_file() is None, "после выключения запись прекращена")
-            check(settings.file_logging is False, "настройка обновилась на False")
-            check(current is not None and current.is_file(), "сам файл лога остался на диске")
+            check(logutils.current_log_file() is None, "writing stops after disabling")
+            check(settings.file_logging is False, "the setting updated to False")
+            check(current is not None and current.is_file(), "the log file itself stays on disk")
         finally:
             app_paths.ROOT_DIR = original_root
             logutils.disable_file_logging(final_note=False)
@@ -273,19 +276,19 @@ def main() -> int:
     test_settings_dialog_logging_toggle()
     print()
     if failures:
-        print(f"ПРОВАЛЕНО: {len(failures)}")
+        print(f"FAILED: {len(failures)}")
         for item in failures:
             print("  -", item)
         return 1
-    print("ТЕСТ UI-ПОВЕДЕНИЯ ПРОЙДЕН")
+    print("UI BEHAVIOR TEST PASSED")
     return 0
 
 
 if __name__ == "__main__":
     code = main()
-    # Qt-объекты без родителя в offscreen-режиме могут разрушить кучу при
-    # GC-разборе во время выхода интерпретатора (segfault ПОСЛЕ успешных
-    # проверок). Результаты уже напечатаны — выходим немедленно.
+    # Parentless Qt objects in offscreen mode may corrupt the heap during
+    # GC teardown at interpreter exit (a segfault AFTER successful checks).
+    # The results are printed — exit immediately.
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)

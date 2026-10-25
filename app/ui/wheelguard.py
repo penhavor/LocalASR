@@ -1,18 +1,14 @@
-"""Защита от случайной смены значений колёсиком мыши.
+"""Guard against accidental value changes with the mouse wheel.
 
-Проблема: наведённый курсор + прокрутка колеса меняли выбранное значение
-QComboBox / QSpinBox / QDoubleSpinBox. Пользователь, пролистывая страницу
-или каталог моделей, случайно превращал «Русский» в «Румынский», а
-«beam 5» в «beam 8».
+Problem: hovering + wheel scrolling changed the selected value of
+QComboBox / QSpinBox / QDoubleSpinBox — scrolling a page could turn
+"Russian" into "Romanian" or "beam 5" into "beam 8".
 
-Решение: глобальный (application-level) фильтр событий. Колесо над
-комбо/спинбоксом НЕ меняет значение, а передаётся родительскому виджету —
-то есть работает как обычная прокрутка страницы (навигация). Значение
-меняется только явным действием: кликом по пункту списка, стрелками
-спинбокса или вводом с клавиатуры.
-
-Открытый выпадающий список комбо (popup) фильтром не затрагивается: там
-колесо листает сами пункты — это навигация, значение меняется только кликом.
+Solution: an application-level event filter. The wheel over a combo/spin
+does NOT change the value; it is forwarded to the parent scroll area (plain
+navigation). Values change only via explicit actions: clicking an item,
+spin arrows or keyboard input. An open combo popup is not affected: there
+the wheel scrolls the items, which is navigation too.
 """
 
 from __future__ import annotations
@@ -39,11 +35,10 @@ def _popup_is_open(combo: QComboBox) -> bool:
 
 
 def _scroll_target(widget: QWidget) -> Optional[QWidget]:
-    """Ближайшая прокручиваемая область вверх по дереву (её viewport).
+    """Nearest scrollable area up the tree (its viewport).
 
-    Отправленное программно wheel-событие Qt вверх НЕ передаёт (в отличие от
-    «спонтанных» событий мыши), поэтому ищем QScrollArea/QListWidget/… сами —
-    колесо над комбо прокручивает страницу, а не меняет значение.
+    Qt does not propagate programmatically sent wheel events upwards, so we
+    find the QScrollArea/QListWidget/… ourselves.
     """
     parent = widget.parentWidget()
     while parent is not None:
@@ -57,7 +52,7 @@ def _scroll_target(widget: QWidget) -> Optional[QWidget]:
 
 
 def _clone_for_parent(event: QWheelEvent, source: QWidget, target: QWidget) -> Optional[QWheelEvent]:
-    """Копия wheel-события с координатами, пересчитанными для родителя."""
+    """Copy of the wheel event with coordinates remapped for the parent."""
     try:
         global_pos = source.mapToGlobal(event.position().toPoint())
         local = QPointF(target.mapFromGlobal(global_pos))
@@ -77,17 +72,17 @@ def _clone_for_parent(event: QWheelEvent, source: QWidget, target: QWidget) -> O
 
 
 class WheelGuard(QObject):
-    """Фильтр событий приложения: колесо над combo/spin = прокрутка страницы."""
+    """Application event filter: wheel over combo/spin = page scrolling."""
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         try:
             if event.type() != QEvent.Type.Wheel:
                 return False
             if isinstance(obj, QAbstractSpinBox):
-                pass    # спинбоксы блокируем всегда
+                pass    # spin boxes are always blocked
             elif isinstance(obj, QComboBox):
                 if _popup_is_open(obj):
-                    return False    # открытый список листается колесом — ок
+                    return False    # an open popup is wheel-scrollable — fine
             else:
                 return False
 
@@ -97,13 +92,13 @@ class WheelGuard(QObject):
                 if clone is not None:
                     QApplication.sendEvent(parent, clone)
             event.accept()
-            return True     # исходное событие съедаем: значение не меняется
+            return True     # swallow the original event: the value stays
         except RuntimeError:
-            return False    # объект Qt уже удалён
+            return False    # the Qt object is already deleted
 
 
 def install_wheel_guard(app: QApplication) -> WheelGuard:
-    """Ставит фильтр на приложение. Ссылку нужно держать живой (родитель = app)."""
+    """Install the filter on the app. Keep the reference alive (parent = app)."""
     guard = WheelGuard(app)
     app.installEventFilter(guard)
     return guard

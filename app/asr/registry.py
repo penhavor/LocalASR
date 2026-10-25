@@ -1,7 +1,7 @@
-"""Реестр движков: кэш загруженной модели и информация о железе.
+"""Engine registry: loaded-model cache and hardware info.
 
-Модель грузится один раз и переиспользуется для всех файлов очереди —
-это главный источник скорости при пакетной обработке папки лекций.
+The model is loaded once and reused for the whole queue — the main speed
+source when batch-processing a folder of lectures.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from ..constants import (
     ENGINE_WHISPERCPP,
 )
 from ..core.models_catalog import ModelEntry
+from ..i18n import _
 from ..logutils import get_logger
 from .base import (
     ASREngine,
@@ -50,15 +51,15 @@ def engine_class(engine: str) -> type:
     try:
         return ENGINE_CLASSES[engine]
     except KeyError:
-        raise EngineError(
-            f"Неизвестный движок «{engine}». Поддерживаются: {', '.join(ENGINE_CLASSES)}"
-        ) from None
+        raise EngineError(_(
+            "Unknown engine \"{engine}\". Supported: {list}"
+        ).format(engine=engine, list=", ".join(ENGINE_CLASSES))) from None
 
 
 def engine_available(engine: str) -> bool:
     try:
-        # движок могли только что установить из GUI — сбрасываем кэш импортёров,
-        # иначе find_spec() не увидит свежие пакеты до перезапуска
+        # the engine may have just been installed from the GUI — invalidate
+        # importer caches, otherwise find_spec() misses fresh packages
         import importlib
 
         importlib.invalidate_caches()
@@ -75,7 +76,7 @@ def missing_engine_packages(engine: str) -> List[str]:
 
 def ref_from_entry(entry: ModelEntry) -> ModelRef:
     if not entry.install_dir:
-        raise EngineError(f"Модель «{entry.name}» не установлена")
+        raise EngineError(_("Model \"{name}\" is not installed").format(name=entry.name))
     meta_subfolder = ""
     if entry.install_dir.is_dir():
         from ..core.downloader import load_meta
@@ -104,7 +105,7 @@ class EngineRegistry:
 
     # ------------------------------------------------------------------ #
     def hardware(self, refresh: bool = False) -> Dict[str, Any]:
-        """Сводка по железу (кэшируется: nvidia-smi дёргать каждый раз дорого)."""
+        """Hardware summary (cached: calling nvidia-smi every time is costly)."""
         with self._lock:
             if self._hardware_cache is not None and not refresh:
                 return dict(self._hardware_cache)
@@ -134,7 +135,7 @@ class EngineRegistry:
         with self._lock:
             self._hardware_cache = data
             self._hardware_raw = info
-        log.debug("Железо определено: %s", data)
+        log.debug("Hardware detected: %s", data)
         return dict(data)
 
     def hardware_info(self) -> Any:
@@ -143,11 +144,11 @@ class EngineRegistry:
 
     # ------------------------------------------------------------------ #
     def get(self, entry: ModelEntry, settings: Optional[Dict[str, Any]] = None) -> ASREngine:
-        """Возвращает ЗАГРУЖЕННЫЙ движок под модель (переиспользует кэш).
+        """Return a LOADED engine for the model (reuses the cache).
 
-        Загрузка выполняется ВНЕ `_lock` (под отдельным `_load_lock`): иначе
-        любой GUI-вызов hardware() на время загрузки модели (десятки секунд)
-        блокировал бы интерфейс.
+        Loading happens OUTSIDE `_lock` (under a separate `_load_lock`):
+        otherwise any GUI hardware() call would block the interface for the
+        tens of seconds the model loads.
         """
         settings = dict(settings or {})
         ref = ref_from_entry(entry)
@@ -158,11 +159,11 @@ class EngineRegistry:
                 and self._engine_model_id == ref.model_id
                 and self._engine.name == ref.engine
             ):
-                log.debug("Реестр: %s уже загружена — переиспользую движок %s", ref.name, ref.engine)
+                log.debug("Registry: %s already loaded — reusing engine %s", ref.name, ref.engine)
                 return self._engine
 
         with self._load_lock:
-            # double-check: пока ждали _load_lock, движок мог загрузить сосед
+            # double-check: a neighbor thread may have loaded the engine
             with self._lock:
                 if (
                     self._engine is not None
@@ -176,9 +177,9 @@ class EngineRegistry:
             if stale is not None:
                 try:
                     stale.unload()
-                    log.info("Предыдущая модель выгружена (%s)", stale.name)
+                    log.info(_("Previous model unloaded (%s)"), stale.name)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("Не удалось выгрузить предыдущую модель: %s", exc)
+                    log.warning(_("Failed to unload the previous model: %s"), exc)
 
             cls = engine_class(ref.engine)
             engine: ASREngine = cls()
@@ -193,9 +194,9 @@ class EngineRegistry:
                     "gpu_index": int(settings.get("gpu_index") or 0),
                 }
             )
-            log.info("Загружаю движок %s для модели %s", ref.engine, ref.name)
+            log.info(_("Loading engine %s for model %s"), ref.engine, ref.name)
             log.debug(
-                "Параметры загрузки: path=%s subfolder=%r device=%s compute=%s threads=%s gpu_index=%s",
+                "Load params: path=%s subfolder=%r device=%s compute=%s threads=%s gpu_index=%s",
                 ref.path, ref.subfolder, hardware.get("device"), hardware.get("compute_type"),
                 hardware.get("cpu_threads"), hardware.get("gpu_index"),
             )
@@ -205,14 +206,14 @@ class EngineRegistry:
             except EngineNotInstalled:
                 raise
             except (ImportError, ModuleNotFoundError) as exc:
-                # Код модели (trust_remote_code) потребовал библиотеку, которой
-                # нет в .venv: превращаем стектрейс в понятный диалог установки.
+                # Model code (trust_remote_code) needs a library missing from
+                # the env: turn the traceback into a clear install dialog.
                 converted = engine_not_installed_from_exc(ref.engine, exc)
                 if converted is not None:
-                    log.warning("Движку %s не хватает модуля: %s", ref.engine, exc)
+                    log.warning(_("Engine %s is missing a module: %s"), ref.engine, exc)
                     raise converted from exc
                 raise
-            log.debug("Движок %s загружен за %.1f с", ref.engine, time.time() - load_started)
+            log.debug(_("Engine %s loaded in %.1f s"), ref.engine, time.time() - load_started)
             with self._lock:
                 self._engine = engine
                 self._engine_model_id = ref.model_id
@@ -233,9 +234,9 @@ class EngineRegistry:
         if engine is not None:
             try:
                 engine.unload()
-                log.info("Модель выгружена из памяти (%s)", engine.name)
+                log.info(_("Model unloaded from memory (%s)"), engine.name)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось корректно выгрузить модель: %s", exc)
+                log.warning(_("Failed to unload the model cleanly: %s"), exc)
 
     def ensure_engine_installed(self, engine: str) -> None:
         if not engine_available(engine):
@@ -246,17 +247,17 @@ registry = EngineRegistry()
 
 
 # --------------------------------------------------------------------------- #
-#  Отдельные экземпляры движка для параллельной обработки нескольких файлов
+#  Per-thread engine instances for parallel file processing
 # --------------------------------------------------------------------------- #
 
 _thread_local = threading.local()
 
 
 def thread_engine(entry: ModelEntry, settings: Optional[Dict[str, Any]] = None) -> ASREngine:
-    """Движок, привязанный к текущему потоку (для parallel_files > 1).
+    """Engine bound to the current thread (for parallel_files > 1).
 
-    У каждого потока своя загруженная модель: CTranslate2/whisper.cpp не любят,
-    когда один объект дёргают из нескольких потоков одновременно.
+    Each thread gets its own loaded model: CTranslate2/whisper.cpp dislike
+    one object being pulled from several threads at once.
     """
     settings = dict(settings or {})
     cache: Dict[str, ASREngine] = getattr(_thread_local, "engines", None) or {}
@@ -278,7 +279,7 @@ def thread_engine(entry: ModelEntry, settings: Optional[Dict[str, Any]] = None) 
             "gpu_index": int(settings.get("gpu_index") or 0),
         }
     )
-    log.info("[поток %s] загружаю %s для %s", threading.current_thread().name, ref.engine, ref.name)
+    log.info(_("[thread %s] loading %s for %s"), threading.current_thread().name, ref.engine, ref.name)
     try:
         engine.load(ref, hardware)
     except EngineNotInstalled:
@@ -299,5 +300,5 @@ def release_thread_engines() -> None:
         try:
             engine.unload()
         except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось выгрузить потоковую модель: %s", exc)
+            log.warning(_("Failed to unload a thread-local model: %s"), exc)
     _thread_local.engines = {}

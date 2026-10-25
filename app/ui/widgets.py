@@ -1,4 +1,4 @@
-"""Переиспользуемые виджеты: список файлов, карточка модели, диалог прогресса."""
+"""Reusable widgets: file list, model card, helpers."""
 
 from __future__ import annotations
 
@@ -25,12 +25,8 @@ from PySide6.QtWidgets import (
 from .. import paths
 from ..constants import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from ..core.models_catalog import ModelEntry
+from ..i18n import _
 from . import compat
-
-
-# --------------------------------------------------------------------------- #
-#  Мелочи
-# --------------------------------------------------------------------------- #
 
 
 def make_label(text: str, object_name: str = "", word_wrap: bool = False) -> QLabel:
@@ -42,18 +38,17 @@ def make_label(text: str, object_name: str = "", word_wrap: bool = False) -> QLa
 
 
 def open_in_file_manager(path: Path | str) -> None:
-    """Открывает папку в системном проводнике (или выделяет файл)."""
+    """Open a folder in the system file manager (or reveal a file)."""
     path = Path(path)
     target = path if path.is_dir() else path.parent
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
 
 class ToolTipMenu(QMenu):
-    """Меню, у которого подсказки пунктов показываются при наведении курсора.
+    """Menu whose item tooltips appear on hover.
 
-    Штатный Qt показывает toolTip пункта меню не на всех платформах/стилях —
-    здесь делаем это явно, чтобы наведение на «Диагностика и восстановление…»
-    или «Выгрузить модель из памяти» всегда давало пояснение.
+    Stock Qt shows menu item tooltips only on some platforms/styles — this
+    makes tooltips work everywhere.
     """
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -91,10 +86,9 @@ def chip(text: str, object_name: str = "BadgeEngine") -> QLabel:
 
 
 class FlowLayout(QLayout):
-    """Компоновка с переносом строк (как flex-wrap в CSS).
+    """Line-wrapping layout (like CSS flex-wrap).
 
-    Нужна, чтобы чипсы/галочки/кнопки не обрезались краем панели в узком окне,
-    а аккуратно переносились на следующую строку.
+    Keeps chips/checkboxes/buttons from being clipped in a narrow panel.
     """
 
     def __init__(self, parent: Optional[QWidget] = None, margin: int = 0, spacing: int = 6) -> None:
@@ -103,7 +97,7 @@ class FlowLayout(QLayout):
         self._spacing = spacing
         self._items: list = []
 
-    # -- обязательные переопределения QLayout ----------------------------- #
+    # -- required QLayout overrides ------------------------------------------ #
     def addItem(self, item) -> None:  # noqa: N802
         self._items.append(item)
 
@@ -144,7 +138,7 @@ class FlowLayout(QLayout):
         size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
         return size
 
-    # -- собственная логика ------------------------------------------------ #
+    # -- own logic ------------------------------------------------------------- #
     def spacing_for(self) -> int:
         if self._spacing >= 0:
             return self._spacing
@@ -182,12 +176,12 @@ class FlowLayout(QLayout):
 
 
 # --------------------------------------------------------------------------- #
-#  Список файлов
+#  File list
 # --------------------------------------------------------------------------- #
 
 
 class FileListWidget(QListWidget):
-    """Список медиафайлов с drag&drop и кнопкой удаления у каждой строки."""
+    """Media file list with drag&drop and a per-row remove button."""
 
     filesChanged = Signal()
 
@@ -200,9 +194,9 @@ class FileListWidget(QListWidget):
         self.setHorizontalScrollBarPolicy(compat.SCROLLBAR_ALWAYS_OFF)
         self._known: set[str] = set()
 
-    # -- публичное API ---------------------------------------------------- #
+    # -- public API ------------------------------------------------------------ #
     def add_paths(self, items: Iterable[str]) -> int:
-        """Добавляет файлы и папки (папки раскрываются рекурсивно). Возвращает кол-во новых."""
+        """Add files and folders (folders expand recursively). Returns new count."""
         expanded = paths.expand_media_inputs(items)
         added = 0
         for path in expanded:
@@ -247,7 +241,7 @@ class FileListWidget(QListWidget):
             self.takeItem(self.row(item))
         self.filesChanged.emit()
 
-    # -- внутреннее ------------------------------------------------------- #
+    # -- internal ---------------------------------------------------------------- #
     def _append_row(self, path: Path) -> None:
         item = QListWidgetItem()
         item.setData(compat.ROLE_USER, str(path))
@@ -257,8 +251,7 @@ class FileListWidget(QListWidget):
         item.setSizeHint(widget.sizeHint())
         self.addItem(item)
         self.setItemWidget(item, widget)
-        # Qt иногда оставляет item-виджету старую высоту (текст строк наезжает
-        # друг на друга) — принудительно синхронизируем размеры после_layout
+        # Qt sometimes keeps a stale row height (texts overlap) — force-sync
         widget.setMinimumHeight(widget.sizeHint().height())
         QTimer.singleShot(0, lambda: self._sync_row(item, widget))
 
@@ -303,7 +296,7 @@ class FileListWidget(QListWidget):
         self._known.discard(key)
         self.filesChanged.emit()
 
-    # -- drag & drop ------------------------------------------------------ #
+    # -- drag & drop --------------------------------------------------------------- #
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if self._urls_from(event):
             event.acceptProposedAction()
@@ -331,7 +324,7 @@ class FileListWidget(QListWidget):
 
 
 class FileRow(QFrame):
-    """Строка списка: иконка, имя, путь, размер/длительность, крестик."""
+    """List row: icon, name, path, size, remove button."""
 
     removeRequested = Signal(object)
 
@@ -369,7 +362,7 @@ class FileRow(QFrame):
 
         remove = QToolButton()
         remove.setText("✕")
-        remove.setToolTip("Убрать из списка")
+        remove.setToolTip(_("Remove from the list"))
         remove.setCursor(compat.CURSOR_POINTING_HAND)
         remove.setAutoRaise(True)
         remove.setStyleSheet(
@@ -396,12 +389,12 @@ class FileRow(QFrame):
 
 
 # --------------------------------------------------------------------------- #
-#  Карточка модели
+#  Model card
 # --------------------------------------------------------------------------- #
 
 
 class ModelCard(QFrame):
-    """Карточка одной модели: название, размер, память, языки, кнопки."""
+    """Card of one model: name, size, memory, languages, buttons."""
 
     downloadRequested = Signal(object)      # ModelEntry
     selectRequested = Signal(object)
@@ -420,18 +413,18 @@ class ModelCard(QFrame):
 
     def _update_card_tooltip(self) -> None:
         if self.entry.installed:
-            self.setToolTip(
-                "Клик по карточке (или кнопка «Выбрать для работы») — использовать эту "
-                "модель для кнопки «РАБОТАТЬ». Выбранная модель видна в статус-баре внизу."
-            )
+            self.setToolTip(_(
+                "Click the card (or \"Select for work\") — use this model for the RUN "
+                "button. The selected model is shown in the status bar below."
+            ))
         else:
-            self.setToolTip(
-                "Клик по карточке — подробности о модели. "
-                "Кнопка «Скачать» — скачать модель в папку models/."
-            )
+            self.setToolTip(_(
+                "Click the card for model details. "
+                "The Download button saves the model into models/."
+            ))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        """Клик по карточке = выбрать установленную модель (или открыть инфо)."""
+        """Click = select an installed model (or open info)."""
         if self.entry.installed:
             self.selectRequested.emit(self.entry)
         else:
@@ -444,73 +437,73 @@ class ModelCard(QFrame):
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(7)
 
-        # --- строка 1: название + бейджи
+        # row 1: name + badges
         top = QHBoxLayout()
         top.setSpacing(8)
-        self.title = QLabel(self.entry.name)
+        self.title = QLabel(self.entry.display_name)
         self.title.setObjectName("H2")
         self.title.setWordWrap(True)
         top.addWidget(self.title, stretch=1)
 
         if self.entry.installed:
-            top.addWidget(chip("✓ установлена", "BadgeInstalled"))
+            top.addWidget(chip(_("✓ installed"), "BadgeInstalled"))
         root.addLayout(top)
 
-        # --- строка 2: чипы характеристик (переносятся, а не обрезаются)
+        # row 2: feature chips (wrap instead of clipping)
         chips = FlowLayout(spacing=6)
-        chips.addWidget(chip(self.entry.engine_label))
+        chips.addWidget(chip(_(self.entry.engine_label)))
         chips.addWidget(chip(f"⬇ {self.entry.size_text}", "BadgeEngine"))
         memory = self.entry.memory_text
         if memory != "—":
             chips.addWidget(chip(f"🧠 {memory}", "BadgeEngine"))
         if self.entry.params_b:
-            params_chip = chip(f"⚖ {self.entry.params_text} параметров", "BadgeEngine")
-            params_chip.setToolTip("Число обучаемых параметров модели")
+            params_chip = chip(_("⚖ {} parameters").format(self.entry.params_text), "BadgeEngine")
+            params_chip.setToolTip(_("Number of trainable model parameters"))
             chips.addWidget(params_chip)
         if self.entry.quantization:
             quant_chip = chip(f"🗜 {self.entry.quantization_text}", "BadgeEngine")
-            quant_chip.setToolTip(
-                "Формат хранения весов (квантование).\n"
-                "int8/q5_0 — компактнее и быстрее, чуть менее точно;\n"
-                "float16/bfloat16 — полный формат качества."
-            )
+            quant_chip.setToolTip(_(
+                "Weight storage format (quantization).\n"
+                "int8/q5_0 — smaller and faster, slightly less accurate;\n"
+                "float16/bfloat16 — full quality format."
+            ))
             chips.addWidget(quant_chip)
         if self.entry.released_year:
             year_chip = chip(f"📅 {self.entry.released_year}", "BadgeEngine")
-            year_chip.setToolTip("Год выпуска весов модели")
+            year_chip.setToolTip(_("Model weight release year"))
             chips.addWidget(year_chip)
         for tag in self.entry.tags[:3]:
-            chips.addWidget(chip(tag, "BadgeEngine"))
+            chips.addWidget(chip(_(tag), "BadgeEngine"))
         root.addLayout(chips)
 
-        # --- строка 3: языки + качество/скорость
+        # row 3: languages + quality/speed
         meta = FlowLayout(spacing=12)
         languages = QLabel(f"🌐 {self.entry.languages_text}")
         languages.setObjectName("Dim")
         languages.setWordWrap(True)
         meta.addWidget(languages)
 
-        quality = QLabel(f"<span style='color:#98a2b3'>точность</span> <span style='color:#f2b544'>{stars(self.entry.quality)}</span>")
-        speed = QLabel(f"<span style='color:#98a2b3'>скорость</span> <span style='color:#3ecf8e'>{stars(self.entry.speed)}</span>")
+        quality = QLabel(_("<span style='color:#98a2b3'>accuracy</span> <span style='color:#f2b544'>{}</span>").format(stars(self.entry.quality)))
+        speed = QLabel(_("<span style='color:#98a2b3'>speed</span> <span style='color:#3ecf8e'>{}</span>").format(stars(self.entry.speed)))
         meta.addWidget(quality)
         meta.addWidget(speed)
         root.addLayout(meta)
 
-        # --- строка 4: предупреждение про память
+        # row 4: memory warning
         warning = self._memory_warning()
         if warning:
             self.warn_label = chip(warning, "BadgeWarn")
             self.warn_label.setWordWrap(True)
             root.addWidget(self.warn_label)
 
-        # --- строка 5: краткое описание
+        # row 5: short description
         self.description = QLabel(self._short_description())
         self.description.setObjectName("Dim")
         self.description.setWordWrap(True)
         self.description.setTextFormat(compat.TEXT_FORMAT_RICH)
         root.addWidget(self.description)
 
-        # --- строка 6: прогресс загрузки
+        # row 6: download progress
         self.progress = QProgressBar()
         self.progress.setObjectName("Subtle")
         self.progress.setRange(0, 1000)
@@ -525,7 +518,7 @@ class ModelCard(QFrame):
         self.progress_label.setWordWrap(True)
         root.addWidget(self.progress_label)
 
-        # --- строка 7: кнопки
+        # row 7: buttons
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         buttons.addStretch(1)
@@ -533,28 +526,27 @@ class ModelCard(QFrame):
         self.info_button = QPushButton("ℹ")
         self.info_button.setObjectName("InfoButton")
         self.info_button.setFixedSize(30, 30)
-        self.info_button.setToolTip(
-            "Подробности о модели: полное описание, источник, лицензия, языки, параметры"
-        )
+        self.info_button.setToolTip(_(
+            "Model details: full description, source, license, languages, parameters"
+        ))
         self.info_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.info_button.clicked.connect(lambda: self.infoRequested.emit(self.entry))
         buttons.addWidget(self.info_button)
 
-        self.delete_button = QPushButton("Удалить")
+        self.delete_button = QPushButton(_("Delete"))
         self.delete_button.setObjectName("Danger")
         self.delete_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.delete_button.setToolTip("Удалить модель с диска (освободить место)")
+        self.delete_button.setToolTip(_("Delete the model from disk (free space)"))
         self.delete_button.clicked.connect(lambda: self.deleteRequested.emit(self.entry))
         self.delete_button.setVisible(self.entry.installed)
         buttons.addWidget(self.delete_button)
 
-        self.action_button = QPushButton("Выбрать для работы" if self.entry.installed else "Скачать")
+        self.action_button = QPushButton(_("Select for work") if self.entry.installed else _("Download"))
         self.action_button.setObjectName("Primary" if not self.entry.installed else "")
         self.action_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.action_button.setToolTip(
-            "Скачать модель в папку models/" if not self.entry.installed
-            else "Использовать именно эту модель для распознавания "
-                 "(она появится в статус-баре внизу окна)"
+            _("Download the model into models/") if not self.entry.installed
+            else _("Use exactly this model for recognition (it appears in the status bar)")
         )
         self.action_button.clicked.connect(self._on_action)
         buttons.addWidget(self.action_button)
@@ -564,7 +556,7 @@ class ModelCard(QFrame):
 
     # ------------------------------------------------------------------ #
     def _short_description(self) -> str:
-        text = self.entry.description or ""
+        text = _(self.entry.description or "")
         if len(text) <= 190:
             return text
         cut = text[:190]
@@ -578,14 +570,13 @@ class ModelCard(QFrame):
             return ""
         available = int(self.hardware.get("ram_available_mb") or 0)
         if available and self.entry.ram_mb > available:
-            return (
-                f"⚠ нужно ~{self.entry.ram_mb / 1024:.1f} ГБ памяти, сейчас свободно "
-                f"~{available / 1024:.1f} ГБ — возможны тормоза или ошибка"
-            )
+            return _("⚠ needs ~{need:.1f} GB of memory, only ~{free:.1f} GB free — "
+                     "expect slowdowns or an error").format(
+                need=self.entry.ram_mb / 1024, free=available / 1024)
         if self.entry.vram_mb and self.hardware.get("cuda_ok"):
             vram = int(self.hardware.get("vram_mb") or 0)
             if vram and self.entry.vram_mb > vram * 0.9:
-                return f"⚠ VRAM {vram / 1024:.1f} ГБ — модель пойдёт через CPU"
+                return _("⚠ VRAM {vram:.1f} GB — the model will run on CPU").format(vram=vram / 1024)
         return ""
 
     def _on_action(self) -> None:
@@ -600,7 +591,7 @@ class ModelCard(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         if self.entry.installed:
-            self.action_button.setText("✓ Выбрана" if selected else "Выбрать для работы")
+            self.action_button.setText(_("✓ Selected") if selected else _("Select for work"))
             self.action_button.setObjectName("Primary" if selected else "")
             self.action_button.style().unpolish(self.action_button)
             self.action_button.style().polish(self.action_button)
@@ -612,12 +603,12 @@ class ModelCard(QFrame):
         self.delete_button.setEnabled(not downloading)
         if downloading:
             self.progress.setRange(0, 0)
-            self.action_button.setText("Скачивание…")
+            self.action_button.setText(_("Downloading…"))
         else:
             self.progress.setRange(0, 1000)
             self.progress.setValue(0)
             self.action_button.setText(
-                "Скачать" if not self.entry.installed else "Выбрать для работы"
+                _("Download") if not self.entry.installed else _("Select for work")
             )
             self.action_button.setEnabled(True)
             self.delete_button.setEnabled(True)
@@ -627,7 +618,7 @@ class ModelCard(QFrame):
             self.progress.setVisible(True)
             self.progress_label.setVisible(True)
         if fraction <= 0:
-            self.progress.setRange(0, 0)  # «бегунок», размер неизвестен
+            self.progress.setRange(0, 0)  # busy indicator, size unknown
         else:
             self.progress.setRange(0, 1000)
             self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 1000))

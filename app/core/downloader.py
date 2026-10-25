@@ -1,12 +1,8 @@
-"""Скачивание и «установка» моделей в папку `models/` проекта.
+"""Model download and "installation" into the project `models/` folder.
 
-Поддерживаются источники:
-  * репозиторий Hugging Face (`owner/name`, опционально с подпапкой);
-  * прямая ссылка на файл (`https://.../ggml-large-v3-turbo-q5_0.bin`, zip Vosk);
-  * локальная папка/файл (копируются или подключаются на месте).
-
-Каждая установленная модель получает `models/<id>/installed.json` — по нему GUI
-потом понимает, что за модель лежит на диске.
+Supported sources: Hugging Face repo (`owner/name`, optional subfolder),
+direct file URL (ggml-*.bin, Vosk zip), local folder/file. Each installed
+model gets `models/<id>/installed.json` so the GUI knows what is on disk.
 """
 
 from __future__ import annotations
@@ -29,6 +25,7 @@ from ..constants import (
     ENGINE_WHISPERCPP,
     MODELS_DIRNAME,
 )
+from ..i18n import _
 from ..logutils import get_logger
 from . import net
 from .models_catalog import (
@@ -41,17 +38,16 @@ from .models_catalog import (
 
 log = get_logger("downloader")
 
-ProgressCallback = Callable[[float, str], None]  # (доля 0..1, текст статуса)
+ProgressCallback = Callable[[float, str], None]  # (fraction 0..1, status text)
 CancelToken = Callable[[], bool]
 
-#: маркер НЕЗАВЕРШЁННОЙ установки: создаётся в начале скачивания и удаляется
-#: только после полной верификации. Пока он на месте (и нет installed.json),
-#: каталог НЕ считает модель установленной — именно из-за отсутствия такой
-#: защиты прерванное сетью скачивание оставляло «полумодель», которую GUI
-#: показывал как готовую, а загрузка падала (нет preprocessor_config.json и т.п.)
+#: marker of an INCOMPLETE install: created when the download starts and
+#: removed only after full verification. While it exists (and installed.json
+#: does not), the catalog does NOT treat the model as installed — a network
+#: interruption must never leave a "half model" that the GUI shows as ready.
 PARTIAL_MARKER = ".localasr-partial.json"
 
-# Файлы, которые не нужны для запуска (экономят гигабайты трафика)
+# Files not needed at runtime (saves gigabytes of traffic)
 SKIP_ALWAYS = (
     re.compile(r"\.gitattributes$", re.I),
     re.compile(r"^\.git/", re.I),
@@ -82,19 +78,15 @@ class InstallError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
-#  Разбор источника
+#  Source parsing
 # --------------------------------------------------------------------------- #
 
 
 def split_repo_and_subfolder(source: str) -> Tuple[str, str, str]:
-    """Разбирает ссылку на HF-модель: (репозиторий, подпапка, revision).
+    """Parse an HF model link into (repo, subfolder, revision).
 
-    Поддерживает форматы:
-      owner/name                                    -> (owner/name, "", main)
-      owner/name/tree/main/ct2_int8_float16         -> (owner/name, ct2_int8_float16, main)
-      owner/name/tree/v1.0/sub/dir                  -> (owner/name, sub/dir, v1.0)
-      owner/name:subfolder                          -> (owner/name, subfolder, main)
-      https://huggingface.co/owner/name/tree/main/x -> (owner/name, x, main)
+    Supported: owner/name; owner/name/tree/<rev>/<sub>; owner/name:sub;
+    https://huggingface.co/owner/name/tree/<rev>/<sub>.
     """
     text = (source or "").strip().rstrip("/")
     if text.startswith(("http://", "https://")):
@@ -105,7 +97,7 @@ def split_repo_and_subfolder(source: str) -> Tuple[str, str, str]:
                 if text.startswith(prefix):
                     text = text[len(prefix):]
         else:
-            return text, "", "main"  # прямая ссылка на файл
+            return text, "", "main"  # direct file URL
 
     if ":" in text and "/tree/" not in text:
         repo, _, sub = text.partition(":")
@@ -128,17 +120,14 @@ def split_repo_and_subfolder(source: str) -> Tuple[str, str, str]:
 
 
 def resolve_source(entry: ModelEntry) -> Dict:
-    """Возвращает план установки: что и откуда качать.
+    """Return the install plan: what to download and from where.
 
-    {
-      "kind": "hf_repo" | "url_file" | "local",
-      "files": [(relpath, url, size)],
-      "total_bytes": int,
-    }
+    {"kind": "hf_repo"|"url_file"|"local", "files": [(rel, url, size)],
+     "total_bytes": int}
     """
     source = (entry.source or "").strip()
     if not source:
-        raise InstallError(f"У модели «{entry.name}» не указан источник")
+        raise InstallError(_("Model \"{name}\" has no source specified").format(name=entry.name))
 
     local = Path(source).expanduser()
     if local.exists():
@@ -153,11 +142,11 @@ def resolve_source(entry: ModelEntry) -> Dict:
     if net.is_hf_repo_id(repo_id):
         return _plan_hf(repo_id, subfolder, entry, revision)
 
-    raise InstallError(
-        f"Не понял источник модели: «{source}».\n"
-        "Ожидается ID репозитория Hugging Face (owner/name), прямая ссылка https://… "
-        "или путь к локальной папке/файлу."
-    )
+    raise InstallError(_(
+        "Could not understand the model source: \"{source}\".\n"
+        "Expected a Hugging Face repo ID (owner/name), a direct https://… URL "
+        "or a path to a local folder/file."
+    ).format(source=source))
 
 
 def _plan_hf(repo_id: str, subfolder: str, entry: ModelEntry, revision: str = "main") -> Dict:
@@ -168,13 +157,13 @@ def _plan_hf(repo_id: str, subfolder: str, entry: ModelEntry, revision: str = "m
 
     files = [f for f in remote if not f.is_dir]
     if not files:
-        raise InstallError(f"В {repo_id}/{subfolder or 'main'} нет файлов")
+        raise InstallError(_("No files in {repo}/{sub}").format(repo=repo_id, sub=subfolder or "main"))
 
     single_file = entry.file
     if single_file:
         matches = [f for f in files if f.path.endswith(single_file) or f.path.split("/")[-1] == single_file]
         if not matches:
-            raise InstallError(f"Файл {single_file} не найден в {repo_id}")
+            raise InstallError(_("File {f} not found in {repo}").format(f=single_file, repo=repo_id))
         files = matches[:1]
     else:
         files = _filter_needed(files)
@@ -198,11 +187,10 @@ def _plan_hf(repo_id: str, subfolder: str, entry: ModelEntry, revision: str = "m
 
 
 def _filter_needed(files) -> List:
-    """Отсекает лишнее: дубли комплектов весов и служебный мусор.
+    """Drop redundant weight sets and service junk.
 
-    Правило: оставляем ТОЛЬКО ОДИН комплект весов — тот, который лежит в
-    репозитории (CT2 model.bin → safetensors → pytorch_model.bin), иначе
-    transformers-модели (Qwen, GigaAM) скачались бы без весов.
+    Keep ONLY ONE weight set — the one the repo actually uses
+    (CT2 model.bin -> safetensors -> pytorch_model.bin).
     """
     names = [f.path.split("/")[-1].lower() for f in files]
     has_model_bin = "model.bin" in names
@@ -216,9 +204,9 @@ def _filter_needed(files) -> List:
             continue
         if low.endswith(WEIGHT_EXTENSIONS) and low not in KEEP_ALWAYS:
             if has_model_bin and low != "model.bin":
-                continue  # есть CT2-веса — остальные комплекты не качаем
+                continue  # CT2 weights present — skip the other sets
             if not has_model_bin and has_safetensors and not low.endswith(".safetensors"):
-                continue  # есть safetensors — bin/pt-дубликаты не качаем
+                continue  # safetensors present — skip bin/pt duplicates
         result.append(item)
     return result or list(files)
 
@@ -242,12 +230,12 @@ def _plan_local(local: Path, entry: ModelEntry) -> Dict:
 
 
 # --------------------------------------------------------------------------- #
-#  Установка
+#  Installation
 # --------------------------------------------------------------------------- #
 
 
 def _write_partial_marker(target_dir: Path, entry: ModelEntry, plan: Dict) -> None:
-    """Помечает папку как «установка не завершена» (см. PARTIAL_MARKER)."""
+    """Mark the folder as "install incomplete" (see PARTIAL_MARKER)."""
     try:
         payload = {
             "id": entry.id,
@@ -259,9 +247,9 @@ def _write_partial_marker(target_dir: Path, entry: ModelEntry, plan: Dict) -> No
             "files": [rel for rel, _url, _size in plan.get("files") or []][:200],
         }
         net.write_json(target_dir / PARTIAL_MARKER, payload)
-        log.debug("Маркер частичной установки записан: %s", target_dir / PARTIAL_MARKER)
+        log.debug("Partial-install marker written: %s", target_dir / PARTIAL_MARKER)
     except OSError as exc:
-        log.debug("Не удалось записать маркер частичной установки: %s", exc)
+        log.debug("Failed to write the partial-install marker: %s", exc)
 
 
 def _remove_partial_marker(target_dir: Path) -> None:
@@ -272,18 +260,17 @@ def _remove_partial_marker(target_dir: Path) -> None:
 
 
 def _verify_plan(target_dir: Path, files: List[Tuple[str, str, int]]) -> List[str]:
-    """Сверяет скачанное с планом: список расхождений (пустой = всё цело)."""
+    """Compare downloaded files with the plan: list of problems (empty = OK)."""
     problems: List[str] = []
     for rel, _url, size in files:
         dest = target_dir / rel
         if not dest.is_file():
-            problems.append(f"{rel}: отсутствует")
+            problems.append(_("{rel}: missing").format(rel=rel))
             continue
         actual = dest.stat().st_size
         if size > 0 and actual != size:
-            problems.append(
-                f"{rel}: размер {actual} != ожидаемый {size}"
-            )
+            problems.append(_("{rel}: size {actual} != expected {size}").format(
+                rel=rel, actual=actual, size=size))
     return problems
 
 
@@ -293,15 +280,11 @@ def install_model(
     progress: Optional[ProgressCallback] = None,
     cancel: Optional[CancelToken] = None,
 ) -> InstallResult:
-    """Скачивает модель в models/<id>/ и пишет installed.json.
+    """Download the model into models/<id>/ and write installed.json.
 
-    Устойчивость к обрывам:
-      * на старте ставится маркер PARTIAL_MARKER — пока он на месте, каталог
-        НЕ считает модель установленной (никаких «полумоделей» в списке);
-      * уже скачанные целиком файлы при повторной установке пропускаются
-        (продолжение после обрыва сети стоит считаные секунды);
-      * в конце каждый файл сверяется с планом по размеру: обрезанный файл —
-        это ошибка установки, а не «модель установлена».
+    Resilient to interruptions: PARTIAL_MARKER until verified; fully
+    downloaded files are skipped on reinstall; every file is size-checked
+    against the plan at the end (a truncated file is an install error).
     """
     started = time.time()
     root = Path(root) if root else paths.ROOT_DIR
@@ -312,24 +295,25 @@ def install_model(
     files: List[Tuple[str, str, int]] = plan["files"]
     total_bytes = plan.get("total_bytes") or sum(size for _, _, size in files) or entry.size_bytes or 0
     log.debug(
-        "install_model: %s | kind=%s repo=%s subfolder=%r revision=%s | файлов: %d | объём: %s",
+        "install_model: %s | kind=%s repo=%s subfolder=%r revision=%s | files: %d | size: %s",
         entry.id, plan["kind"], plan.get("repo", "—"), plan.get("subfolder", ""),
         plan.get("revision", "—"), len(files), paths.human_size(total_bytes),
     )
     for rel, _url, size in files[:80]:
-        log.debug("  план: %s (%s)", rel, paths.human_size(size))
+        log.debug("  plan: %s (%s)", rel, paths.human_size(size))
 
     target_dir = models_root / sanitize_id(entry.id)
     if plan["kind"] == "local" and Path(plan["local"]).is_dir():
         source_dir = Path(plan["local"]).resolve()
         if _is_inside(source_dir, target_dir.resolve()):
-            raise InstallError("Нельзя установить модель саму в себя")
+            raise InstallError(_("A model cannot be installed into itself"))
         target_dir = source_dir if _is_inside(source_dir, models_root.resolve()) else target_dir
 
     paths.ensure_free_space(models_root, total_bytes or 0, margin_bytes=256 * 1024 * 1024)
 
     if progress:
-        progress(0.0, f"Подготовка: {entry.name} ({paths.human_size(total_bytes)})")
+        progress(0.0, _("Preparing: {name} ({size})").format(
+            name=entry.name, size=paths.human_size(total_bytes)))
 
     target_dir.mkdir(parents=True, exist_ok=True)
     is_local_source = plan["kind"] == "local"
@@ -344,67 +328,69 @@ def install_model(
         done_bytes = current
         if progress and total_bytes:
             fraction = min(0.999, (downloaded + current) / max(1, total_bytes))
-            speed_text = f" · {paths.human_size(speed)}/с" if speed else ""
-            progress(fraction, f"{filename} · {paths.human_size(downloaded + current)} из {paths.human_size(total_bytes)}{speed_text}")
+            speed_text = _(" · {}/s").format(paths.human_size(speed)) if speed else ""
+            progress(fraction, _("{file} · {done} of {total}{speed}").format(
+                file=filename, done=paths.human_size(downloaded + current),
+                total=paths.human_size(total_bytes), speed=speed_text))
 
     try:
         if plan["kind"] == "local":
             for rel, src, size in files:
                 if cancel and cancel():
-                    raise net.DownloadCancelled("Установка отменена")
+                    raise net.DownloadCancelled(_("Install cancelled"))
                 dest = target_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 if Path(src).resolve() != dest.resolve():
                     shutil.copy2(src, dest)
                 downloaded += size
                 if progress and total_bytes:
-                    progress(min(0.999, downloaded / total_bytes), f"Копирую {rel}")
+                    progress(min(0.999, downloaded / total_bytes), _("Copying {rel}").format(rel=rel))
         elif plan["kind"] == "url_file" and str(files[0][0]).lower().endswith(".zip"):
             archive = target_dir / files[0][0]
             net.download_file(files[0][1], archive, progress=report, cancel=cancel)
             downloaded = archive.stat().st_size
             if progress:
-                progress(0.999, "Распаковываю архив…")
+                progress(0.999, _("Extracting the archive…"))
             net.extract_zip(archive, target_dir, progress=lambda p: None)
             archive.unlink(missing_ok=True)
-            # Vosk распаковывается в подпапку вида vosk-model-ru-0.42/* — выравниваем
+            # Vosk extracts into a vosk-model-* subfolder — flatten it
             _flatten_single_subdir(target_dir)
         else:
             for rel, url, size in files:
                 if cancel and cancel():
-                    raise net.DownloadCancelled("Установка отменена")
+                    raise net.DownloadCancelled(_("Install cancelled"))
                 dest = target_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                # продолжение прерванной установки: целый файл не перекачиваем
+                # resuming an interrupted install: skip complete files
                 if size > 0 and dest.is_file() and dest.stat().st_size == size:
                     downloaded += size
                     skipped.append(rel)
-                    log.debug("install_model: пропускаю уже скачанный %s (%s)", rel, paths.human_size(size))
+                    log.debug("install_model: skipping already downloaded %s (%s)", rel, paths.human_size(size))
                     if progress and total_bytes:
-                        progress(min(0.999, downloaded / total_bytes), f"Уже скачан: {rel}")
+                        progress(min(0.999, downloaded / total_bytes), _("Already downloaded: {rel}").format(rel=rel))
                     continue
                 net.download_file(url, dest, progress=report, cancel=cancel)
                 downloaded += size
 
-            # верификация: каждый файл плана на месте и правильного размера
+            # verification: every planned file exists with the right size
             problems = _verify_plan(target_dir, files)
             if problems:
                 listing = "\n".join("  • " + p for p in problems[:10])
-                raise InstallError(
-                    f"Скачивание «{entry.name}» не завершилось корректно — "
-                    f"{len(problems)} файл(ов) повреждены или недокачаны:\n{listing}\n\n"
-                    "Скорее всего, оборвалась сеть. Запусти установку ещё раз — "
-                    "целые файлы будут пропущены, докачаются только недостающие."
-                )
+                raise InstallError(_(
+                    "Downloading \"{name}\" did not finish cleanly — "
+                    "{n} file(s) are corrupted or incomplete:\n{listing}\n\n"
+                    "The network was probably interrupted. Run the install again — "
+                    "complete files will be skipped, only missing ones re-downloaded."
+                ).format(name=entry.name, n=len(problems), listing=listing))
 
         engine = detect_engine(target_dir) or entry.engine
         if not engine:
-            raise InstallError(
-                f"Скачанные файлы не похожи на модель ни одного поддерживаемого движка.\n"
-                f"Папка: {target_dir}\n"
-                "Ожидается: model.bin+config.json (faster-whisper), ggml-*.bin (whisper.cpp) "
-                "или am/final.mdl (Vosk)."
-            )
+            raise InstallError(_(
+                "The downloaded files do not look like a model of any supported engine.\n"
+                "Folder: {dir}\n"
+                "Expected: model.bin+config.json (faster-whisper), ggml-*.bin (whisper.cpp) "
+                "or am/final.mdl (Vosk)."
+            ).format(dir=target_dir))
 
         entry.engine = engine
         entry.install_dir = target_dir
@@ -434,30 +420,30 @@ def install_model(
             "files": [rel for rel, _url, _size in files][:200],
         }
         net.write_json(target_dir / META_FILENAME, meta)
-        # установка завершена и проверена — маркер «недокачки» больше не нужен
+        # install complete and verified — the partial marker is no longer needed
         _remove_partial_marker(target_dir)
 
     except net.DownloadCancelled:
         _cleanup_partial(target_dir)
-        log.warning("Установка %s отменена пользователем (папка помечена как неполная)", entry.id)
+        log.warning(_("Install of %s cancelled by user (folder marked incomplete)"), entry.id)
         raise
     except InstallError:
-        log.error("Установка %s не завершена: папка осталась помечена как неполная", entry.id)
+        log.error(_("Install of %s did not finish: folder remains marked incomplete"), entry.id)
         raise
     except net.NetworkError as exc:
-        log.error("Установка %s прервана сетевой ошибкой: %s", entry.id, exc)
-        raise InstallError(f"Ошибка сети: {exc}") from exc
+        log.error(_("Install of %s interrupted by a network error: %s"), entry.id, exc)
+        raise InstallError(_("Network error: {exc}").format(exc=exc)) from exc
     except OSError as exc:
-        log.error("Установка %s прервана ошибкой диска: %s", entry.id, exc)
-        raise InstallError(f"Ошибка диска: {exc}") from exc
+        log.error(_("Install of %s interrupted by a disk error: %s"), entry.id, exc)
+        raise InstallError(_("Disk error: {exc}").format(exc=exc)) from exc
 
     duration = time.time() - started
     log.info(
-        "Модель установлена: %s -> %s (%s за %.1f с)",
+        _("Model installed: %s -> %s (%s in %.1f s)"),
         entry.id, target_dir, paths.human_size(downloaded), duration,
     )
     if progress:
-        progress(1.0, f"Готово: {entry.name} установлена")
+        progress(1.0, _("Done: {name} installed").format(name=entry.name))
     return InstallResult(
         entry=entry,
         directory=target_dir,
@@ -468,7 +454,7 @@ def install_model(
 
 
 def _flatten_single_subdir(folder: Path) -> None:
-    """Если после распаковки получилась одна вложенная папка — поднимаем её содержимое."""
+    """If extraction produced a single nested folder — lift its contents up."""
     try:
         children = [p for p in folder.iterdir() if not p.name.startswith(".")]
     except OSError:
@@ -485,7 +471,7 @@ def _flatten_single_subdir(folder: Path) -> None:
 
 
 def _cleanup_partial(folder: Path) -> None:
-    """Удаляет недокачанные .part-файлы (сама папка остаётся для доозагрузки)."""
+    """Delete incomplete .part files (the folder stays for resuming)."""
     try:
         for part in folder.rglob("*.part"):
             part.unlink(missing_ok=True)
@@ -502,14 +488,14 @@ def _is_inside(child: Path, parent: Path) -> bool:
 
 
 def sanitize_id(model_id: str) -> str:
-    """Имя папки модели: безопасно для всех ФС."""
+    """Model folder name: safe on all file systems."""
     cleaned = re.sub(r"[^\w.\-]+", "_", model_id.strip(), flags=re.UNICODE)
     cleaned = re.sub(r"_+", "_", cleaned).strip("._")
     return cleaned[:80] or "model"
 
 
 def uninstall_model(entry: ModelEntry, root: Optional[Path] = None) -> bool:
-    """Удаляет модель с диска (если она лежит внутри models/)."""
+    """Delete the model from disk (only if it is inside models/)."""
     root = Path(root) if root else paths.ROOT_DIR
     folder = entry.install_dir or (root / MODELS_DIRNAME / sanitize_id(entry.id))
     folder = Path(folder)
@@ -519,23 +505,23 @@ def uninstall_model(entry: ModelEntry, root: Optional[Path] = None) -> bool:
     try:
         folder.resolve().relative_to(models_root)
     except ValueError:
-        log.warning("Отказано: %s лежит вне models/ — не удаляю", folder)
+        log.warning(_("Refused: %s is outside models/ — not deleting"), folder)
         return False
     shutil.rmtree(folder, ignore_errors=True)
     return not folder.exists()
 
 
 # --------------------------------------------------------------------------- #
-#  Автоопределение модели по произвольной ссылке/пути (для «своей модели»)
+#  Model autodetection from an arbitrary link/path ("custom model")
 # --------------------------------------------------------------------------- #
 
 
 def _engine_from_hf_listing(repo_id: str, subfolder: str, revision: str, names: List[str]) -> str:
-    """Движок по списку файлов HF-репозитория (+ удалённый config.json).
+    """Engine guess from an HF repo file listing (+ remote config.json).
 
-    Так «Своя модель» понимает ЛЮБУю ASR-модель Hugging Face, а не только
-    заранее известные: неизвестный config.json с аудио-архитектурой уходит
-    в универсальный движок hf-transformers.
+    This is how "Custom model" understands ANY Hugging Face ASR model:
+    an unknown config.json with an audio architecture goes to the generic
+    hf-transformers engine.
     """
     if any(n.startswith("ggml") for n in names):
         return ENGINE_WHISPERCPP
@@ -554,13 +540,13 @@ def _engine_from_hf_listing(repo_id: str, subfolder: str, revision: str, names: 
 
 
 def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntry:
-    """Создаёт ModelEntry из произвольного источника: путь, HF-репо или URL.
+    """Build a ModelEntry from an arbitrary source: path, HF repo or URL.
 
-    Никаких скачиваний — только определение типа, размера и имени.
+    Nothing is downloaded — only type, size and name detection.
     """
     source = (source or "").strip()
     if not source:
-        raise InstallError("Пустой источник модели")
+        raise InstallError(_("Empty model source"))
 
     model_id = ""
     name = ""
@@ -613,7 +599,7 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
             url = source
             try:
                 size_bytes = net.head_size(source)
-            except Exception:  # noqa: BLE001 - нет сети / нет requests: размер уточним при скачивании
+            except Exception:  # noqa: BLE001 - offline / no requests: size refined during download
                 size_bytes = None
             low = filename.lower()
             if low.endswith(".zip"):
@@ -626,11 +612,11 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
     else:
         repo_id, subfolder, revision = split_repo_and_subfolder(source)
         if not net.is_hf_repo_id(repo_id):
-            raise InstallError(
-                f"Не понял источник «{source}».\n"
-                "Поддерживаются: путь на диске, ID репозитория Hugging Face (owner/name), "
-                "прямая ссылка https://…"
-            )
+            raise InstallError(_(
+                "Could not understand the source \"{source}\".\n"
+                "Supported: a disk path, a Hugging Face repo ID (owner/name), "
+                "a direct https://… URL"
+            ).format(source=source))
         name = repo_id
         model_id = repo_id
         url = net.hf_repo_page(repo_id)
@@ -660,11 +646,11 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
         file=single_file,
         size_bytes=size_bytes,
         languages=languages or ["ru", "en"],
-        languages_note="определяется моделью",
-        description="Модель добавлена пользователем.",
+        languages_note="detected by the model",
+        description="Model added by the user.",
         url=url,
         custom=True,
-        tags=["своя модель"],
+        tags=["custom model"],
         quality=3,
         speed=3,
     )
@@ -673,7 +659,7 @@ def inspect_custom_source(source: str, root: Optional[Path] = None) -> ModelEntr
 
 
 def _guess_ram(entry: ModelEntry) -> None:
-    """Грубая оценка потребления памяти по размеру модели (если в каталоге её нет)."""
+    """Rough RAM estimate from the model size (when the catalog has none)."""
     if entry.ram_mb or not entry.size_bytes:
         return
     size_mb = entry.size_bytes / (1024 * 1024)

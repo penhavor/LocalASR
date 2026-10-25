@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Тесты устойчивости net.download_file (задачи 5c + верификация размера).
+"""net.download_file robustness tests.
 
-Локальный HTTP-сервер, интернет не нужен:
-  * обычное скачивание: файл цел, .part переименован;
-  * доозагрузка (Range): существующий .part докачивается, а не качается заново;
-  * «тихо обрезанный» ответ (Content-Length больше тела) -> ретрай и ошибка,
-    битый файл НЕ сохраняется как готовый;
-  * отмена во время паузы ретрая срабатывает БЫСТРО (регрессия
-    «QThread: Destroyed while thread is still running» — поток спал по 16 с
-    и не слышал отмену);
-  * HTTP 404 -> NetworkError с первого раза.
+Local HTTP server, no internet needed:
+  * plain download: file intact, .part renamed;
+  * resume (Range): an existing .part is continued, not re-downloaded;
+  * a "silently truncated" response (Content-Length > body) -> retry and an
+    error; the broken file is NOT saved as ready;
+  * cancellation during a retry pause fires FAST (a thread sleeping in the
+    pause must hear the cancel immediately);
+  * HTTP 404 -> NetworkError on the first attempt.
 
-Запуск:  cd <корень проекта> && python tests/test_net_robust.py
+Run:  cd <project root> && python tests/test_net_robust.py
 """
 from __future__ import annotations
 
@@ -29,6 +28,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from app import i18n  # noqa: E402
+
+i18n.init("ru")  # stable language for message assertions
+
 from app.core import net  # noqa: E402
 
 failures: list[str] = []
@@ -42,7 +45,7 @@ def check(cond: bool, message: str) -> None:
         failures.append(message)
 
 
-PAYLOAD = bytes(range(256)) * 400          # 102 400 байт
+PAYLOAD = bytes(range(256)) * 400          # 102 400 bytes
 MODE = {"mode": "normal", "flaky_left": 0}
 
 
@@ -55,17 +58,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         if name == "drop.bin":
-            # обрыв соединения сразу после заголовков: клиент мгновенно
-            # получает ConnectionError и уходит в паузу ретрая — именно её
-            # должен уметь прерывать cancel
+            # connection drop right after the headers: the client instantly
+            # gets a ConnectionError and enters the retry pause — exactly
+            # the pause cancel must be able to interrupt
             self.send_response(200)
             self.send_header("Content-Length", str(len(PAYLOAD)))
             self.end_headers()
             self.close_connection = True
             return
         if name == "flaky.bin":
-            # первые N обращений обрываются на середине (Content-Length врёт,
-            # соединение закрывается — клиент видит IncompleteRead сразу)
+            # the first N requests drop mid-body (Content-Length lies, the
+            # connection closes — the client sees IncompleteRead immediately)
             if MODE["flaky_left"] > 0:
                 MODE["flaky_left"] -= 1
                 body = PAYLOAD[: len(PAYLOAD) // 3]
@@ -82,7 +85,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # обычный файл с поддержкой Range
+        # plain file with Range support
         start = 0
         rng = self.headers.get("Range")
         if rng and rng.startswith("bytes="):
@@ -116,40 +119,40 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
 
-            print("== обычное скачивание ==")
+            print("== plain download ==")
             dest = net.download_file(f"{base}/file.bin", out / "file.bin")
-            check(dest.read_bytes() == PAYLOAD, "файл скачан целиком")
-            check(not (out / "file.bin.part").exists(), ".part переименован")
+            check(dest.read_bytes() == PAYLOAD, "file downloaded in full")
+            check(not (out / "file.bin.part").exists(), ".part renamed")
 
-            print("== доозагрузка (Range) ==")
+            print("== resume (Range) ==")
             part = out / "resume.bin.part"
             part.write_bytes(PAYLOAD[: len(PAYLOAD) // 2])
             dest2 = net.download_file(f"{base}/file.bin", out / "resume.bin")
-            check(dest2.read_bytes() == PAYLOAD, "недокачанный .part докачан корректно")
+            check(dest2.read_bytes() == PAYLOAD, "incomplete .part resumed correctly")
 
-            print("== обрезанный ответ: ретрай и верификация ==")
+            print("== truncated response: retry and verification ==")
             MODE["mode"] = "flaky"
-            MODE["flaky_left"] = 1     # первый ответ обрезан, второй — целый
+            MODE["flaky_left"] = 1     # first response truncated, second complete
             dest3 = net.download_file(f"{base}/flaky.bin", out / "flaky.bin", backoff_cap=1)
-            check(dest3.read_bytes() == PAYLOAD, "после ретрая файл цел")
+            check(dest3.read_bytes() == PAYLOAD, "file intact after the retry")
 
-            MODE["flaky_left"] = 99    # сервер всегда обрезает -> исчерпание попыток
+            MODE["flaky_left"] = 99    # server always truncates -> attempts exhausted
             try:
                 net.download_file(f"{base}/flaky.bin", out / "hopeless.bin", timeout=5, max_attempts=3, backoff_cap=1)
-                check(False, "постоянно обрезанный файл должен приводить к ошибке")
+                check(False, "a permanently truncated file must raise an error")
             except net.NetworkError as exc:
-                check("попыт" in str(exc), f"понятная ошибка после ретраев: {str(exc)[:70]}…")
-            check(not (out / "hopeless.bin").exists(), "битый файл НЕ сохранён как готовый")
+                check("попыт" in str(exc), f"clear error after retries: {str(exc)[:70]}…")
+            check(not (out / "hopeless.bin").exists(), "broken file NOT saved as ready")
             MODE["flaky_left"] = 0
 
             print("== 404 -> NetworkError ==")
             try:
                 net.download_file(f"{base}/missing.bin", out / "missing.bin")
-                check(False, "404 должен приводить к NetworkError")
+                check(False, "404 must raise NetworkError")
             except net.NetworkError as exc:
-                check("404" in str(exc), f"ошибка 404 понятна: {str(exc)[:60]}")
+                check("404" in str(exc), f"the 404 error is clear: {str(exc)[:60]}")
 
-            print("== отмена во время паузы ретрая — мгновенная ==")
+            print("== cancellation during a retry pause — instant ==")
             cancel_flag = {"cancel": False}
 
             def cancel_soon():
@@ -163,20 +166,20 @@ def main() -> int:
                     f"{base}/drop.bin", out / "cancel.bin",
                     cancel=lambda: cancel_flag["cancel"], timeout=5, backoff_cap=8,
                 )
-                check(False, "отмена должна прерывать скачивание")
+                check(False, "cancellation must interrupt the download")
             except net.DownloadCancelled:
                 elapsed = time.time() - started
-                check(elapsed < 2.5, f"отмена сработала быстро, за {elapsed:.2f} с (спал бы 2-16 с)")
+                check(elapsed < 2.5, f"cancel fired fast, in {elapsed:.2f} s (would sleep 2-16 s)")
     finally:
         server.shutdown()
 
     print()
     if failures:
-        print(f"ПРОВАЛЕНО: {len(failures)}")
+        print(f"FAILED: {len(failures)}")
         for item in failures:
             print("  -", item)
         return 1
-    print("ТЕСТ СЕТИ ПРОЙДЕН")
+    print("NETWORK TEST PASSED")
     return 0
 
 

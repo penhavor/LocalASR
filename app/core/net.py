@@ -1,4 +1,4 @@
-"""Сетевые утилиты: HTTP-загрузки с прогрессом и доозагрузкой, API Hugging Face."""
+"""Network utilities: HTTP downloads with progress/resume, Hugging Face API."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 from ..constants import HF_API_BASE, HF_RESOLVE_BASE, HTTP_CHUNK, HTTP_TIMEOUT, USER_AGENT
+from ..i18n import _
 from ..logutils import get_logger
 
 log = get_logger("net")
@@ -33,7 +34,7 @@ def _requests():
         import requests  # type: ignore
     except ImportError as exc:  # pragma: no cover
         raise NetworkError(
-            "Не установлен пакет requests. Запусти main.py — он доустановит зависимости."
+            _("The requests package is not installed. Run launcher/main.py — it will install dependencies.")
         ) from exc
     return requests
 
@@ -46,7 +47,7 @@ def session():
 
 
 # --------------------------------------------------------------------------- #
-#  Простые запросы
+#  Simple requests
 # --------------------------------------------------------------------------- #
 
 
@@ -54,7 +55,7 @@ def fetch_text(url: str, timeout: int = HTTP_TIMEOUT) -> str:
     sess = session()
     resp = sess.get(url, timeout=timeout)
     if resp.status_code != 200:
-        raise NetworkError(f"HTTP {resp.status_code} для {url}")
+        raise NetworkError(_("HTTP {code} for {url}").format(code=resp.status_code, url=url))
     return resp.text
 
 
@@ -66,7 +67,7 @@ def head_size(url: str, timeout: int = HTTP_TIMEOUT) -> Optional[int]:
             length = resp.headers.get("Content-Length")
             return int(length) if length else None
     except Exception as exc:  # noqa: BLE001
-        log.debug("HEAD не удался для %s: %s", url, exc)
+        log.debug(_("HEAD failed for %s: %s"), url, exc)
     return None
 
 
@@ -76,7 +77,7 @@ def head_size(url: str, timeout: int = HTTP_TIMEOUT) -> Optional[int]:
 
 
 def is_hf_repo_id(text: str) -> bool:
-    """Похоже ли на идентификатор репозитория HF (`owner/name` или `owner/name/tree/rev/sub`)."""
+    """Whether the text looks like an HF repo id (`owner/name[/tree/rev/sub]`)."""
     text = (text or "").strip()
     if not text or text.startswith(("http://", "https://", "/", "\\")):
         return False
@@ -103,7 +104,7 @@ class RemoteFile:
 
 
 def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive: bool = True) -> List[RemoteFile]:
-    """Список файлов репозитория HF с размерами (пагинацию обрабатываем)."""
+    """List of HF repo files with sizes (pagination handled)."""
     sess = session()
     path_part = f"/tree/{quote(revision)}"
     if subfolder:
@@ -112,24 +113,24 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
     params = {"recursive": "true"} if recursive else {}
 
     files: List[RemoteFile] = []
-    for page in range(20):  # защита от бесконечной пагинации
-        log.debug("hf_tree: GET %s (params=%s, страница %d)", url, params, page + 1)
+    for page in range(20):  # guard against infinite pagination
+        log.debug("hf_tree: GET %s (params=%s, page %d)", url, params, page + 1)
         try:
             resp = sess.get(url, params=params, timeout=HTTP_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - requests и его зависимости
-            raise NetworkError(f"Не удалось получить список файлов {repo_id}: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - requests and its deps
+            raise NetworkError(_("Failed to get the file list of {repo}: {exc}").format(repo=repo_id, exc=exc)) from exc
         if resp.status_code == 404:
-            raise NetworkError(f"Репозиторий или папка не найдены: {repo_id}/{subfolder}")
+            raise NetworkError(_("Repository or folder not found: {repo}/{sub}").format(repo=repo_id, sub=subfolder))
         if resp.status_code == 401:
-            raise NetworkError(f"Репозиторий закрыт (gated): {repo_id}. Нужен токен HF.")
+            raise NetworkError(_("Repository is gated: {repo}. An HF token is required.").format(repo=repo_id))
         if resp.status_code != 200:
-            raise NetworkError(f"HF API вернул HTTP {resp.status_code} для {repo_id}")
+            raise NetworkError(_("HF API returned HTTP {code} for {repo}").format(code=resp.status_code, repo=repo_id))
         try:
             payload = resp.json()
         except ValueError as exc:
-            raise NetworkError(f"HF API вернул не-JSON: {exc}") from exc
+            raise NetworkError(_("HF API returned non-JSON: {exc}").format(exc=exc)) from exc
         if not isinstance(payload, list):
-            raise NetworkError("Неожиданный ответ HF API")
+            raise NetworkError(_("Unexpected HF API response"))
 
         for item in payload:
             if not isinstance(item, dict):
@@ -153,7 +154,7 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
             break
         url = match.group(1)
         params = {}
-    log.debug("hf_tree: %s/%s — файлов: %d, байт: %d",
+    log.debug("hf_tree: %s/%s — files: %d, bytes: %d",
               repo_id, subfolder or "main",
               sum(1 for f in files if not f.is_dir),
               sum(f.size for f in files if not f.is_dir))
@@ -161,9 +162,9 @@ def hf_tree(repo_id: str, subfolder: str = "", revision: str = "main", recursive
 
 
 def hf_read_json(repo_id: str, filename: str, revision: str = "main", subfolder: str = "") -> Optional[Dict]:
-    """Прочитать маленький JSON (config.json) из репозитория HF. None — если нет.
+    """Read a small JSON (config.json) from an HF repo. None when unavailable.
 
-    Используется, чтобы определить движок модели ДО скачивания.
+    Used to detect the model engine BEFORE downloading.
     """
     rel = f"{subfolder.strip('/')}/{filename}" if subfolder else filename
     url = hf_resolve_url(repo_id, rel, revision=revision)
@@ -173,25 +174,23 @@ def hf_read_json(repo_id: str, filename: str, revision: str = "main", subfolder:
         if resp.status_code != 200:
             return None
         return resp.json()
-    except Exception:  # noqa: BLE001 - нет сети/битый JSON: просто None
+    except Exception:  # noqa: BLE001 - offline/broken JSON: just None
         return None
 
 
 # --------------------------------------------------------------------------- #
-#  Скачивание файлов
+#  File downloads
 # --------------------------------------------------------------------------- #
 
 
 def _sleep_cancelable(seconds: float, cancel: Optional[CancelToken] = None) -> None:
-    """Спит мелкими порциями, чтобы отмена срабатывала мгновенно.
-
-    Без этого закрытие окна во время паузы ретрая (до 20 с) оставляло поток
-    живым — отсюда «QThread: Destroyed while thread is still running».
+    """Sleep in small slices so cancellation fires instantly (otherwise a
+    retry pause of up to 20 s kept the thread alive after the window closed).
     """
     deadline = time.time() + max(0.0, seconds)
     while time.time() < deadline:
         if cancel is not None and cancel():
-            raise DownloadCancelled("Скачивание отменено")
+            raise DownloadCancelled(_("Download cancelled"))
         time.sleep(min(0.2, max(0.0, deadline - time.time())))
 
 
@@ -205,12 +204,11 @@ def download_file(
     max_attempts: int = 5,
     backoff_cap: int = 20,
 ) -> Path:
-    """Качает файл с доозагрузкой (Range), прогрессом и отменой.
+    """Download a file with resume (Range), progress and cancellation.
 
-    Пишет в `dest.part`, по успеху переименовывает — «половинок» в models/ не будет.
-    После скачивания сверяет размер с Content-Length: «тихо обрезанный» файл
-    (сервер закрыл соединение без ошибки) докачивается заново, а не сохраняется.
-    Паузы между попытками слушают отмену — закрыть окно можно в любой момент.
+    Writes to `dest.part` and renames on success — no half files in models/.
+    The final size is checked against Content-Length: a silently truncated
+    file is re-downloaded, not saved. Retry pauses listen to cancellation.
     """
     requests = _requests()
     dest = Path(dest)
@@ -219,10 +217,10 @@ def download_file(
 
     existing = part.stat().st_size if (resume and part.exists()) else 0
     headers = {"Range": f"bytes={existing}-"} if existing else {}
-    log.debug("download_file: %s -> %s (доозагрузка с %d байт)", url, dest, existing)
+    log.debug("download_file: %s -> %s (resuming from %d bytes)", url, dest, existing)
 
     class _IncompleteError(RuntimeError):
-        """Размер не совпал с Content-Length — файл оборван."""
+        """Size does not match Content-Length — the file is truncated."""
 
     attempt = 0
     while True:
@@ -230,26 +228,27 @@ def download_file(
         try:
             with requests.get(url, stream=True, timeout=timeout, headers=headers, allow_redirects=True) as resp:
                 if existing and resp.status_code == 416:
-                    # файл уже полностью скачан
+                    # the file is already fully downloaded
                     existing = 0
                     headers = {}
                     continue
                 if resp.status_code not in (200, 206):
                     hint = ""
                     if resp.status_code in (401, 403):
-                        hint = (
-                            " — репозиторий закрытый (gated) или нужен токен Hugging Face: "
-                            "открой страницу модели в браузере, войди в аккаунт и нажми "
-                            "«Agree and access», либо используй открытый зеркальный репозиторий."
+                        hint = _(
+                            " — the repository is gated or needs a Hugging Face token: "
+                            "open the model page in a browser, sign in and click "
+                            "'Agree and access', or use an open mirror repository."
                         )
-                    raise NetworkError(f"HTTP {resp.status_code} при скачивании {url}{hint}")
+                    raise NetworkError(_("HTTP {code} while downloading {url}{hint}").format(
+                        code=resp.status_code, url=url, hint=hint))
                 log.debug(
-                    "download_file: HTTP %s, content-length=%s, попытка %d",
+                    "download_file: HTTP %s, content-length=%s, attempt %d",
                     resp.status_code, resp.headers.get("Content-Length"), attempt,
                 )
 
                 if resp.status_code == 200 and existing:
-                    # сервер не поддержал Range — качаем заново
+                    # the server ignored Range — download from scratch
                     existing = 0
                     mode = "wb"
                 else:
@@ -265,7 +264,7 @@ def download_file(
                 with open(part, mode) as fh:
                     for block in resp.iter_content(chunk_size=HTTP_CHUNK):
                         if cancel is not None and cancel():
-                            raise DownloadCancelled("Скачивание отменено")
+                            raise DownloadCancelled(_("Download cancelled"))
                         if not block:
                             continue
                         fh.write(block)
@@ -277,11 +276,11 @@ def download_file(
                             progress(done, total, speed, dest.name)
                             last_report = now
 
-                # верификация: оборванное соединение может закрыть поток без
-                # исключения — сверяем фактический размер с заявленным
+                # verification: a dropped connection may close the stream
+                # without an exception — compare actual size with declared
                 actual = part.stat().st_size if part.exists() else 0
                 if total and actual != total:
-                    raise _IncompleteError(f"получено {actual} из {total} байт")
+                    raise _IncompleteError(_("got {done} of {total} bytes").format(done=actual, total=total))
             break
         except (
             requests.exceptions.ConnectionError,
@@ -290,13 +289,14 @@ def download_file(
             _IncompleteError,
         ) as exc:
             if cancel is not None and cancel():
-                raise DownloadCancelled("Скачивание отменено") from exc
+                raise DownloadCancelled(_("Download cancelled")) from exc
             if attempt >= max_attempts:
-                raise NetworkError(f"Не удалось скачать {url} после {attempt} попыток: {exc}") from exc
+                raise NetworkError(_("Failed to download {url} after {n} attempts: {exc}").format(
+                    url=url, n=attempt, exc=exc)) from exc
             wait = min(2 ** attempt, backoff_cap)
-            log.warning("Сеть моргнула (%s), повтор через %d с…", exc.__class__.__name__, wait)
+            log.warning(_("Network hiccup (%s), retry in %d s…"), exc.__class__.__name__, wait)
             _sleep_cancelable(wait, cancel)
-            # пересчитываем смещение для доозагрузки
+            # recompute the resume offset
             existing = part.stat().st_size if part.exists() else 0
             headers = {"Range": f"bytes={existing}-"} if existing else {}
 
@@ -304,20 +304,20 @@ def download_file(
         progress(done, total or done, 0.0, dest.name)
 
     if not part.exists() or part.stat().st_size == 0:
-        raise NetworkError(f"Пустой файл после скачивания: {url}")
+        raise NetworkError(_("Empty file after download: {url}").format(url=url))
 
     final_size = part.stat().st_size
     elapsed = max(time.time() - started, 1e-6)
     os.replace(part, dest)
     log.debug(
-        "download_file: готово %s (%s за %.1f с, %.1f МБ/с)",
-        dest.name, f"{final_size} байт", elapsed, final_size / elapsed / (1024 * 1024),
+        "download_file: done %s (%s in %.1f s, %.1f MB/s)",
+        dest.name, f"{final_size} bytes", elapsed, final_size / elapsed / (1024 * 1024),
     )
     return dest
 
 
 def extract_zip(archive: Path, dest_dir: Path, progress: Optional[Callable[[float], None]] = None) -> List[Path]:
-    """Аккуратно распаковывает zip (Vosk-модели), защищаясь от zip-slip."""
+    """Safely extract a zip (Vosk models), protected against zip-slip."""
     import zipfile
 
     dest_dir = Path(dest_dir)
@@ -327,7 +327,7 @@ def extract_zip(archive: Path, dest_dir: Path, progress: Optional[Callable[[floa
     with zipfile.ZipFile(archive) as zf:
         members = [m for m in zf.infolist() if not m.is_dir()]
         total = max(1, len(members))
-        # Vosk-архивы содержат общую корневую папку — срезаем её
+        # Vosk archives contain a common root folder — strip it
         roots = {m.filename.split("/")[0] for m in members}
         strip_root = len(roots) == 1 and all("/" in m.filename for m in members)
 
@@ -341,7 +341,7 @@ def extract_zip(archive: Path, dest_dir: Path, progress: Optional[Callable[[floa
             try:
                 target.relative_to(dest_dir.resolve())
             except ValueError as exc:
-                raise NetworkError(f"Небезопасный путь в архиве: {member.filename}") from exc
+                raise NetworkError(_("Unsafe path in the archive: {name}").format(name=member.filename)) from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member) as src, open(target, "wb") as dst:
                 while True:
@@ -371,7 +371,7 @@ def filename_from_url(url: str) -> str:
 
 
 def guess_model_kind(name: str) -> str:
-    """Грубая оценка типа модели по имени файла/репозитория (для автоопределения)."""
+    """Rough model type guess by file/repo name (for autodetection)."""
     low = name.lower()
     if "vosk" in low or low.endswith(".zip"):
         return "vosk"

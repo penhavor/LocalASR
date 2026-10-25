@@ -1,4 +1,4 @@
-"""Панель моделей: поиск, фильтры (включая числовые диапазоны), сортировка, карточки."""
+"""Models panel: search, filters (including numeric ranges), sorting, cards."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..constants import ENGINE_LABELS, ENGINES
 from ..core.models_catalog import ModelCatalog, ModelEntry
+from ..i18n import _
 from ..logutils import get_logger
 from ..settings import Settings
 from . import compat
@@ -30,23 +31,22 @@ from .widgets import ModelCard, make_label
 
 log = get_logger("ui.models")
 
-# Сортировки: (ключ, подпись). Числовые характеристики sorts поддерживают
-# диапазоны-фильтры (см. _apply_filters), чтобы список не зависел от
-# «зашитых» весовых категорий и оставался гибким в любом году.
+# Sort modes: (key, label). Numeric sorts support range filters so the list
+# never depends on hard-coded weight categories.
 SORTS = [
-    ("default", "По умолчанию"),
-    ("quality", "По точности (выше → ниже)"),
-    ("speed", "По скорости (быстрее → медленнее)"),
-    ("size", "По размеру (меньше → больше)"),
-    ("ram", "По памяти (меньше → больше)"),
-    ("params", "По числу параметров (больше → меньше)"),
-    ("year", "По году релиза (новые → старые)"),
-    ("name", "По названию (А → Я)"),
+    ("default", "Default"),
+    ("quality", "By accuracy (high → low)"),
+    ("speed", "By speed (fast → slow)"),
+    ("size", "By size (small → large)"),
+    ("ram", "By memory (low → high)"),
+    ("params", "By parameter count (high → low)"),
+    ("year", "By release year (new → old)"),
+    ("name", "By name (A → Z)"),
 ]
 
 
 def _range_row(label_text: str, tooltip: str, lo_widget, hi_widget, suffix: str) -> QWidget:
-    """Строка фильтра-диапазона: «подпись: [от] — [до]»."""
+    """Range filter row: "label: [from] — [to]"."""
     row = QWidget()
     layout = QHBoxLayout(row)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -64,7 +64,7 @@ def _range_row(label_text: str, tooltip: str, lo_widget, hi_widget, suffix: str)
 
 
 class ModelListPanel(QFrame):
-    """Список моделей с фильтрами. Ничего не качает сам — только сигналы."""
+    """Model list with filters. Downloads nothing itself — signals only."""
 
     modelSelected = Signal(object)        # ModelEntry
     downloadRequested = Signal(object)    # ModelEntry
@@ -86,7 +86,7 @@ class ModelListPanel(QFrame):
         self.hardware = hardware or {}
         self.settings = settings
         self._cards: Dict[str, ModelCard] = {}
-        # дебаунс сохранения состояния фильтров в settings.json
+        # debounce saving the filter state into settings.json
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(400)
@@ -103,39 +103,38 @@ class ModelListPanel(QFrame):
         root.setSpacing(10)
 
         header = QHBoxLayout()
-        title = make_label("Модели", "H1")
-        title.setToolTip("Каталог моделей распознавания: скачанные и доступные для загрузки")
+        title = make_label(_("Models"), "H1")
+        title.setToolTip(_("Recognition model catalog: downloaded and available for download"))
         header.addWidget(title)
         header.addStretch(1)
 
         self.count_label = make_label("", "Muted")
         header.addWidget(self.count_label)
 
-        # --- переключатель «свернуть/показать фильтры» ----------------------- #
-        # По умолчанию фильтры РАСКРЫТЫ. Когда они мешают (хочется видеть
-        # больше карточек моделей за раз) — сворачиваются одним кликом;
-        # состояние сохраняется в settings.json (catalog_filters.collapsed).
-        self.filters_toggle = QPushButton("▾ Фильтры")
+        # --- collapse/show filters toggle ------------------------------------- #
+        # Filters are EXPANDED by default; one click collapses them so more
+        # cards fit. The state is saved in settings.json (catalog_filters.collapsed).
+        self.filters_toggle = QPushButton(_("▾ Filters"))
         self.filters_toggle.setObjectName("Link")
         self.filters_toggle.setCursor(compat.CURSOR_POINTING_HAND)
-        self.filters_toggle.setToolTip(
-            "Свернуть/показать панель фильтров каталога.\n"
-            "В свёрнутом виде в списке помещается больше моделей."
-        )
+        self.filters_toggle.setToolTip(_(
+            "Collapse/show the catalog filter panel.\n"
+            "Collapsed: more models fit in the list."
+        ))
         self.filters_toggle.clicked.connect(self._toggle_filters)
         header.addWidget(self.filters_toggle)
         root.addLayout(header)
 
         subtitle = make_label(
-            "Скачай модель, затем выбери её — кликом по карточке или в списке "
-            "«Модель» в блоке «3 · Работа». Пока модель не выбрана, кнопка "
-            "«РАБОТАТЬ» неактивна.",
+            _("Download a model, then select it — by clicking its card or in the "
+              "\"Model\" list of block \"3 · Work\". Until a model is selected, the "
+              "RUN button is inactive."),
             "Dim",
             word_wrap=True,
         )
         root.addWidget(subtitle)
 
-        # --- фильтры ------------------------------------------------------ #
+        # --- filters ----------------------------------------------------------- #
         filters = QFrame()
         filters.setObjectName("FiltersFrame")
         self.filters_frame = filters
@@ -146,70 +145,70 @@ class ModelListPanel(QFrame):
 
         row = 0
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск: название, тег, язык, описание…")
+        self.search.setPlaceholderText(_("Search: name, tag, language, description…"))
         self.search.setClearButtonEnabled(True)
-        self.search.setToolTip("Ищет по названию, ID, описанию, тегам и языкам модели")
+        self.search.setToolTip(_("Searches model name, ID, description, tags and languages"))
         self.search.textChanged.connect(self._apply_filters)
         filters_layout.addWidget(self.search, row, 0, 1, 2)
 
         self.engine_filter = QComboBox()
-        self.engine_filter.addItem("Все движки", "")
+        self.engine_filter.addItem(_("All engines"), "")
         for engine in ENGINES:
-            self.engine_filter.addItem(ENGINE_LABELS[engine], engine)
-        self.engine_filter.setToolTip(
-            "Движок = чем считаем модель:\n"
-            "• faster-whisper — быстрее всех на CPU/GPU (основной);\n"
-            "• whisper.cpp — минимум RAM;\n"
-            "• Vosk — мгновенный старт, простее по качеству;\n"
-            "• Qwen3-ASR / GigaAM — torch-модели нового поколения (ставятся по требованию)."
-        )
+            self.engine_filter.addItem(_(ENGINE_LABELS[engine]), engine)
+        self.engine_filter.setToolTip(_(
+            "Engine = what computes the model:\n"
+            "• faster-whisper — fastest on CPU/GPU (primary);\n"
+            "• whisper.cpp — minimal RAM;\n"
+            "• Vosk — instant start, simpler quality;\n"
+            "• Qwen3-ASR / GigaAM — new-generation torch models (installed on demand)."
+        ))
         self.engine_filter.currentIndexChanged.connect(self._apply_filters)
         filters_layout.addWidget(self.engine_filter, row, 2, 1, 2)
 
         row += 1
         self.vendor_filter = QComboBox()
-        self.vendor_filter.setToolTip(
-            "Кто сделал модель: OpenAI (Whisper), Qwen (Alibaba), Sber (GigaAM), "
-            "fine-tune'ы сообщества и т.д."
-        )
+        self.vendor_filter.setToolTip(_(
+            "Who made the model: OpenAI (Whisper), Qwen (Alibaba), Sber (GigaAM), "
+            "community fine-tunes etc."
+        ))
         self.vendor_filter.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Производитель"), row, 0)
+        filters_layout.addWidget(self._filter_label(_("Vendor")), row, 0)
         filters_layout.addWidget(self.vendor_filter, row, 1)
 
         self.quality_filter = QComboBox()
-        self.quality_filter.setToolTip(
-            "Минимальная оценка точности (звёзды в карточке).\n"
-            "★★★★ и выше — модели, пригодные для конспекта без вычитки."
-        )
+        self.quality_filter.setToolTip(_(
+            "Minimum accuracy rating (stars on the card).\n"
+            "★★★★ and above — models good enough for notes without proofreading."
+        ))
         self.quality_filter.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Точность"), row, 2)
+        filters_layout.addWidget(self._filter_label(_("Accuracy")), row, 2)
         filters_layout.addWidget(self.quality_filter, row, 3)
 
-        # --- числовые диапазоны (гибкие, не привязаны к «весовым категориям») --- #
+        # --- numeric ranges (flexible, not tied to weight categories) ----------- #
         row += 1
-        self.size_lo = self._spin(0, 1_000_000, " МБ")
-        self.size_hi = self._spin(0, 1_000_000, " МБ")
-        filters_layout.addWidget(self._filter_label("Размер, МБ"), row, 0)
+        self.size_lo = self._spin(0, 1_000_000, _(" MB"))
+        self.size_hi = self._spin(0, 1_000_000, _(" MB"))
+        filters_layout.addWidget(self._filter_label(_("Size, MB")), row, 0)
         filters_layout.addWidget(
             _range_row(
-                "Размер", 
-                "Диапазон размера файла модели в мегабайтах.\n"
-                "«—» = без ограничения. Например: от 500 до 2000.",
-                self.size_lo, self.size_hi, " МБ",
+                _("Size"),
+                _("Model file size range in megabytes.\n"
+                  "\"—\" = no limit. Example: from 500 to 2000."),
+                self.size_lo, self.size_hi, _(" MB"),
             ),
             row, 1, 1, 3,
         )
 
         row += 1
-        self.ram_lo = self._spin(0, 200_000, " МБ")
-        self.ram_hi = self._spin(0, 200_000, " МБ")
-        filters_layout.addWidget(self._filter_label("Память, МБ"), row, 0)
+        self.ram_lo = self._spin(0, 200_000, _(" MB"))
+        self.ram_hi = self._spin(0, 200_000, _(" MB"))
+        filters_layout.addWidget(self._filter_label(_("Memory, MB")), row, 0)
         filters_layout.addWidget(
             _range_row(
-                "Память",
-                "Диапазон потребления оперативной памяти в работе.\n"
-                "Свою свободную RAM смотри в статус-баре внизу окна.",
-                self.ram_lo, self.ram_hi, " МБ",
+                _("Memory"),
+                _("Runtime RAM usage range.\n"
+                  "See your free RAM in the status bar at the bottom."),
+                self.ram_lo, self.ram_hi, _(" MB"),
             ),
             row, 1, 1, 3,
         )
@@ -217,54 +216,54 @@ class ModelListPanel(QFrame):
         row += 1
         self.year_lo = self._spin(2015, 2100, "")
         self.year_hi = self._spin(2015, 2100, "")
-        filters_layout.addWidget(self._filter_label("Год релиза"), row, 0)
+        filters_layout.addWidget(self._filter_label(_("Release year")), row, 0)
         filters_layout.addWidget(
             _range_row(
-                "Год релиза",
-                "Диапазон годов выпуска весов модели (любые числа).\n"
-                "Модели с неизвестным годом под фильтр не попадут.",
+                _("Release year"),
+                _("Model weight release year range (any numbers).\n"
+                  "Models with an unknown year will not match the filter."),
                 self.year_lo, self.year_hi, "",
             ),
             row, 1, 1, 3,
         )
 
         row += 1
-        self.params_lo = self._dspin(0.0, 100.0, " млрд")
-        self.params_hi = self._dspin(0.0, 100.0, " млрд")
-        filters_layout.addWidget(self._filter_label("Параметры"), row, 0)
+        self.params_lo = self._dspin(0.0, 100.0, _(" B"))
+        self.params_hi = self._dspin(0.0, 100.0, _(" B"))
+        filters_layout.addWidget(self._filter_label(_("Parameters")), row, 0)
         filters_layout.addWidget(
             _range_row(
-                "Параметры",
-                "Диапазон числа параметров модели (в миллиардах).\n"
-                "Больше параметров — обычно точнее, но медленнее и прожорливее.",
-                self.params_lo, self.params_hi, " млрд",
+                _("Parameters"),
+                _("Model parameter count range (in billions).\n"
+                  "More parameters usually means more accurate but slower and hungrier."),
+                self.params_lo, self.params_hi, _(" B"),
             ),
             row, 1, 1, 3,
         )
 
         row += 1
         self.sort_combo = QComboBox()
-        self.sort_combo.setToolTip("Порядок карточек в списке")
+        self.sort_combo.setToolTip(_("Card order in the list"))
         self.sort_combo.currentIndexChanged.connect(self._apply_filters)
-        filters_layout.addWidget(self._filter_label("Сортировка"), row, 0)
+        filters_layout.addWidget(self._filter_label(_("Sorting")), row, 0)
         filters_layout.addWidget(self.sort_combo, row, 1, 1, 2)
 
-        self.reset_button = QPushButton("Сбросить")
+        self.reset_button = QPushButton(_("Reset"))
         self.reset_button.setObjectName("Ghost")
         self.reset_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.reset_button.setToolTip("Вернуть все фильтры, поиск и сортировку в исходное состояние")
+        self.reset_button.setToolTip(_("Return all filters, search and sorting to the initial state"))
         self.reset_button.clicked.connect(self.reset_filters_to_defaults)
         filters_layout.addWidget(self.reset_button, row, 3)
 
         row += 1
         toggles = QHBoxLayout()
         toggles.setSpacing(14)
-        self.only_installed = QCheckBox("Только установленные")
-        self.only_installed.setToolTip("Показать модели, которые уже скачаны в папку models/")
+        self.only_installed = QCheckBox(_("Installed only"))
+        self.only_installed.setToolTip(_("Show models already downloaded into models/"))
         self.only_installed.toggled.connect(self._apply_filters)
-        self.only_russian = QCheckBox("С русским языком")
+        self.only_russian = QCheckBox(_("Supports Russian"))
         self.only_russian.setChecked(True)
-        self.only_russian.setToolTip("Оставить модели, понимающие русскую речь (сняв галочку, увидишь и EN-only)")
+        self.only_russian.setToolTip(_("Keep models that understand Russian speech (uncheck to see EN-only ones too)"))
         self.only_russian.toggled.connect(self._apply_filters)
         toggles.addWidget(self.only_installed)
         toggles.addWidget(self.only_russian)
@@ -273,28 +272,28 @@ class ModelListPanel(QFrame):
 
         root.addWidget(filters)
 
-        # --- кнопки ------------------------------------------------------- #
+        # --- buttons ------------------------------------------------------------- #
         actions = QHBoxLayout()
         actions.setSpacing(8)
 
-        self.custom_button = QPushButton("＋ Своя модель (ссылка / путь)")
+        self.custom_button = QPushButton(_("＋ Custom model (link / path)"))
         self.custom_button.setObjectName("Ghost")
         self.custom_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.custom_button.setToolTip(
-            "Добавить модель, которой нет в каталоге: HF-репозиторий, прямую ссылку или папку на диске"
-        )
+        self.custom_button.setToolTip(_(
+            "Add a model not in the catalog: an HF repo, a direct link or a folder on disk"
+        ))
         self.custom_button.clicked.connect(self.customRequested)
         actions.addWidget(self.custom_button, stretch=1)
 
-        self.refresh_button = QPushButton("⟳ Обновить каталог")
+        self.refresh_button = QPushButton(_("⟳ Refresh catalog"))
         self.refresh_button.setObjectName("Ghost")
         self.refresh_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.refresh_button.setToolTip("Проверить наличие новых моделей в онлайн-каталоге")
+        self.refresh_button.setToolTip(_("Check the online catalog for new models"))
         self.refresh_button.clicked.connect(self.refreshRequested)
         actions.addWidget(self.refresh_button)
         root.addLayout(actions)
 
-        # --- скролл с карточками ------------------------------------------ #
+        # --- card scroller ---------------------------------------------------------- #
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
@@ -315,13 +314,13 @@ class ModelListPanel(QFrame):
 
         self._fill_filter_options()
 
-    # -- конструкторы виджетов диапазонов -------------------------------- #
+    # -- range widget constructors ------------------------------------------- #
     @staticmethod
     def _spin(minimum: int, maximum: int, suffix: str) -> QSpinBox:
         spin = QSpinBox()
         spin.setRange(minimum, maximum)
         spin.setSuffix(suffix)
-        spin.setValue(minimum)          # минимум = specialValueText «—»
+        spin.setValue(minimum)          # minimum = specialValueText "—"
         spin.setKeyboardTracking(False)
         spin.setCursor(compat.CURSOR_POINTING_HAND)
         return spin
@@ -342,33 +341,33 @@ class ModelListPanel(QFrame):
     def _filter_label(text: str) -> QLabel:
         label = make_label(text, "Muted")
         label.setAlignment(compat.ALIGN_RIGHT_VCENTER)
-        label.setToolTip("Фильтр каталога моделей")
-        # иначе в узкой панели GridLayout сжимает подпись и она обрезается слева
+        label.setToolTip(_("Model catalog filter"))
+        # otherwise the GridLayout squeezes the label in a narrow panel
         label.setMinimumWidth(label.sizeHint().width())
         return label
 
     # ------------------------------------------------------------------ #
     def minimumSizeHint(self):
-        """Панель может сужаться до 340 px: фильтры и карточки переносятся."""
+        """The panel can shrink to 340 px: filters and cards wrap."""
         return QSize(340, 420)
 
     def _fill_filter_options(self) -> None:
-        self.vendor_filter.addItem("Все производители", "")
+        self.vendor_filter.addItem(_("All vendors"), "")
         vendors = sorted(
             {entry.vendor for entry in self.catalog.all() if entry.vendor},
             key=str.lower,
         )
         for vendor in vendors:
-            self.vendor_filter.addItem(vendor, vendor)
+            self.vendor_filter.addItem(_(vendor), vendor)
 
-        self.quality_filter.addItem("Любая точность", 0)
+        self.quality_filter.addItem(_("Any accuracy"), 0)
         for stars in (3, 4, 5):
-            self.quality_filter.addItem("★" * stars + " и выше", stars)
+            self.quality_filter.addItem(_("{stars} and above").format(stars="★" * stars), stars)
 
         for key, title in SORTS:
-            self.sort_combo.addItem(title, key)
+            self.sort_combo.addItem(_(title), key)
 
-        # диапазоны меняются с клавиатуры/стрелок — реагируем на оба события
+        # ranges change via keyboard/arrows — react to both events
         for spin in (self.size_lo, self.size_hi, self.ram_lo, self.ram_hi,
                      self.year_lo, self.year_hi):
             spin.valueChanged.connect(self._apply_filters)
@@ -376,7 +375,7 @@ class ModelListPanel(QFrame):
             spin.valueChanged.connect(self._apply_filters)
 
     # ------------------------------------------------------------------ #
-    #  Сохранение/восстановление состояния фильтров (settings.json)
+    #  Filter state save/restore (settings.json)
     # ------------------------------------------------------------------ #
     def _filters_dict(self) -> dict:
         return {
@@ -398,10 +397,10 @@ class ModelListPanel(QFrame):
         }
 
     # ------------------------------------------------------------------ #
-    #  Сворачивание панели фильтров
+    #  Filter panel collapsing
     # ------------------------------------------------------------------ #
     def _active_filter_count(self) -> int:
-        """Сколько фильтров отличается от значений по умолчанию."""
+        """How many filters differ from their defaults."""
         count = 0
         if self.search.text().strip():
             count += 1
@@ -427,24 +426,25 @@ class ModelListPanel(QFrame):
         self.filters_frame.setVisible(visible)
         active = self._active_filter_count()
         if visible:
-            self.filters_toggle.setText("▾ Фильтры")
-            self.filters_toggle.setToolTip(
-                "Свернуть панель фильтров каталога.\n"
-                "В свёрнутом виде в списке помещается больше моделей."
-            )
+            self.filters_toggle.setText(_("▾ Filters"))
+            self.filters_toggle.setToolTip(_(
+                "Collapse the catalog filter panel.\n"
+                "Collapsed: more models fit in the list."
+            ))
         else:
-            self.filters_toggle.setText(f"▸ Фильтры ({active})" if active else "▸ Фильтры")
+            self.filters_toggle.setText(
+                _("▸ Filters ({n})").format(n=active) if active else _("▸ Filters"))
             self.filters_toggle.setToolTip(
-                "Показать панель фильтров каталога."
-                + (f"\nСейчас активно фильтров: {active} — они продолжают работать в свёрнутом виде."
+                _("Show the catalog filter panel.")
+                + (_("\nActive filters: {n} — they keep working while collapsed.").format(n=active)
                    if active else "")
             )
         if save:
             self._save_filters()
 
     def _toggle_filters(self) -> None:
-        # isHidden(), а не isVisible(): isVisible() у детей ещё не показанной
-        # панели всегда False, и логика переключения переворачивалась
+        # isHidden(), not isVisible(): a child of a not-yet-shown panel always
+        # reports isVisible() == False, which inverted the toggle logic
         self._apply_filters_visibility(self.filters_frame.isHidden())
 
     def _load_filters(self) -> None:
@@ -502,7 +502,7 @@ class ModelListPanel(QFrame):
         self._save_timer.start()
 
     def reset_filters_to_defaults(self) -> None:
-        """Сброс фильтров (кнопка «Сбросить» и общий сброс настроек)."""
+        """Reset filters (the Reset button and the global settings reset)."""
         for widget in (
             self.engine_filter, self.vendor_filter, self.quality_filter, self.sort_combo,
         ):
@@ -530,7 +530,7 @@ class ModelListPanel(QFrame):
 
     # ------------------------------------------------------------------ #
     def rebuild(self) -> None:
-        """Полностью перестраивает список карточек (после установки/удаления)."""
+        """Fully rebuild the card list (after install/delete)."""
         for card in self._cards.values():
             card.setParent(None)
             card.deleteLater()
@@ -555,10 +555,9 @@ class ModelListPanel(QFrame):
             self._cards[entry.id] = card
             self.container_layout.insertWidget(self.container_layout.count() - 1, card)
 
-        self.count_label.setText(
-            f"{len(entries)} в каталоге · {installed_count} установлено"
-        )
-        log.debug("Панель моделей пересобрана: карточек %d, установлено %d", len(entries), installed_count)
+        self.count_label.setText(_("{total} in catalog · {installed} installed").format(
+            total=len(entries), installed=installed_count))
+        log.debug("Models panel rebuilt: %d cards, %d installed", len(entries), installed_count)
         self._apply_filters()
 
     def card(self, model_id: str) -> Optional[ModelCard]:
@@ -613,8 +612,7 @@ class ModelListPanel(QFrame):
         year_hi = int(self.year_hi.value())
         params_lo = float(self.params_lo.value())
         params_hi = float(self.params_hi.value())
-        # у года минимум 2015 — значение «2015..2100» трактуем как диапазон;
-        # если lo == minimum spinbox'а и hi == minimum — фильтр выключен
+        # the year spin minimum is 2015 — "2015..2100" means the filter is off
         year_active = not (year_lo == self.year_lo.minimum() and year_hi == self.year_lo.minimum())
 
         visible_entries: List[ModelEntry] = []
@@ -642,7 +640,7 @@ class ModelListPanel(QFrame):
             if show and year_active:
                 year = entry.released_year or 0
                 if not year:
-                    show = False       # год неизвестен — под диапазон не попадает
+                    show = False       # unknown year — does not match a range
                 else:
                     lo = year_lo if year_lo > self.year_lo.minimum() else 0
                     hi = year_hi if year_hi > self.year_lo.minimum() else 9999
@@ -656,13 +654,16 @@ class ModelListPanel(QFrame):
                 haystack = " ".join(
                     [
                         entry.name,
+                        entry.display_name,
                         entry.id,
                         entry.engine,
                         entry.vendor,
                         entry.description,
+                        _(entry.description),
                         entry.languages_text,
                         entry.quantization or "",
                         " ".join(entry.tags),
+                        " ".join(_(tag) for tag in entry.tags),
                         " ".join(entry.languages),
                     ]
                 ).lower()
@@ -671,7 +672,7 @@ class ModelListPanel(QFrame):
             if show:
                 visible_entries.append(entry)
 
-        # переставляем карточки в порядке сортировки (без пересоздания)
+        # reorder cards per the sort mode (without recreating them)
         ordered = sorted(visible_entries, key=self._sort_key)
         for index, entry in enumerate(ordered):
             card = self._cards[entry.id]
@@ -681,15 +682,15 @@ class ModelListPanel(QFrame):
         visible = len(ordered)
         self.empty_label.setVisible(visible == 0)
         if visible == 0:
-            self.empty_label.setText(
-                "Под эти фильтры ничего не нашлось.\n"
-                "Попробуй ослабить условия (например, снять галочку «С русским языком»\n"
-                "или обнулить диапазоны) либо нажать «Сбросить»."
-            )
-        # свёрнутая панель фильтров: держим счётчик активных фильтров на кнопке
+            self.empty_label.setText(_(
+                "Nothing matched these filters.\n"
+                "Try loosening the conditions (e.g. uncheck \"Supports Russian\" "
+                "or zero the ranges) or press \"Reset\"."
+            ))
+        # collapsed filter panel: keep the active-filter counter on the button
         if self.filters_frame.isHidden():
             self._apply_filters_visibility(False, save=False)
         log.debug(
-            "Фильтры каталога: видно %d из %d | состояние=%s",
+            "Catalog filters: %d of %d visible | state=%s",
             visible, len(self._cards), self._filters_dict(),
         )

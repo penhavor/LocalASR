@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Тесты целостности установки моделей (задача 5b).
+"""Model installation integrity tests (local HTTP server, no internet).
 
-Всё работает на ЛОКАЛЬНОМ http-сервере — интернет не нужен. Проверяется:
-  * успешная установка: installed.json на месте, маркер частичной установки
-    снят, каталог видит модель как установленную, движок определён (qwen-asr);
-  * «недокачанный» файл (размер не совпал с планом) -> InstallError, папка
-    помечена .localasr-partial.json, каталог НЕ считает модель установленной
-    (регрессия бага «Qwen3-ASR без preprocessor_config.json выглядел готовым»);
-  * отмена установки -> маркер остаётся, модель не «установлена»;
-  * повторная установка пропускает уже скачанные целые файлы (resume) и
-    успешно завершается;
-  * uninstall_model убирает и частичную папку тоже.
+  * successful install: installed.json present, the partial marker removed,
+    the catalog sees the model as installed, the engine is detected (qwen-asr);
+  * a "truncated" file (size differs from the plan) -> InstallError, the
+    folder keeps .localasr-partial.json and the catalog does NOT treat the
+    model as installed;
+  * cancelling an install -> the marker stays, the model is not "installed";
+  * reinstalling skips already complete files (resume) and finishes fine;
+  * uninstall_model removes the partial folder as well.
 
-Запуск:  cd <корень проекта> && python tests/test_download_integrity.py
+Run:  cd <project root> && python tests/test_download_integrity.py
 """
 from __future__ import annotations
 
@@ -30,6 +28,10 @@ os.environ.setdefault("LOCALASR_QUIET", "1")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+from app import i18n  # noqa: E402
+
+i18n.init("ru")  # stable language for message assertions
 
 from app.constants import ENGINE_QWEN_ASR  # noqa: E402
 from app.core import net  # noqa: E402
@@ -53,7 +55,7 @@ def check(cond: bool, message: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Локальный «Hugging Face»
+#  Local "Hugging Face"
 # --------------------------------------------------------------------------- #
 
 FILES: dict[str, bytes] = {
@@ -67,9 +69,9 @@ FILES: dict[str, bytes] = {
     "model.safetensors": b"\x00" * 4096,
 }
 
-#: файлы, которые сервер намеренно отдаёт ОБРЕЗАННЫМИ (симуляция обрыва сети)
+#: files the server deliberately serves TRUNCATED (simulating a network drop)
 TRUNCATED: set[str] = set()
-#: счётчик обращений к каждому файлу (для проверки resume)
+#: per-file request counter (for the resume check)
 HITS: dict[str, int] = {}
 
 
@@ -91,7 +93,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):  # noqa: N802
         self.do_GET()
 
-    def log_message(self, *args):  # тишина в консоли
+    def log_message(self, *args):  # console silence
         pass
 
 
@@ -105,7 +107,7 @@ def start_server() -> tuple[http.server.ThreadingHTTPServer, str]:
 def make_entry() -> ModelEntry:
     return ModelEntry(
         id="qwen3-asr-test",
-        name="Qwen3-ASR (тестовая)",
+        name="Qwen3-ASR (test)",
         engine=ENGINE_QWEN_ASR,
         source="test/qwen3-asr",
         languages=["ru", "en"],
@@ -113,7 +115,7 @@ def make_entry() -> ModelEntry:
 
 
 def patch_net(base_url: str):
-    """Подменяет HF-API на локальный сервер."""
+    """Replace the HF API with the local server."""
 
     def fake_hf_tree(repo_id, subfolder="", revision="main", recursive=True):
         return [net.RemoteFile(name, len(data), False) for name, data in FILES.items()]
@@ -137,60 +139,60 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
 
-            print("== успешная установка ==")
+            print("== successful installation ==")
             entry = make_entry()
             result = install_model(entry, root=root)
             model_dir = root / "models" / "qwen3-asr-test"
-            check(model_dir.is_dir(), f"папка модели создана: {model_dir.name}")
-            check((model_dir / META_FILENAME).is_file(), "installed.json записан")
-            check(not (model_dir / PARTIAL_MARKER).exists(), "маркер частичной установки снят")
+            check(model_dir.is_dir(), f"model folder created: {model_dir.name}")
+            check((model_dir / META_FILENAME).is_file(), "installed.json written")
+            check(not (model_dir / PARTIAL_MARKER).exists(), "partial-install marker removed")
             meta = json.loads((model_dir / META_FILENAME).read_text(encoding="utf-8"))
-            check(meta["engine"] == ENGINE_QWEN_ASR, f"движок определён: {meta['engine']}")
-            check(sorted(meta.get("files") or []) == sorted(FILES), "в метаданных список файлов")
+            check(meta["engine"] == ENGINE_QWEN_ASR, f"engine detected: {meta['engine']}")
+            check(sorted(meta.get("files") or []) == sorted(FILES), "file list in metadata")
             check(result.downloaded_bytes == sum(len(v) for v in FILES.values()),
-                  "скачанный объём совпал с планом")
+                  "downloaded volume matches the plan")
 
             catalog = ModelCatalog(root=root)
             installed = catalog.get("qwen3-asr-test")
-            check(installed is not None and installed.installed, "каталог видит модель установленной")
+            check(installed is not None and installed.installed, "catalog sees the model as installed")
 
-            print("== недокачанный файл -> установка падает, модель НЕ «установлена» ==")
+            print("== truncated file -> install fails, model is NOT 'installed' ==")
             uninstall_model(installed, root=root)
-            check(not model_dir.exists(), "старая папка удалена")
+            check(not model_dir.exists(), "old folder removed")
             TRUNCATED.add("model.safetensors")
             entry2 = make_entry()
             try:
                 install_model(entry2, root=root)
-                check(False, "обрезанный файл должен приводить к InstallError")
+                check(False, "a truncated file must raise InstallError")
             except InstallError as exc:
-                check("повреждены или недокачаны" in str(exc), f"понятная ошибка: {str(exc)[:80]}…")
-            check((model_dir / PARTIAL_MARKER).is_file(), "маркер частичной установки остался")
-            check(not (model_dir / META_FILENAME).exists(), "installed.json НЕ создан")
+                check("повреждены или недокачаны" in str(exc), f"clear error: {str(exc)[:80]}…")
+            check((model_dir / PARTIAL_MARKER).is_file(), "partial marker kept")
+            check(not (model_dir / META_FILENAME).exists(), "installed.json NOT created")
             catalog.refresh_installed()
             entry_after = catalog.get("qwen3-asr-test")
             check(
                 entry_after is None or not entry_after.installed,
-                "каталог НЕ считает недокачанную модель установленной",
+                "the catalog does NOT treat the incomplete model as installed",
             )
 
-            print("== повторная установка: resume целых файлов ==")
+            print("== reinstall: resume of complete files ==")
             TRUNCATED.clear()
             for name in list(HITS):
                 HITS[name] = 0
             entry3 = make_entry()
             install_model(entry3, root=root)
-            check((model_dir / META_FILENAME).is_file(), "после докачки installed.json на месте")
-            check(not (model_dir / PARTIAL_MARKER).exists(), "маркер снят")
-            check(HITS.get("model.safetensors", 0) >= 1, "недокачанный файл перекачан заново")
+            check((model_dir / META_FILENAME).is_file(), "installed.json present after resume")
+            check(not (model_dir / PARTIAL_MARKER).exists(), "marker removed")
+            check(HITS.get("model.safetensors", 0) >= 1, "the truncated file was re-downloaded")
             check(HITS.get("config.json", 0) == 0 and HITS.get("tokenizer.json", 0) == 0,
-                  "целые файлы НЕ перекачивались (resume работает)")
+                  "complete files were NOT re-downloaded (resume works)")
 
-            print("== отмена установки ==")
+            print("== cancelling an install ==")
             uninstall_model(catalog.get("qwen3-asr-test") or entry3, root=root)
             cancel_flag = {"cancel": False}
 
             def cancel_after_first():
-                # отменяем после первого же обращения к серверу (с таймаутом)
+                # cancel right after the first server hit (with a deadline)
                 deadline = time.time() + 10
                 while sum(HITS.values()) < 1 and time.time() < deadline:
                     time.sleep(0.005)
@@ -201,31 +203,31 @@ def main() -> int:
             entry4 = make_entry()
             try:
                 install_model(entry4, root=root, cancel=lambda: cancel_flag["cancel"])
-                check(False, "отмена должна прерывать установку")
+                check(False, "cancellation must interrupt the install")
             except net.DownloadCancelled:
-                check(True, "отмена прервала установку (DownloadCancelled)")
-            check((model_dir / PARTIAL_MARKER).is_file(), "после отмены маркер остался")
+                check(True, "cancellation interrupted the install (DownloadCancelled)")
+            check((model_dir / PARTIAL_MARKER).is_file(), "marker kept after cancellation")
             catalog.refresh_installed()
             after_cancel = catalog.get("qwen3-asr-test")
             check(after_cancel is None or not after_cancel.installed,
-                  "отменённая установка не видна как «установленная»")
+                  "a cancelled install is not seen as 'installed'")
             check(not any(p.suffix == ".part" for p in model_dir.rglob("*.part")),
-                  "недокачанные .part-файлы убраны")
+                  "incomplete .part files cleaned up")
 
-            print("== uninstall убирает частичную папку ==")
-            check(uninstall_model(entry4, root=root), "uninstall_model удалил частичную папку")
-            check(not model_dir.exists(), "папки больше нет")
+            print("== uninstall removes the partial folder ==")
+            check(uninstall_model(entry4, root=root), "uninstall_model deleted the partial folder")
+            check(not model_dir.exists(), "folder is gone")
     finally:
         net.hf_tree, net.hf_resolve_url = original
         server.shutdown()
 
     print()
     if failures:
-        print(f"ПРОВАЛЕНО: {len(failures)}")
+        print(f"FAILED: {len(failures)}")
         for item in failures:
             print("  -", item)
         return 1
-    print("ТЕСТ ЦЕЛОСТНОСТИ УСТАНОВКИ ПРОЙДЕН")
+    print("INSTALLATION INTEGRITY TEST PASSED")
     return 0
 
 

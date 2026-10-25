@@ -1,4 +1,4 @@
-"""Определение железа: CPU, RAM, GPU. Нужно, чтобы советовать адекватную модель."""
+"""Hardware detection: CPU, RAM, GPU — used to recommend a suitable model."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+from ..i18n import _
 from ..logutils import get_logger
 
 log = get_logger("sysinfo")
@@ -32,8 +33,8 @@ class GpuInfo:
 
 @dataclass
 class HardwareInfo:
-    # ВАЖНО: поле не должно называться `platform` — иначе внутри тела класса
-    # имя модуля перекрывается аннотацией поля и `platform.platform()` падает.
+    # IMPORTANT: the field must not be named `platform` — it would shadow the
+    # module name inside the class body and break `platform.platform()`.
     os_name: str = field(default_factory=platform_mod.system)
     platform_detail: str = field(default_factory=platform_mod.platform)
     python: str = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -44,7 +45,7 @@ class HardwareInfo:
     ram_total_mb: int = 0
     ram_available_mb: int = 0
     gpus: List[GpuInfo] = field(default_factory=list)
-    cuda_runtime_ok: Optional[bool] = None  # None = не проверяли
+    cuda_runtime_ok: Optional[bool] = None  # None = not checked
     notes: List[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------ #
@@ -61,21 +62,26 @@ class HardwareInfo:
         return any(g.backend == "cuda" for g in self.gpus)
 
     def recommended_threads(self) -> int:
-        """Сколько потоков отдать модели: физические ядра, но не больше 16."""
+        """Threads for the model: physical cores, capped at 16."""
         cores = self.cpu_physical or self.cpu_logical
         return max(1, min(16, cores))
 
     def summary(self) -> str:
         gpu_text = ", ".join(
-            f"{g.name}" + (f" ({g.vram_mb / 1024:.1f} ГБ VRAM)" if g.vram_mb else "")
+            f"{g.name}" + (_(" ({:.1f} GB VRAM)").format(g.vram_mb / 1024) if g.vram_mb else "")
             for g in self.gpus
-        ) or "нет дискретной GPU"
-        return (
-            f"CPU: {self.cpu_name or self.arch} · {self.cpu_physical or self.cpu_logical} ядер "
-            f"({self.cpu_logical} потоков)\n"
-            f"RAM: {self.ram_total_mb / 1024:.1f} ГБ (свободно {self.ram_available_mb / 1024:.1f} ГБ)\n"
-            f"GPU: {gpu_text}\n"
-            f"Python: {self.python} · {self.platform_detail}"
+        ) or _("no discrete GPU")
+        return _(
+            "CPU: {cpu} · {cores} cores ({threads} threads)\n"
+            "RAM: {ram:.1f} GB (free {free:.1f} GB)\n"
+            "GPU: {gpu}\n"
+            "Python: {py} · {plat}"
+        ).format(
+            cpu=self.cpu_name or self.arch,
+            cores=self.cpu_physical or self.cpu_logical,
+            threads=self.cpu_logical,
+            ram=self.ram_total_mb / 1024, free=self.ram_available_mb / 1024,
+            gpu=gpu_text, py=self.python, plat=self.platform_detail,
         )
 
     def to_dict(self) -> dict:
@@ -85,7 +91,7 @@ class HardwareInfo:
 
 
 # --------------------------------------------------------------------------- #
-#  Сбор информации
+#  Collecting info
 # --------------------------------------------------------------------------- #
 
 
@@ -126,9 +132,8 @@ def _cpu_name() -> str:
 
 
 def _cpu_physical_windows_ctypes() -> int:
-    """Физические ядра через GetLogicalProcessorInformation (без wmic).
-
-    wmic удалён из Windows 11 24H2+, поэтому основной путь — WinAPI.
+    """Physical cores via GetLogicalProcessorInformation (wmic is removed
+    from Windows 11 24H2+, so WinAPI is the primary path).
     """
     try:
         import ctypes
@@ -143,7 +148,7 @@ def _cpu_physical_windows_ctypes() -> int:
         RELATION_PROCESSOR_CORE = 0
         kernel32 = ctypes.windll.kernel32
         buffer_length = ctypes.c_ulong(0)
-        # первый вызов всегда «неудачный» — узнаём нужный размер буфера
+        # the first call always "fails" — it reports the required buffer size
         kernel32.GetLogicalProcessorInformation(None, ctypes.byref(buffer_length))
         if not buffer_length.value:
             return 0
@@ -177,7 +182,7 @@ def _cpu_physical() -> int:
         try:
             out = _run(["nproc", "--all"]) or _run(["getconf", "_NPROCESSORS_ONLN"])
             if out and out.strip().isdigit():
-                # nproc отдаёт логические; попробуем посчитать физические из cpuinfo
+                # nproc reports logical; count physical cores from cpuinfo
                 cores = set()
                 with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as fh:
                     phys = core_id = None
@@ -197,7 +202,7 @@ def _cpu_physical() -> int:
 
 
 def _memory() -> tuple[int, int]:
-    """(всего МБ, доступно МБ) — без внешних зависимостей."""
+    """(total MB, available MB) — no external dependencies."""
     total = avail = 0
     try:
         if IS_WINDOWS:
@@ -239,7 +244,7 @@ def _memory() -> tuple[int, int]:
                     elif key in ("MemAvailable", "MemFree"):
                         avail = max(avail, kb // 1024)
     except Exception as exc:  # noqa: BLE001
-        log.debug("Не удалось прочитать память: %s", exc)
+        log.debug("Failed to read memory info: %s", exc)
     return total, avail
 
 
@@ -281,14 +286,14 @@ def _nvidia_gpus() -> List[GpuInfo]:
 
 
 def _check_cuda_runtime() -> bool:
-    """Проверяет, что CTranslate2 реально видит CUDA (без загрузки модели)."""
+    """Check that CTranslate2 actually sees CUDA (without loading a model)."""
     try:
         import ctranslate2  # type: ignore
 
         devices = ctranslate2.get_cuda_device_count()
         return bool(devices and devices > 0)
     except Exception as exc:  # noqa: BLE001
-        log.debug("CUDA-проверка ctranslate2: %s", exc)
+        log.debug("ctranslate2 CUDA check: %s", exc)
         return False
 
 
@@ -304,27 +309,27 @@ def collect() -> HardwareInfo:
         info.gpus = gpus
         info.cuda_runtime_ok = _check_cuda_runtime()
         if not info.cuda_runtime_ok:
-            info.notes.append(
-                "Видеокарта NVIDIA найдена, но CTranslate2 не видит CUDA "
-                "(нет cuBLAS/cuDNN 9). Установка: Сервис → Настройки → вкладка «Движки»."
-            )
+            info.notes.append(_(
+                "An NVIDIA GPU was found but CTranslate2 does not see CUDA "
+                "(cuBLAS/cuDNN 9 are missing). Install: Tools → Settings → Engines tab."
+            ))
     elif IS_MACOS and info.arch.lower() in ("arm64", "aarch64"):
-        info.notes.append("Apple Silicon: ускорение идёт через CPU-оптимизации (Accelerate/AMX).")
+        info.notes.append(_("Apple Silicon: acceleration goes through CPU optimizations (Accelerate/AMX)."))
 
     if info.ram_total_mb and info.ram_total_mb < 6000:
-        info.notes.append(
-            "Меньше 6 ГБ RAM — комфортнее работать с моделями размером до ~500 МБ; "
-            "размер каждой модели виден в каталоге (фильтр «Размер, МБ»)."
-        )
+        info.notes.append(_(
+            "Less than 6 GB of RAM — models up to ~500 MB are more comfortable; "
+            "each model's size is visible in the catalog (Size, MB filter)."
+        ))
     return info
 
 
 # --------------------------------------------------------------------------- #
-#  Что рекомендуем под это железо
+#  Recommendations for this hardware
 # --------------------------------------------------------------------------- #
 
 def _hw_get(info: Any, key: str, default: Any = 0) -> Any:
-    """Поле железа из HardwareInfo ИЛИ словаря (GUI передаёт dict)."""
+    """Hardware field from HardwareInfo OR a dict (the GUI passes a dict)."""
     if isinstance(info, dict):
         value = info.get(key, default)
     else:
@@ -332,7 +337,7 @@ def _hw_get(info: Any, key: str, default: Any = 0) -> Any:
     return default if value is None else value
 
 
-# Пороги: (мин. RAM МБ, мин. VRAM МБ) -> «потолок» размера модели на диске (МБ)
+# Thresholds: (min RAM MB, min VRAM MB) -> model size "ceiling" on disk (MB)
 def max_model_size_mb(info: Any) -> int:
     cuda_ok = bool(_hw_get(info, "cuda_runtime_ok", False) or _hw_get(info, "cuda_ok", False))
     vram = int(_hw_get(info, "vram_mb", 0) or 0)
@@ -356,7 +361,7 @@ def max_model_size_mb(info: Any) -> int:
 
 
 def recommended_device(info: HardwareInfo) -> tuple[str, str]:
-    """Возвращает (device, compute_type) под найденное железо."""
+    """Return (device, compute_type) for the detected hardware."""
     if getattr(info, "cuda_runtime_ok", False) and int(getattr(info, "vram_mb", 0) or 0) >= 4_000:
         return "cuda", "float16" if int(info.vram_mb) >= 6_000 else "int8_float16"
     return "cpu", "int8"

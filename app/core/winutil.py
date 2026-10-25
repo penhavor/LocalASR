@@ -1,17 +1,15 @@
-"""Windows-специфика для GUI-процесса: невидимые дочерние консоли.
+"""Windows specifics for the GUI process: invisible child consoles.
 
-Проблема: приложение работает под pythonw.exe (без консоли). Когда ЛЮБАЯ
-библиотека внутри процесса запускает консольную программу (ffmpeg, nvidia-smi,
-pip…) через subprocess БЕЗ флага CREATE_NO_WINDOW, Windows создаёт для неё
-НОВОЕ консольное окно — оно мигает в панели задач и крадёт фокус.
+The app runs under pythonw.exe (no console). When ANY library spawns a
+console program (ffmpeg, nvidia-smi, pip…) via subprocess WITHOUT
+CREATE_NO_WINDOW, Windows creates a new console window that flashes in the
+taskbar and steals focus. Our own code sets creationflags properly, but
+third-party code (e.g. modeling_gigaam.py calling ffmpeg) does not — so at
+GUI startup (only when the process really has no console) we add
+CREATE_NO_WINDOW to every subprocess.Popen in the process.
 
-Свой код мы запускаем аккуратно (creationflags везде проставлены), но чужой —
-нет: например, modeling_gigaam.py дёргает ffmpeg напрямую. Поэтому при старте
-GUI (и только если у процесса действительно нет консоли) мы добавляем
-CREATE_NO_WINDOW всем subprocess.Popen в процессе.
-
-Флаги DETACHED_PROCESS / CREATE_NEW_CONSOLE / CREATE_NO_WINDOW взаимоисключающие —
-если вызывающий уже выставил один из них, мы не вмешиваемся.
+DETACHED_PROCESS / CREATE_NEW_CONSOLE / CREATE_NO_WINDOW are mutually
+exclusive: if the caller already set one of them, we do not interfere.
 """
 
 from __future__ import annotations
@@ -31,21 +29,20 @@ def _has_console() -> bool:
 
         return bool(ctypes.windll.kernel32.GetConsoleWindow())
     except Exception:  # noqa: BLE001
-        return True  # не смогли определить — считаем, что консоль есть (не мешаем)
+        return True  # cannot tell — assume a console exists (do not interfere)
 
 
 def suppress_child_consoles() -> bool:
-    """Делает все дочерние консольные процессы невидимыми (только Windows+pythonw).
+    """Make all child console processes invisible (Windows + pythonw only).
 
-    Возвращает True, если патч применён. Идемпотентна.
+    Returns True when the patch was applied. Idempotent.
     """
     if os.name != "nt":
         return False
     if getattr(subprocess.Popen, "_localasr_no_window", False):
         return True
     if _has_console():
-        # процесс с консолью (запуск из терминала/батника) — окна детей
-        # наследуют существующую консоль и не мигают; ничего не трогаем
+        # a process with a console (terminal/bat launch): children inherit it
         return False
 
     original_init = subprocess.Popen.__init__

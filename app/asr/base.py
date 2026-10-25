@@ -1,8 +1,8 @@
-"""Общие типы движков распознавания.
+"""Shared types of the recognition engines.
 
-Движок = «чем считаем»: faster-whisper (CTranslate2), whisper.cpp, Vosk.
-Все они приводят результат к единому формату `Segment` из postprocess, поэтому
-GUI, экспорт и постобработка от движка не зависят.
+An engine = "what computes": faster-whisper (CTranslate2), whisper.cpp, Vosk.
+All of them produce the common `Segment` format from postprocess, so GUI,
+export and post-processing are engine-independent.
 """
 
 from __future__ import annotations
@@ -21,37 +21,38 @@ from ..constants import (
     ENGINE_WHISPERCPP,
 )
 from ..core.postprocess import Segment
+from ..i18n import _
 
 CancelToken = Callable[[], bool]
-ProgressCallback = Callable[[float, str], None]      # (0..1, текст)
+ProgressCallback = Callable[[float, str], None]      # (0..1, text)
 SegmentCallback = Callable[[Segment], None]
 
 
 class EngineError(RuntimeError):
-    """Ошибка внутри движка (не удалось загрузить модель, сбой инференса…)."""
+    """Error inside an engine (model load failure, inference crash…)."""
 
 
 class EngineNotInstalled(RuntimeError):
-    """Движок не установлен — GUI предложит доустановить пакеты в .venv."""
+    """The engine is not installed — the GUI will offer to install packages."""
 
     def __init__(self, engine: str, packages: List[str], note: str = "") -> None:
         self.engine = engine
         self.packages = packages
         self.note = note
-        super().__init__(
-            f"Движок «{engine}» не установлен. Нужно поставить: {', '.join(packages) or '—'}."
-        )
+        super().__init__(_(
+            "Engine \"{engine}\" is not installed. Required: {packages}."
+        ).format(engine=engine, packages=", ".join(packages) or "—"))
 
 
 @dataclass
 class ModelRef:
-    """Ссылка на установленную модель (всё, что нужно движку)."""
+    """Reference to an installed model (everything an engine needs)."""
 
     model_id: str
     name: str
     engine: str
-    path: Path                      # папка или файл модели
-    subfolder: str = ""             # для CT2-моделей внутри подпапки
+    path: Path                      # model folder or file
+    subfolder: str = ""             # for CT2 models inside a subfolder
     languages: List[str] = field(default_factory=list)
     defaults: Dict[str, Any] = field(default_factory=dict)
 
@@ -94,7 +95,7 @@ class TranscriptResult:
 
 
 # --------------------------------------------------------------------------- #
-#  Базовый класс движка
+#  Engine base class
 # --------------------------------------------------------------------------- #
 
 
@@ -109,7 +110,7 @@ class ASREngine:
         self.device: str = ""
         self.compute_type: str = ""
 
-    # -- обязательные методы --------------------------------------------- #
+    # -- required methods ---------------------------------------------------- #
     @classmethod
     def is_available(cls) -> bool:
         if not cls.import_name:
@@ -140,11 +141,11 @@ class ASREngine:
         self._model = None
         self.loaded_model_id = None
 
-    # -- вспомогательное -------------------------------------------------- #
+    # -- helpers --------------------------------------------------------------- #
     @property
     def model(self) -> Any:
         if self._model is None:
-            raise EngineError(f"Модель движка {self.name} не загружена")
+            raise EngineError(_("Model of engine {name} is not loaded").format(name=self.name))
         return self._model
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -152,7 +153,7 @@ class ASREngine:
 
 
 def engine_packages(engine: str) -> List[str]:
-    """pip-пакеты, которые нужны движку (читаем requirements/engines.json)."""
+    """pip packages the engine needs (reads requirements/engines.json)."""
     from .. import paths
     import json
 
@@ -181,9 +182,9 @@ def engine_packages(engine: str) -> List[str]:
     }.get(engine, [])
 
 
-#: Соответствие «импортируемый модуль -> pip-пакет», когда имена различаются.
-#: Нужно, чтобы превращать ModuleNotFoundError кода модели в понятное
-#: предложение установить конкретный пакет (политика «установка по требованию»).
+#: "imported module -> pip package" mapping for differing names. Turns a
+#: ModuleNotFoundError from model code into a concrete install offer
+#: (install-on-demand policy).
 MODULE_TO_PIP = {
     "soundfile": "soundfile",
     "pyannote": "pyannote.audio",
@@ -206,7 +207,7 @@ MODULE_TO_PIP = {
 
 
 def pip_package_for_module(module: str) -> str:
-    """pip-пакет для имени импортируемого модуля ('soundfile' -> 'soundfile')."""
+    """pip package for an imported module name ('soundfile' -> 'soundfile')."""
     root = (module or "").split(".")[0]
     return MODULE_TO_PIP.get(root, root)
 
@@ -218,11 +219,10 @@ def _dist_name(spec: str) -> str:
 
 
 def engine_not_installed_from_exc(engine: str, exc: BaseException) -> Optional["EngineNotInstalled"]:
-    """Превращает ModuleNotFoundError кода модели в EngineNotInstalled.
+    """Convert a ModuleNotFoundError from model code into EngineNotInstalled.
 
-    Возвращает None, если исключение не про отсутствующий модуль. Список
-    пакетов = стандартные пакеты движка + пакет для недостающего модуля
-    (pip пропустит уже установленное, докачается только недостающее).
+    Returns None when the exception is not about a missing module. Packages =
+    the engine's standard packages + the missing module's package.
     """
     mod = getattr(exc, "name", None) if isinstance(exc, ModuleNotFoundError) else None
     if not mod:
@@ -234,12 +234,12 @@ def engine_not_installed_from_exc(engine: str, exc: BaseException) -> Optional["
     return EngineNotInstalled(
         engine,
         packages,
-        note=f"Коду модели нужен модуль «{mod}»: {exc}",
+        note=_("Model code needs module \"{mod}\": {exc}").format(mod=mod, exc=exc),
     )
 
 
 def engine_note(engine: str) -> str:
-    """Человеческое пояснение про движок из requirements/engines.json."""
+    """Human-readable engine note from requirements/engines.json."""
     import json
 
     from .. import paths
@@ -259,7 +259,7 @@ def engine_note(engine: str) -> str:
 
 
 def engine_install_size(engine: str) -> str:
-    """Оценка объёма скачивания для установки движка (из engines.json)."""
+    """Estimated download size for installing an engine (from engines.json)."""
     import json
 
     from .. import paths

@@ -1,4 +1,4 @@
-"""Главное окно LocalASR."""
+"""LocalASR main window."""
 
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ from ..constants import (
 )
 from ..core.ffmpeg import ffmpeg_version, find_ffmpeg
 from ..core.models_catalog import ModelCatalog, ModelEntry
+from ..i18n import _, tn
 from ..logutils import attach_qt_sink, detach_qt_sink, get_logger
 from ..settings import Settings
 from . import compat
@@ -79,15 +80,15 @@ from .workers import (
 
 log = get_logger("ui")
 
-MEDIA_FILTER = (
-    "Медиафайлы ({});;Все файлы (*)".format(
+
+def media_filter() -> str:
+    return _("Media files ({});;All files (*)").format(
         " ".join(f"*{ext}" for ext in sorted(MEDIA_EXTENSIONS))
     )
-)
 
 
 # --------------------------------------------------------------------------- #
-#  Иконка (встроенный SVG — не зависит от внешних файлов)
+#  Icon (embedded SVG — no external files)
 # --------------------------------------------------------------------------- #
 
 _ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
@@ -103,14 +104,11 @@ _ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" wid
 
 
 def app_icon() -> QIcon:
-    """Иконка из встроенного SVG (не зависит от внешних файлов и сети).
-
-    Рендерим сразу в несколько размеров, чтобы и в заголовке окна, и в панели
-    задач Windows иконка была чёткой, а не мыльным квадратом.
-    """
+    """Icon from the embedded SVG; rendered at several sizes so the window
+    title and the Windows taskbar stay crisp."""
     icon = QIcon()
     data = QByteArray(_ICON_SVG.encode("utf-8"))
-    try:  # векторный рендер в каждый размер — максимально чётко
+    try:  # vector render per size — maximum sharpness
         from PySide6.QtSvg import QSvgRenderer
 
         renderer = QSvgRenderer(data)
@@ -125,7 +123,7 @@ def app_icon() -> QIcon:
             if not icon.isNull():
                 return icon
     except Exception as exc:  # noqa: BLE001
-        log.debug("QSvgRenderer недоступен, рисуем растром: %s", exc)
+        log.debug("QSvgRenderer unavailable, drawing raster: %s", exc)
     try:
         image = QImage.fromData(data)
         if not image.isNull():
@@ -136,17 +134,17 @@ def app_icon() -> QIcon:
                     )
                 )
     except Exception as exc:  # noqa: BLE001
-        log.debug("Не удалось собрать иконку из SVG: %s", exc)
+        log.debug("Failed to build the icon from SVG: %s", exc)
     return icon
 
 
 # --------------------------------------------------------------------------- #
-#  Главное окно
+#  Main window
 # --------------------------------------------------------------------------- #
 
 
 class MainWindow(QMainWindow):
-    #: записи лога из фоновых потоков приходят в GUI-поток очередью (безопасно)
+    #: log records from background threads reach the GUI thread via a queued signal
     logRecord = Signal(str, str)
 
     def __init__(self, settings: Optional[Settings] = None, catalog: Optional[ModelCatalog] = None) -> None:
@@ -174,13 +172,12 @@ class MainWindow(QMainWindow):
         self._last_job_engine: str = ""
         self._last_install_torch_cuda: bool = False
         self.torch_probe: Optional[TorchCudaProbeWorker] = None
-        # состояние PyTorch в .venv: probed/installed/cuda/detail
+        # PyTorch state in the environment: probed/installed/cuda/detail
         self.gpu_state: dict = {"probed": False, "installed": False, "cuda": False, "detail": ""}
 
-        self.setWindowTitle(f"{APP_NAME} — локальное распознавание речи")
+        self.setWindowTitle(_("{app} — local speech recognition").format(app=APP_NAME))
         self.setWindowIcon(app_icon())
-        # Компактный минимум: интерфейс построен так, что в узком окне всё
-        # переносится по строкам, а остальное можно доскроллить.
+        # Compact minimum: in a narrow window everything wraps and the rest scrolls.
         self.setMinimumSize(940, 620)
         self.setAcceptDrops(True)
 
@@ -189,23 +186,23 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._restore_geometry()
 
-        # ВАЖНО: лог-записи рождаются в фоновых потоках, а виджеты Qt можно
-        # трогать только из GUI-потока — поэтому мост идёт через сигнал
-        # (автоматически доставляется очередью в GUI-поток).
+        # IMPORTANT: log records are born in background threads, and Qt widgets
+        # may only be touched from the GUI thread — hence the signal bridge
+        # (delivered to the GUI thread through a queue automatically).
         self.logRecord.connect(self._on_log_record)
         self.log_handler = attach_qt_sink(self.logRecord.emit)
-        log.info("GUI запущен (%s %s, Python %s)", APP_NAME, APP_VERSION, sys.version.split()[0])
+        log.info(_("GUI started (%s %s, Python %s)"), APP_NAME, APP_VERSION, sys.version.split()[0])
 
-        # Медленный таймер синхронизирует «рантаймовые» состояния кнопок/пунктов
-        # меню (например, «Выгрузить модель» активен, только когда модель в памяти).
+        # A slow timer keeps runtime-dependent buttons/menu items honest
+        # (e.g. "Unload model" is active only while a model is in memory).
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(2000)
         self._state_timer.timeout.connect(self._sync_runtime_actions)
         self._state_timer.start()
         self._sync_runtime_actions()
 
-        # Дебаунс сохранения геометрии окна: любое движение/ресайз сохраняется
-        # не мгновенно, а через паузу — настройки переживают даже аварийный выход.
+        # Debounced window geometry saving: moves/resizes are persisted after
+        # a pause — settings survive even a crash.
         self._geo_timer = QTimer(self)
         self._geo_timer.setSingleShot(True)
         self._geo_timer.setInterval(800)
@@ -214,7 +211,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(60, self._startup_checks)
 
     # ================================================================== #
-    #  Построение интерфейса
+    #  UI construction
     # ================================================================== #
     def _build_ui(self) -> None:
         splitter = QSplitter(compat.HORIZONTAL)
@@ -233,12 +230,12 @@ class MainWindow(QMainWindow):
         self._build_log_dock()
         self._update_work_button()
 
-    # ---------------- левая колонка ------------------------------------ #
+    # ---------------- left column -------------------------------------- #
     def _build_left_panel(self) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(compat.frame_no_frame())
-        # в очень узком окне лучше дать горизонтальную прокрутку, чем обрезать кнопки
+        # in a very narrow window horizontal scrolling beats clipped buttons
         scroll.setHorizontalScrollBarPolicy(compat.SCROLLBAR_AS_NEEDED)
 
         page = QWidget()
@@ -246,17 +243,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 12, 16)
         layout.setSpacing(14)
 
-        # --- заголовок
+        # --- header
         header = QHBoxLayout()
         title = make_label(APP_NAME, "H1")
         header.addWidget(title)
-        header.addWidget(make_label("· локальное распознавание речи без облака", "Muted"))
+        header.addWidget(make_label(_("· local speech recognition without the cloud"), "Muted"))
         header.addStretch(1)
         version = make_label(f"v{APP_VERSION}", "Muted")
         header.addWidget(version)
         layout.addLayout(header)
 
-        # --- 1. ФАЙЛЫ
+        # --- 1. FILES
         files_box = QFrame()
         files_box.setObjectName("SidePanel")
         files_layout = QVBoxLayout(files_box)
@@ -264,40 +261,40 @@ class MainWindow(QMainWindow):
         files_layout.setSpacing(10)
 
         files_header = QHBoxLayout()
-        files_header.addWidget(make_label("1 · Файлы", "H2"))
+        files_header.addWidget(make_label(_("1 · Files"), "H2"))
         files_header.addStretch(1)
-        self.files_count_label = make_label("0 файлов", "Muted")
+        self.files_count_label = make_label(_("0 files"), "Muted")
         files_header.addWidget(self.files_count_label)
         files_layout.addLayout(files_header)
 
         buttons = FlowLayout(spacing=8)
 
-        self.add_files_button = QPushButton("📂 Выбрать файлы…")
+        self.add_files_button = QPushButton(_("📂 Choose files…"))
         self.add_files_button.setObjectName("Primary")
         self.add_files_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.add_files_button.setShortcut(QKeySequence("Ctrl+O"))
-        self.add_files_button.setToolTip("Можно выбрать сразу несколько файлов (Ctrl/Shift в проводнике)")
+        self.add_files_button.setToolTip(_("You can select several files at once (Ctrl/Shift in the file manager)"))
         self.add_files_button.clicked.connect(self.on_add_files)
         buttons.addWidget(self.add_files_button)
 
-        self.add_folder_button = QPushButton("🗀 Папку…")
+        self.add_folder_button = QPushButton(_("🗀 Folder…"))
         self.add_folder_button.setObjectName("Ghost")
         self.add_folder_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.add_folder_button.setToolTip("Добавить все аудио/видео из папки (рекурсивно, включая подпапки)")
+        self.add_folder_button.setToolTip(_("Add all audio/video from a folder (recursively, including subfolders)"))
         self.add_folder_button.clicked.connect(self.on_add_folder)
         buttons.addWidget(self.add_folder_button)
 
-        self.clear_files_button = QPushButton("Очистить")
+        self.clear_files_button = QPushButton(_("Clear"))
         self.clear_files_button.setObjectName("Ghost")
         self.clear_files_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.clear_files_button.setToolTip("Убрать из списка ВСЕ файлы (сами файлы на диске не удаляются)")
+        self.clear_files_button.setToolTip(_("Remove ALL files from the list (files on disk are not deleted)"))
         self.clear_files_button.clicked.connect(lambda: self.file_list.clear_all())
         buttons.addWidget(self.clear_files_button)
 
-        self.remove_selected_button = QPushButton("Убрать выбранные")
+        self.remove_selected_button = QPushButton(_("Remove selected"))
         self.remove_selected_button.setObjectName("Ghost")
         self.remove_selected_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.remove_selected_button.setToolTip("Убрать выделенные строки (Del). Выделение — мышью с Ctrl/Shift, как в проводнике")
+        self.remove_selected_button.setToolTip(_("Remove the highlighted rows (Del). Select with the mouse + Ctrl/Shift, like in a file manager"))
         self.remove_selected_button.setShortcut(QKeySequence("Delete"))
         self.remove_selected_button.clicked.connect(lambda: self.file_list.remove_selected())
         buttons.addWidget(self.remove_selected_button)
@@ -305,56 +302,56 @@ class MainWindow(QMainWindow):
 
         self.file_list = FileListWidget()
         self.file_list.setMinimumHeight(180)
-        self.file_list.setToolTip(
-            "Очередь файлов на распознавание.\n"
-            "Выделение — мышью с Ctrl/Shift, удаление выделенного — клавишей Del\n"
-            "или кнопкой «Убрать выбранные». Сами файлы на диске не изменяются."
-        )
+        self.file_list.setToolTip(_(
+            "Queue of files to recognize.\n"
+            "Select with the mouse + Ctrl/Shift, delete the selection with Del\n"
+            "or the \"Remove selected\" button. Files on disk are not modified."
+        ))
         self.file_list.filesChanged.connect(self._update_files_label)
         files_layout.addWidget(self.file_list, stretch=1)
 
         self.drop_hint = make_label(
-            "Перетащи сюда аудио или видео (mp4, mkv, mp3, wav, m4a, ogg…) — "
-            "видео автоматически превратится в звук.",
+            _("Drag audio or video here (mp4, mkv, mp3, wav, m4a, ogg…) — "
+              "video is converted to sound automatically."),
             "Muted",
             word_wrap=True,
         )
         files_layout.addWidget(self.drop_hint)
         layout.addWidget(files_box, stretch=3)
 
-        # --- 2. ПАРАМЕТРЫ
+        # --- 2. OPTIONS
         options_box = QFrame()
         options_box.setObjectName("SidePanel")
         options_layout = QVBoxLayout(options_box)
         options_layout.setContentsMargins(14, 14, 14, 14)
         options_layout.setSpacing(10)
-        options_layout.addWidget(make_label("2 · Как распознавать и куда сохранять", "H2"))
+        options_layout.addWidget(make_label(_("2 · How to recognize and where to save"), "H2"))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(10)
 
-        language_label = make_label("Язык речи", "Dim")
-        language_label.setToolTip(
-            "Язык, на котором говорят в записи.\n"
-            "«Определить автоматически» — модель сама поймёт язык (чуть медленнее и на\n"
-            "коротких/шумных записях менее надёжно, чем явное указание)."
-        )
+        language_label = make_label(_("Speech language"), "Dim")
+        language_label.setToolTip(_(
+            "The language spoken in the recording.\n"
+            "\"Detect automatically\" — the model figures out the language itself (slightly\n"
+            "slower and less reliable on short/noisy recordings than an explicit choice)."
+        ))
         grid.addWidget(language_label, 0, 0)
         self.language_combo = QComboBox()
         for code, title in LANGUAGES:
-            self.language_combo.addItem(title, code)
+            self.language_combo.addItem(_(title), code)
         self.language_combo.setToolTip(language_label.toolTip())
         language_index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(language_index if language_index >= 0 else 1)
         self.language_combo.currentIndexChanged.connect(self._on_settings_changed)
         grid.addWidget(self.language_combo, 0, 1, 1, 3)
 
-        save_label = make_label("Куда сохранять", "Dim")
-        save_label.setToolTip(
-            "Папка, куда лягут готовые .txt-файлы (имя файла = имени оригинала).\n"
-            "По умолчанию — outputs/ внутри папки проекта."
-        )
+        save_label = make_label(_("Where to save"), "Dim")
+        save_label.setToolTip(_(
+            "Folder for the resulting .txt files (file name = original name).\n"
+            "Default: outputs/ inside the project folder."
+        ))
         grid.addWidget(save_label, 1, 0)
         save_row = QHBoxLayout()
         self.output_edit = QLineEdit()
@@ -363,15 +360,15 @@ class MainWindow(QMainWindow):
         self.output_edit.setToolTip(save_label.toolTip())
         self.output_edit.editingFinished.connect(self._on_settings_changed)
         save_row.addWidget(self.output_edit, stretch=1)
-        browse_output = QPushButton("Обзор…")
+        browse_output = QPushButton(_("Browse…"))
         browse_output.setObjectName("Ghost")
         browse_output.setCursor(compat.CURSOR_POINTING_HAND)
-        browse_output.setToolTip("Выбрать папку для результатов в проводнике")
+        browse_output.setToolTip(_("Choose the results folder in the file manager"))
         browse_output.clicked.connect(self.on_browse_output)
         save_row.addWidget(browse_output)
         reset_output = QToolButton()
         reset_output.setText("↺")
-        reset_output.setToolTip("Вернуть папку по умолчанию: outputs/ внутри проекта")
+        reset_output.setToolTip(_("Restore the default folder: outputs/ inside the project"))
         reset_output.setCursor(compat.CURSOR_POINTING_HAND)
         reset_output.clicked.connect(self._reset_output_dir)
         save_row.addWidget(reset_output)
@@ -382,55 +379,55 @@ class MainWindow(QMainWindow):
         self.output_hint = make_label("", "Muted", word_wrap=True)
         options_layout.addWidget(self.output_hint)
 
-        # галочки переносятся по строкам (FlowLayout), а не обрезаются краем
+        # checkboxes wrap by rows (FlowLayout) instead of being clipped
         toggles = FlowLayout(spacing=14)
-        self.vad_check = QCheckBox("VAD (резать тишину)")
+        self.vad_check = QCheckBox(_("VAD (cut silence)"))
         self.vad_check.setChecked(self.settings.use_vad)
-        self.vad_check.setToolTip(
-            "Silero VAD: вырезает паузы, шум и музыку до распознавания.\n"
-            "Плюсы: быстрее и меньше галлюцинаций («Спасибо за просмотр» на тишине).\n"
-            "Выключи только если в записи важна сама пауза (например, речь с долгими остановками)."
-        )
+        self.vad_check.setToolTip(_(
+            "Silero VAD: cuts pauses, noise and music before recognition.\n"
+            "Pros: faster and fewer hallucinations (\"Thanks for watching\" on silence).\n"
+            "Turn off only if the pauses themselves matter (e.g. speech with long stops)."
+        ))
         toggles.addWidget(self.vad_check)
         self.vad_check.toggled.connect(self._on_settings_changed)
 
-        self.clean_check = QCheckBox("Анти-галлюцинации")
+        self.clean_check = QCheckBox(_("Anti-hallucinations"))
         self.clean_check.setChecked(self.settings.suppress_hallucinations)
-        self.clean_check.setToolTip(
-            "Вычищает «[музыка]», «[аплодисменты]», «Спасибо за просмотр», "
-            "субтитрные вставки и зацикленные повторы фраз.\n"
-            "Держи включённым: на лекциях с тишиной и музыкой без этого в тексте появляется мусор."
-        )
+        self.clean_check.setToolTip(_(
+            "Removes \"[music]\", \"[applause]\", \"Thanks for watching\", "
+            "subtitle inserts and looped phrase repeats.\n"
+            "Keep it on: lectures with silence and music produce junk text without it."
+        ))
         self.clean_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.clean_check)
 
-        self.paragraph_check = QCheckBox("Абзацы")
+        self.paragraph_check = QCheckBox(_("Paragraphs"))
         self.paragraph_check.setChecked(self.settings.paragraphs)
-        self.paragraph_check.setToolTip(
-            "Склеивает короткие сегменты распознавания в абзацы по смысловым паузам.\n"
-            "Выключи, если нужен «телеграфный» формат: каждая фраза с новой строки."
-        )
+        self.paragraph_check.setToolTip(_(
+            "Merges short recognition segments into paragraphs at meaningful pauses.\n"
+            "Turn off for a \"telegraph\" format: every phrase on a new line."
+        ))
         self.paragraph_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.paragraph_check)
 
-        self.timestamps_check = QCheckBox("Таймкоды в .txt")
+        self.timestamps_check = QCheckBox(_("Timecodes in .txt"))
         self.timestamps_check.setChecked(self.settings.add_timestamps_to_txt)
-        self.timestamps_check.setToolTip(
-            "Добавляет в .txt метки времени вида [00:12:34] перед фразами — удобно искать\n"
-            "место в записи. Результат всё равно остаётся обычным .txt-файлом."
-        )
+        self.timestamps_check.setToolTip(_(
+            "Adds [00:12:34]-style timestamps before phrases in the .txt — handy for\n"
+            "finding a place in the recording. The result is still a plain .txt file."
+        ))
         self.timestamps_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.timestamps_check)
 
-        self.advanced_toggle = QPushButton("▸ Расширенные настройки")
+        self.advanced_toggle = QPushButton(_("▸ Advanced options"))
         self.advanced_toggle.setObjectName("Link")
         self.advanced_toggle.setCursor(compat.CURSOR_POINTING_HAND)
         self.advanced_toggle.setCheckable(True)
         self.advanced_toggle.setChecked(bool(self.settings.advanced_open))
-        self.advanced_toggle.setToolTip(
-            "Тонкие настройки: слова-подсказки, подсказка стилю, beam, batched-режим,\n"
-            "таймкоды слов, перевод, автооткрытие папки."
-        )
+        self.advanced_toggle.setToolTip(_(
+            "Fine tuning: hint words, style prompt, beam, batched mode,\n"
+            "word timestamps, translation, auto-opening the folder."
+        ))
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         toggles.addWidget(self.advanced_toggle)
         options_layout.addLayout(toggles)
@@ -441,18 +438,18 @@ class MainWindow(QMainWindow):
         advanced_layout.setSpacing(8)
         self.advanced_frame.setVisible(bool(self.settings.advanced_open))
         if self.settings.advanced_open:
-            self.advanced_toggle.setText("▾ Расширенные настройки")
+            self.advanced_toggle.setText(_("▾ Advanced options"))
 
         hot_row = QHBoxLayout()
-        hot_label = make_label("Слова-подсказки (термины лекции)", "Dim")
-        hot_label.setToolTip(
-            "Слова, которые модель будет «держать в голове» при распознавании.\n"
-            "Помогает с редкими терминами и фамилиями: без подсказки Whisper часто пишет их на слух.\n"
-            "Поддерживается движком faster-whisper; остальные движки подсказку игнорируют."
-        )
+        hot_label = make_label(_("Hint words (lecture terms)"), "Dim")
+        hot_label.setToolTip(_(
+            "Words the model keeps \"in mind\" while recognizing.\n"
+            "Helps with rare terms and names: without a hint Whisper often spells them phonetically.\n"
+            "Supported by the faster-whisper engine; other engines ignore the hint."
+        ))
         hot_row.addWidget(hot_label)
         self.hotwords_edit = QLineEdit()
-        self.hotwords_edit.setPlaceholderText("трансформер, градиентный спуск, Kubernetes — через запятую")
+        self.hotwords_edit.setPlaceholderText(_("transformer, gradient descent, Kubernetes — comma-separated"))
         self.hotwords_edit.setText(self.settings.hotwords)
         self.hotwords_edit.setToolTip(hot_label.toolTip())
         self.hotwords_edit.editingFinished.connect(self._on_settings_changed)
@@ -460,15 +457,15 @@ class MainWindow(QMainWindow):
         advanced_layout.addLayout(hot_row)
 
         prompt_row = QHBoxLayout()
-        prompt_label = make_label("Подсказка стилю", "Dim")
-        prompt_label.setToolTip(
-            "initial_prompt: короткий текст-пример стиля и тематики. Модель продолжает его,\n"
-            "поэтому держит стиль (научный, разговорный) и верно пишет термины из подсказки.\n"
-            "Не дублируй сюда весь словарь — для слов есть поле «Слова-подсказки»."
-        )
+        prompt_label = make_label(_("Style prompt"), "Dim")
+        prompt_label.setToolTip(_(
+            "initial_prompt: a short example of style and topic. The model continues it,\n"
+            "so it keeps the style (scientific, conversational) and spells terms from the prompt.\n"
+            "Do not duplicate the whole vocabulary here — use \"Hint words\" for that."
+        ))
         prompt_row.addWidget(prompt_label)
         self.prompt_edit = QLineEdit()
-        self.prompt_edit.setPlaceholderText("Например: Лекция по машинному обучению, русский язык, научный стиль.")
+        self.prompt_edit.setPlaceholderText(_("Example: Machine learning lecture, Russian language, scientific style."))
         self.prompt_edit.setText(self.settings.initial_prompt)
         self.prompt_edit.setToolTip(prompt_label.toolTip())
         self.prompt_edit.editingFinished.connect(self._on_settings_changed)
@@ -477,62 +474,64 @@ class MainWindow(QMainWindow):
 
         extra_row = FlowLayout(spacing=12)
         self.beam_combo = QComboBox()
-        for value, title in ((1, "beam 1 (быстро)"), (3, "beam 3"), (5, "beam 5 (баланс)"), (8, "beam 8 (точность)")):
+        for value, title in (
+            (1, _("beam 1 (fast)")), (3, "beam 3"), (5, _("beam 5 (balanced)")), (8, _("beam 8 (accurate)")),
+        ):
             self.beam_combo.addItem(title, value)
         beam_index = self.beam_combo.findData(int(self.settings.beam_size or 5))
         self.beam_combo.setCurrentIndex(beam_index if beam_index >= 0 else 2)
         self.beam_combo.currentIndexChanged.connect(self._on_settings_changed)
-        self.beam_combo.setToolTip(
-            "Beam size — сколько вариантов продолжения фразы держит декодер.\n"
-            "1 — быстрее всего; 5 — оптимально для речи; 8 — чуть точнее, но заметно медленнее.\n"
-            "Для обычных лекций оставляй 5."
-        )
+        self.beam_combo.setToolTip(_(
+            "Beam size — how many phrase continuations the decoder keeps.\n"
+            "1 — fastest; 5 — optimal for speech; 8 — slightly more accurate but noticeably slower.\n"
+            "Keep 5 for regular lectures."
+        ))
         extra_row.addWidget(self.beam_combo)
 
-        self.batched_check = QCheckBox("Batched (до 4× быстрее на GPU)")
+        self.batched_check = QCheckBox(_("Batched (up to 4× faster on GPU)"))
         self.batched_check.setChecked(bool(self.settings.batched))
-        self.batched_check.setToolTip(
-            "Пакетный декодинг (BatchedInferencePipeline) у faster-whisper: несколько кусков\n"
-            "аудио считаются одним батчем. Выигрыш до 4× на GPU; на CPU почти не помогает.\n"
-            "Требует больше памяти — при нехватке RAM выключи."
-        )
+        self.batched_check.setToolTip(_(
+            "Batched decoding (BatchedInferencePipeline) in faster-whisper: several audio\n"
+            "chunks are computed as one batch. Up to 4× gain on GPU; almost none on CPU.\n"
+            "Needs more memory — turn off when RAM is tight."
+        ))
         self.batched_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.batched_check)
 
-        self.wordts_check = QCheckBox("Таймкоды слов")
+        self.wordts_check = QCheckBox(_("Word timestamps"))
         self.wordts_check.setChecked(bool(self.settings.word_timestamps))
-        self.wordts_check.setToolTip(
-            "Считать таймкоды каждого слова (нужно только для точных субтитров srt/vtt).\n"
-            "Замедляет распознавание; для обычного .txt-результата выключи."
-        )
+        self.wordts_check.setToolTip(_(
+            "Compute timestamps of every word (only needed for accurate srt/vtt subtitles).\n"
+            "Slows recognition down; turn off for a plain .txt result."
+        ))
         self.wordts_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.wordts_check)
 
-        self.translate_check = QCheckBox("Перевод в EN")
+        self.translate_check = QCheckBox(_("Translate to EN"))
         self.translate_check.setChecked(bool(self.settings.translate_to_english))
-        self.translate_check.setToolTip(
-            "task=translate: модель сразу выдаёт английский перевод услышанного.\n"
-            "Для конспекта русской лекции выключи; полезно для иноязычных докладов."
-        )
+        self.translate_check.setToolTip(_(
+            "task=translate: the model directly outputs an English translation of what it heard.\n"
+            "Turn off for notes of a Russian lecture; useful for foreign-language talks."
+        ))
         self.translate_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.translate_check)
 
-        self.open_folder_check = QCheckBox("Открыть папку после завершения")
+        self.open_folder_check = QCheckBox(_("Open the folder when done"))
         self.open_folder_check.setChecked(bool(self.settings.open_output_folder_when_done))
-        self.open_folder_check.setToolTip(
-            "Когда очередь догорит, открыть папку с результатами в проводнике.\n"
-            "Удобно при разовых прогонах; мешает, если запускаешь папками на ночь."
-        )
+        self.open_folder_check.setToolTip(_(
+            "When the queue finishes, open the results folder in the file manager.\n"
+            "Handy for one-off runs; annoying for overnight folder batches."
+        ))
         self.open_folder_check.toggled.connect(self._on_settings_changed)
         extra_row.addWidget(self.open_folder_check)
 
-        settings_button = QPushButton("Все настройки…")
+        settings_button = QPushButton(_("All settings…"))
         settings_button.setObjectName("Ghost")
         settings_button.setCursor(compat.CURSOR_POINTING_HAND)
-        settings_button.setToolTip(
-            "Полный диалог настроек: устройство (CPU/GPU), точность вычислений, потоки,\n"
-            "параллельные файлы, движки и CUDA, справка о программе."
-        )
+        settings_button.setToolTip(_(
+            "The full settings dialog: device (CPU/GPU), compute precision, threads,\n"
+            "parallel files, engines and CUDA, about the program."
+        ))
         settings_button.clicked.connect(self.on_open_settings)
         extra_row.addWidget(settings_button)
         advanced_layout.addLayout(extra_row)
@@ -540,24 +539,24 @@ class MainWindow(QMainWindow):
         options_layout.addWidget(self.advanced_frame)
         layout.addWidget(options_box, stretch=2)
 
-        # --- 3. ПРОГРЕСС + КНОПКА
+        # --- 3. PROGRESS + BUTTON
         work_box = QFrame()
         work_box.setObjectName("SidePanel")
         work_layout = QVBoxLayout(work_box)
         work_layout.setContentsMargins(14, 14, 14, 14)
         work_layout.setSpacing(10)
 
-        work_layout.addWidget(make_label("3 · Работа", "H2"))
+        work_layout.addWidget(make_label(_("3 · Work"), "H2"))
 
-        # --- выбор модели: выпадающий список ВСЕХ скачанных моделей --------- #
+        # --- model selection: dropdown of ALL downloaded models ------------ #
         model_row = QHBoxLayout()
         model_row.setSpacing(8)
-        model_label = make_label("Модель", "Dim")
-        model_label.setToolTip(
-            "Какую из СКАЧАННЫХ моделей использовать для распознавания.\n"
-            "Выбрать можно только одну; пока выбрано «Не выбрано», кнопка «РАБОТАТЬ»\n"
-            "неактивна. Скачать новые модели — в правой панели окна."
-        )
+        model_label = make_label(_("Model"), "Dim")
+        model_label.setToolTip(_(
+            "Which of the DOWNLOADED models to use for recognition.\n"
+            "Only one can be selected; while \"Not selected\" is chosen, the RUN\n"
+            "button is inactive. Download new models in the right panel."
+        ))
         model_row.addWidget(model_label)
         self.model_combo = QComboBox()
         self.model_combo.setToolTip(model_label.toolTip())
@@ -567,9 +566,9 @@ class MainWindow(QMainWindow):
         work_layout.addLayout(model_row)
         self.rebuild_model_combo()
 
-        # --- GPU-статус/кнопка: предлагает CUDA-сборку PyTorch, когда есть
-        # видеокарта NVIDIA, но torch считает на процессоре -----------------
-        self.gpu_button = QPushButton("Определяю железо…")
+        # --- GPU status/button: offers the CUDA build of PyTorch when an
+        # NVIDIA card exists but torch computes on the CPU -------------------
+        self.gpu_button = QPushButton(_("Detecting hardware…"))
         self.gpu_button.setObjectName("Ghost")
         self.gpu_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.gpu_button.setEnabled(False)
@@ -577,24 +576,24 @@ class MainWindow(QMainWindow):
         work_layout.addWidget(self.gpu_button)
 
         self.overall_progress = QProgressBar()
-        self.overall_progress.setToolTip("Общий прогресс очереди файлов")
+        self.overall_progress.setToolTip(_("Overall progress of the file queue"))
         self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(0)
-        # %p — именно ПРОЦЕНТ (Qt сам пересчитывает из диапазона 0..1000);
-        # %v показал бы «сырое» значение — отсюда были «1000%» в финале
+        # %p is the PERCENT (Qt recomputes it from the 0..1000 range);
+        # %v would show the raw value — that used to produce "1000%" at the end
         self.overall_progress.setFormat("%p%")
         work_layout.addWidget(self.overall_progress)
 
-        self.overall_label = make_label("Готов к работе", "Dim", word_wrap=True)
+        self.overall_label = make_label(_("Ready"), "Dim", word_wrap=True)
         work_layout.addWidget(self.overall_label)
 
         self.file_progress = QProgressBar()
-        self.file_progress.setToolTip("Прогресс текущего файла")
+        self.file_progress.setToolTip(_("Progress of the current file"))
         self.file_progress.setObjectName("Subtle")
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
         self.file_progress.setFixedHeight(6)
-        self.file_progress.setFormat("")  # текст на 6-пиксельной полосе не помещается
+        self.file_progress.setFormat("")  # text does not fit on a 6-pixel stripe
         work_layout.addWidget(self.file_progress)
 
         self.file_label = make_label("", "Muted", word_wrap=True)
@@ -602,19 +601,19 @@ class MainWindow(QMainWindow):
 
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
-        self.preview.setToolTip(
-            "Живая лента распознанного текста текущего файла\n"
-            "(таймкод начала фразы + сама фраза). Итоговый результат — в файле."
-        )
-        self.preview.setPlaceholderText("Здесь появится распознанный текст по мере работы…")
+        self.preview.setToolTip(_(
+            "Live feed of the recognized text of the current file\n"
+            "(phrase start timecode + the phrase). The final result is in the file."
+        ))
+        self.preview.setPlaceholderText(_("Recognized text will appear here as the work progresses…"))
         self.preview.setMaximumHeight(96)
-        self.preview.setMaximumBlockCount(1500)  # память не растёт бесконечно
+        self.preview.setMaximumBlockCount(1500)  # memory does not grow forever
         work_layout.addWidget(self.preview)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
 
-        self.work_button = QPushButton("РАБОТАТЬ")
+        self.work_button = QPushButton(_("RUN"))
         self.work_button.setObjectName("Primary")
         self.work_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.work_button.setMinimumHeight(48)
@@ -626,8 +625,8 @@ class MainWindow(QMainWindow):
         self.work_button.clicked.connect(self.on_work)
         action_row.addWidget(self.work_button, stretch=1)
 
-        # Кнопка-переключатель: на время работы «РАБОТАТЬ» заменяется «ОТМЕНИТЬ»
-        self.cancel_button = QPushButton("ОТМЕНИТЬ")
+        # toggle button: while working, RUN is replaced by CANCEL
+        self.cancel_button = QPushButton(_("CANCEL"))
         self.cancel_button.setObjectName("Danger")
         self.cancel_button.setCursor(compat.CURSOR_POINTING_HAND)
         self.cancel_button.setMinimumHeight(48)
@@ -637,23 +636,23 @@ class MainWindow(QMainWindow):
         work_layout.addLayout(action_row)
 
         results_row = FlowLayout(spacing=8)
-        self.results_button = QPushButton("Показать результаты")
+        self.results_button = QPushButton(_("Show results"))
         self.results_button.setObjectName("Ghost")
         self.results_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.results_button.setToolTip(
-            "Таблица обработанных файлов: статус, имена результатов, число слов,\n"
-            "скорость и время. Появляется после первого завершённого запуска."
-        )
+        self.results_button.setToolTip(_(
+            "Table of processed files: status, result names, word count,\n"
+            "speed and time. Appears after the first completed run."
+        ))
         self.results_button.setEnabled(False)
         self.results_button.clicked.connect(self.on_show_results)
         results_row.addWidget(self.results_button)
-        self.open_output_button = QPushButton("Открыть папку результатов")
+        self.open_output_button = QPushButton(_("Open the results folder"))
         self.open_output_button.setObjectName("Ghost")
         self.open_output_button.setCursor(compat.CURSOR_POINTING_HAND)
-        self.open_output_button.setToolTip(
-            "Открыть в проводнике папку, куда сохраняются готовые тексты\n"
-            "(настраивается в поле «Куда сохранять»)"
-        )
+        self.open_output_button.setToolTip(_(
+            "Open the folder where finished texts are saved\n"
+            "(configured in the \"Where to save\" field)"
+        ))
         self.open_output_button.clicked.connect(lambda: open_in_file_manager(self.current_output_dir()))
         results_row.addWidget(self.open_output_button)
         work_layout.addLayout(results_row)
@@ -663,7 +662,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(page)
         return scroll
 
-    # ---------------- правая колонка ----------------------------------- #
+    # ---------------- right column ------------------------------------- #
     def _build_right_panel(self) -> QWidget:
         self.models_panel = ModelListPanel(self.catalog, self.hardware, settings=self.settings)
         self.models_panel.modelSelected.connect(self.on_model_selected)
@@ -674,107 +673,107 @@ class MainWindow(QMainWindow):
         self.models_panel.refreshRequested.connect(self.on_refresh_catalog)
         return self.models_panel
 
-    # ---------------- лог-панель --------------------------------------- #
+    # ---------------- log panel ---------------------------------------- #
     def _build_log_dock(self) -> None:
-        self.log_dock = QDockWidget("Журнал", self)
+        self.log_dock = QDockWidget(_("Journal"), self)
         self.log_dock.setObjectName("LogDock")
         self.log_dock.setAllowedAreas(compat.BOTTOM_DOCK_AREA | compat.TOP_DOCK_AREA)
         self.log_dock.setFeatures(compat.DOCK_CLOSABLE | compat.DOCK_MOVABLE)
 
         self.log_view = QPlainTextEdit()
-        # подсказка журналу не нужна: и так понятно, что это лог событий,
-        # а всплывающее окно при наведении только отвлекает при прокрутке
+        # no tooltip for the journal: it is obviously an event log, and a popup
+        # on hover only distracts while scrolling
         self.log_view.setToolTip("")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        self.log_view.setPlaceholderText("Журнал событий…")
+        self.log_view.setPlaceholderText(_("Event journal…"))
         self.log_dock.setWidget(self.log_view)
         self.log_dock.setToolTip("")
         self.addDockWidget(compat.BOTTOM_DOCK_AREA, self.log_dock)
         self.log_dock.setVisible(bool(self.settings.show_log_panel))
         self.log_dock.visibilityChanged.connect(lambda *_: self._schedule_geometry_save())
 
-    # ---------------- меню --------------------------------------------- #
+    # ---------------- menus --------------------------------------------- #
     def _build_menu(self) -> None:
         bar = self.menuBar()
 
-        file_menu = ToolTipMenu("Файлы", self)
+        file_menu = ToolTipMenu(_("File"), self)
         bar.addMenu(file_menu)
-        file_menu.menuAction().setToolTip(
-            "Работа с файлами: добавить аудио/видео (или целую папку),\n"
-            "открыть результаты, показать таблицу обработанных файлов, выйти."
-        )
-        self._add_action(file_menu, "Добавить файлы…", self.on_add_files, "Ctrl+O",
-                         tip="Выбрать аудио/видео файлы для распознавания (можно несколько сразу)")
-        self._add_action(file_menu, "Добавить папку…", self.on_add_folder, "Ctrl+Shift+O",
-                         tip="Добавить все аудио/видео из папки, включая подпапки")
+        file_menu.menuAction().setToolTip(_(
+            "Working with files: add audio/video (or a whole folder),\n"
+            "open results, show the processed files table, exit."
+        ))
+        self._add_action(file_menu, _("Add files…"), self.on_add_files, "Ctrl+O",
+                         tip=_("Select audio/video files to recognize (several at once)"))
+        self._add_action(file_menu, _("Add folder…"), self.on_add_folder, "Ctrl+Shift+O",
+                         tip=_("Add all audio/video from a folder, including subfolders"))
         file_menu.addSeparator()
-        self._add_action(file_menu, "Открыть папку результатов",
+        self._add_action(file_menu, _("Open the results folder"),
                          lambda: open_in_file_manager(self.current_output_dir()),
-                         tip="Открыть в проводнике папку, куда сохраняются готовые тексты")
-        self._add_action(file_menu, "Показать результаты", self.on_show_results,
-                         tip="Таблица обработанных файлов: статусы, имена результатов, скорость")
+                         tip=_("Open the folder where finished texts are saved"))
+        self._add_action(file_menu, _("Show results"), self.on_show_results,
+                         tip=_("Table of processed files: statuses, result names, speed"))
         file_menu.addSeparator()
-        self._add_action(file_menu, "Выход", self.close, "Ctrl+Q",
-                         tip="Закрыть программу (идущая обработка будет остановлена после подтверждения)")
+        self._add_action(file_menu, _("Exit"), self.close, "Ctrl+Q",
+                         tip=_("Close the program (a running job is stopped after confirmation)"))
 
-        models_menu = ToolTipMenu("Модели", self)
+        models_menu = ToolTipMenu(_("Models"), self)
         bar.addMenu(models_menu)
-        models_menu.menuAction().setToolTip(
-            "Модели распознавания: добавить свою (ссылка/путь), обновить каталог,\n"
-            "открыть папку models/, выгрузить загруженную модель из памяти."
-        )
-        self._add_action(models_menu, "Добавить свою модель (ссылка/путь)…", self.on_add_custom_model,
-                         tip="Модель не из каталога: репозиторий Hugging Face, прямая ссылка или папка на диске")
-        self._add_action(models_menu, "Обновить каталог из сети", self.on_refresh_catalog,
-                         tip="Проверить онлайн-каталог: не появились ли новые модели")
-        self._add_action(models_menu, "Открыть папку models/",
+        models_menu.menuAction().setToolTip(_(
+            "Recognition models: add your own (link/path), refresh the catalog,\n"
+            "open the models/ folder, unload the loaded model from memory."
+        ))
+        self._add_action(models_menu, _("Add your own model (link/path)…"), self.on_add_custom_model,
+                         tip=_("A model not in the catalog: a Hugging Face repo, a direct link or a folder on disk"))
+        self._add_action(models_menu, _("Refresh the catalog online"), self.on_refresh_catalog,
+                         tip=_("Check the online catalog for new models"))
+        self._add_action(models_menu, _("Open the models/ folder"),
                          lambda: open_in_file_manager(self.catalog.models_root),
-                         tip="Папка, куда скачиваются модели (создаётся автоматически)")
+                         tip=_("The folder models are downloaded into (created automatically)"))
         models_menu.addSeparator()
         self.unload_action = self._add_action(
-            models_menu, "Выгрузить модель из памяти", self._unload_model,
-            tip="Освободить оперативную память (и видеопамять), занятую загруженной моделью.\n"
-                "Доступно, только когда модель действительно загружена; при следующем запуске\n"
-                "она загрузится заново (несколько секунд).",
+            models_menu, _("Unload the model from memory"), self._unload_model,
+            tip=_("Free the RAM (and VRAM) taken by the loaded model.\n"
+                "Available only while a model is actually loaded; the next run\n"
+                "will load it again (a few seconds)."),
         )
         self.unload_action.setEnabled(False)
 
-        service_menu = ToolTipMenu("Сервис", self)
+        service_menu = ToolTipMenu(_("Tools"), self)
         bar.addMenu(service_menu)
-        service_menu.menuAction().setToolTip(
-            "Сервисные инструменты: настройки программы, сведения о железе,\n"
-            "диагностика и восстановление, журналы (лог запуска, папка логов)."
-        )
-        self._add_action(service_menu, "Настройки…", self.on_open_settings, "Ctrl+,",
-                         tip="Качество текста, устройство (CPU/GPU), журнал (лог-файлы), сброс настроек по умолчанию")
-        self._add_action(service_menu, "Железо и окружение…", self.on_show_hardware,
-                         tip="Что видит программа: процессор, память, видеокарта, ffmpeg")
+        service_menu.menuAction().setToolTip(_(
+            "Service tools: program settings, hardware info,\n"
+            "diagnostics and recovery, logs (startup log, logs folder)."
+        ))
+        self._add_action(service_menu, _("Settings…"), self.on_open_settings, "Ctrl+,",
+                         tip=_("Text quality, device (CPU/GPU), journal (log files), reset settings to defaults"))
+        self._add_action(service_menu, _("Hardware & environment…"), self.on_show_hardware,
+                         tip=_("What the program sees: CPU, memory, GPU, ffmpeg"))
         service_menu.addSeparator()
-        self._add_action(service_menu, "Диагностика и восстановление…", self.on_diagnostics,
-                         tip="Проверить файлы программы, папки и библиотеки в .venv;\n"
-                             "восстановить удалённое, починить окружение, убрать лишние пакеты")
-        self._add_action(service_menu, "Открыть лог запуска", self.on_open_bootstrap_log,
-                         tip="Журнал подготовки окружения (main.py). При успешном запуске\n"
-                             "удаляется автоматически — остаётся только в случае ошибок")
-        self._add_action(service_menu, "Открыть папку логов",
+        self._add_action(service_menu, _("Diagnostics & recovery…"), self.on_diagnostics,
+                         tip=_("Check program files, folders and environment libraries;\n"
+                             "restore deleted ones, repair the environment, remove extra packages"))
+        self._add_action(service_menu, _("Open the startup log"), self.on_open_bootstrap_log,
+                         tip=_("Environment preparation log (launcher/main.py). Deleted automatically\n"
+                             "on a successful start — stays only in case of errors"))
+        self._add_action(service_menu, _("Open the logs folder"),
                          lambda: open_in_file_manager(paths.logs_dir()),
-                         tip="Журналы работы программы: лог установки и подробные логи запусков\n"
-                             "(файл-лог включается в Настройки → «Журнал и диагностика»)")
+                         tip=_("Program journals: install log and verbose launch logs\n"
+                             "(the file log is enabled in Settings → \"Logging & diagnostics\")"))
 
-        help_menu = ToolTipMenu("Справка", self)
+        help_menu = ToolTipMenu(_("Help"), self)
         bar.addMenu(help_menu)
-        help_menu.menuAction().setToolTip(
-            "Справка: документация проекта, сообщение о проблеме, сведения о программе."
-        )
-        self._add_action(help_menu, "README (GitHub)", lambda: QDesktopServices.openUrl(QUrl(REPO_URL)),
-                         tip="Открыть страницу проекта с документацией в браузере")
-        self._add_action(help_menu, "Сообщить о проблеме",
+        help_menu.menuAction().setToolTip(_(
+            "Help: project documentation, report an issue, about the program."
+        ))
+        self._add_action(help_menu, _("README (GitHub)"), lambda: QDesktopServices.openUrl(QUrl(REPO_URL)),
+                         tip=_("Open the project page with documentation in the browser"))
+        self._add_action(help_menu, _("Report an issue"),
                          lambda: QDesktopServices.openUrl(QUrl(f"{REPO_URL}/issues/new")),
-                         tip="Открыть форму создания issue на GitHub (нужен аккаунт)")
+                         tip=_("Open the GitHub new-issue form (an account is needed)"))
         help_menu.addSeparator()
-        self._add_action(help_menu, f"О программе ({APP_VERSION})", self.on_about,
-                         tip="Версия, движки, интерпретатор Python и путь к папке проекта")
+        self._add_action(help_menu, _("About ({version})").format(version=APP_VERSION), self.on_about,
+                         tip=_("Version, engines, Python interpreter and the project folder path"))
 
     def _add_action(self, menu: QMenu, text: str, slot, shortcut: str = "", tip: str = "") -> QAction:
         action = QAction(text, self)
@@ -782,17 +781,17 @@ class MainWindow(QMainWindow):
             action.setShortcut(QKeySequence(shortcut))
         if tip:
             action.setToolTip(tip)
-            action.setStatusTip(tip.splitlines()[0])   # показывается в статус-баре при наведении
+            action.setStatusTip(tip.splitlines()[0])   # shown in the status bar on hover
         action.triggered.connect(slot)
         menu.addAction(action)
         return action
 
-    # ---------------- статус-бар ---------------------------------------- #
+    # ---------------- status bar ---------------------------------------- #
     def _build_statusbar(self) -> None:
         bar = QStatusBar()
         self.setStatusBar(bar)
-        self.status_hardware = QLabel("определяю железо…")
-        self.status_model = QLabel("модель не выбрана")
+        self.status_hardware = QLabel(_("detecting hardware…"))
+        self.status_model = QLabel(_("no model selected"))
         self.status_ffmpeg = QLabel("ffmpeg: …")
         for widget in (self.status_hardware, self.status_model, self.status_ffmpeg):
             widget.setObjectName("Muted")
@@ -802,16 +801,16 @@ class MainWindow(QMainWindow):
             bar.addWidget(separator)
 
     # ================================================================== #
-    #  Старт
+    #  Startup
     # ================================================================== #
     def _startup_checks(self) -> None:
         try:
             self.hardware = registry.hardware()
         except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось собрать информацию о железе: %s", exc)
+            log.warning(_("Failed to collect hardware info: %s"), exc)
             self.hardware = {}
 
-        log.debug("Железо при старте: %s", self.hardware)
+        log.debug("Hardware at startup: %s", self.hardware)
         self.models_panel.set_hardware(self.hardware)
         self.models_panel.rebuild()
         self._refresh_gpu_button()
@@ -819,15 +818,19 @@ class MainWindow(QMainWindow):
 
         gpu = self.hardware.get("vram_mb") or 0
         self.status_hardware.setText(
-            f"CPU {self.hardware.get('recommended_threads', '?')} потоков · "
-            f"RAM {(self.hardware.get('ram_total_mb') or 0) / 1024:.0f} ГБ · "
-            + (f"GPU {gpu / 1024:.1f} ГБ" + (" (CUDA ✓)" if self.hardware.get("cuda_ok") else " (CUDA ✗)")
-               if gpu else "без GPU")
+            _("CPU {threads} threads · RAM {ram:.0f} GB · ").format(
+                threads=self.hardware.get("recommended_threads", "?"),
+                ram=(self.hardware.get("ram_total_mb") or 0) / 1024,
+            )
+            + (_("GPU {vram:.1f} GB").format(vram=gpu / 1024)
+               + (" (CUDA ✓)" if self.hardware.get("cuda_ok") else " (CUDA ✗)")
+               if gpu else _("no GPU"))
         )
         self.status_hardware.setToolTip(self.hardware.get("summary", ""))
         ffmpeg = find_ffmpeg()
-        self.status_ffmpeg.setText(f"ffmpeg: {'найден' if ffmpeg else 'НЕ НАЙДЕН'}")
-        self.status_ffmpeg.setToolTip(ffmpeg_version() if ffmpeg else "Декодирование пойдёт через PyAV")
+        self.status_ffmpeg.setText(_("ffmpeg: {state}").format(
+            state=_("found") if ffmpeg else _("NOT FOUND")))
+        self.status_ffmpeg.setToolTip(ffmpeg_version() if ffmpeg else _("Decoding will go through PyAV"))
         self.status_ffmpeg.setStyleSheet(
             "color: #98a2b3;" if ffmpeg else "color: #f2b544; font-weight: 600;"
         )
@@ -851,44 +854,45 @@ class MainWindow(QMainWindow):
                 self._select_model(installed[0], save=False)
             else:
                 self.selected_model = None
-                self.status_model.setText("модель не выбрана")
+                self.status_model.setText(_("no model selected"))
                 self.model_combo.setCurrentIndex(0)
 
     # ================================================================== #
-    #  Файлы
+    #  Files
     # ================================================================== #
     def on_add_files(self) -> None:
         start_dir = self.settings.last_open_dir or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileNames(self, "Выбери аудио или видео", start_dir, MEDIA_FILTER)
+        picked, _sel = QFileDialog.getOpenFileNames(self, _("Choose audio or video"), start_dir, media_filter())
         if not picked:
-            log.debug("Добавление файлов: диалог закрыт без выбора")
+            log.debug("Add files: dialog closed without a selection")
             return
-        log.debug("Добавление файлов: выбрано %d (%s)", len(picked), "; ".join(picked[:6]))
+        log.debug("Add files: selected %d (%s)", len(picked), "; ".join(picked[:6]))
         self.settings.last_open_dir = str(Path(picked[0]).parent)
         self.settings.save()
         added = self.file_list.add_paths(picked)
-        self._log(f"Добавлено файлов: {added} (всего {len(self.file_list.files())})")
+        self._log(_("Files added: {n} (total {total})").format(n=added, total=len(self.file_list.files())))
 
     def on_add_folder(self) -> None:
         start_dir = self.settings.last_open_dir or str(Path.home())
-        picked = QFileDialog.getExistingDirectory(self, "Папка с записями", start_dir)
+        picked = QFileDialog.getExistingDirectory(self, _("Folder with recordings"), start_dir)
         if not picked:
             return
         self.settings.last_open_dir = picked
         self.settings.save()
         added = self.file_list.add_paths([picked])
-        self._log(f"Из папки добавлено файлов: {added}")
+        self._log(_("Files added from the folder: {n}").format(n=added))
         if added == 0:
             QMessageBox.information(
-                self, "Пусто",
-                "В этой папке не нашлось аудио/видео файлов.\n"
-                f"Поддерживаются: {', '.join(sorted(list(VIDEO_EXTENSIONS)[:8]))}… и "
-                f"{', '.join(sorted(list(AUDIO_EXTENSIONS)[:8]))}…",
+                self, _("Empty"),
+                _("No audio/video files found in this folder.\nSupported: {vid}… and {aud}…").format(
+                    vid=", ".join(sorted(list(VIDEO_EXTENSIONS)[:8])),
+                    aud=", ".join(sorted(list(AUDIO_EXTENSIONS)[:8])),
+                ),
             )
 
     def on_browse_output(self) -> None:
         start_dir = self.output_edit.text().strip() or str(paths.outputs_dir())
-        picked = QFileDialog.getExistingDirectory(self, "Куда сохранять результаты", start_dir)
+        picked = QFileDialog.getExistingDirectory(self, _("Where to save the results"), start_dir)
         if picked:
             self.output_edit.setText(picked)
             self._on_settings_changed()
@@ -904,21 +908,22 @@ class MainWindow(QMainWindow):
     def _update_files_label(self) -> None:
         count = self.file_list.count()
         total = self.file_list.total_size()
-        word = paths.plural_ru(count, "файл", "файла", "файлов")
+        text = tn("{} file", "{} files", count).format(count)
         self.files_count_label.setText(
-            f"{count} {word}" + (f" · {paths.human_size(total)}" if total else "")
+            text + (f" · {paths.human_size(total)}" if total else "")
         )
         self.drop_hint.setVisible(count == 0)
         self._update_work_button()
 
     # ================================================================== #
-    #  Модели
+    #  Models
     # ================================================================== #
     def on_model_selected(self, entry: ModelEntry) -> None:
         if not entry.installed:
             answer = QMessageBox.question(
-                self, "Модель не установлена",
-                f"«{entry.name}» ещё не скачана.\nСкачать сейчас ({entry.size_text})?",
+                self, _("Model not installed"),
+                _("\"{name}\" has not been downloaded yet.\nDownload it now ({size})?").format(
+                    name=entry.display_name, size=entry.size_text),
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_yes(),
             )
@@ -928,15 +933,15 @@ class MainWindow(QMainWindow):
         self._select_model(entry)
 
     def rebuild_model_combo(self) -> None:
-        """Пересобирает выпадающий список СКАЧАННЫХ моделей (пункт 0 — «Не выбрано»)."""
+        """Rebuild the dropdown of DOWNLOADED models (item 0 — "Not selected")."""
         combo = getattr(self, "model_combo", None)
         if combo is None:
             return
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("— Не выбрано —", "")
+        combo.addItem(_("— Not selected —"), "")
         for entry in self.catalog.sorted_for_display(self.catalog.installed()):
-            combo.addItem(f"{entry.name} · {entry.size_text}", entry.id)
+            combo.addItem(f"{entry.display_name} · {entry.size_text}", entry.id)
         current_id = self.selected_model.id if self.selected_model is not None else ""
         index = combo.findData(current_id)
         combo.setCurrentIndex(index if index >= 0 else 0)
@@ -945,11 +950,11 @@ class MainWindow(QMainWindow):
     def _on_model_combo_changed(self, _index: int) -> None:
         model_id = self.model_combo.currentData() or ""
         if not model_id:
-            # «Нет» — снимаем выбор, кнопка «РАБОТАТЬ» гаснет
+            # "Not selected" — clear the selection, the RUN button goes dark
             if self.selected_model is not None:
                 self.selected_model = None
                 self.models_panel.set_selected("")
-                self.status_model.setText("модель не выбрана")
+                self.status_model.setText(_("no model selected"))
                 self._update_work_button()
             return
         entry = self.catalog.get(model_id)
@@ -958,7 +963,7 @@ class MainWindow(QMainWindow):
 
     def _select_model(self, entry: ModelEntry, save: bool = True) -> None:
         log.debug(
-            "Выбор модели: id=%s name=%s engine=%s installed=%s dir=%s save=%s",
+            "Model selection: id=%s name=%s engine=%s installed=%s dir=%s save=%s",
             entry.id, entry.name, entry.engine, entry.installed, entry.install_dir, save,
         )
         self.selected_model = entry
@@ -968,22 +973,22 @@ class MainWindow(QMainWindow):
             self.model_combo.blockSignals(True)
             self.model_combo.setCurrentIndex(index)
             self.model_combo.blockSignals(False)
-        self.status_model.setText(f"модель: {entry.name}")
+        self.status_model.setText(_("model: {name}").format(name=entry.display_name))
         self.status_model.setToolTip(
-            f"{entry.engine_label} · {entry.size_text} · {entry.memory_text}\n{entry.description}"
+            f"{_(entry.engine_label)} · {entry.size_text} · {entry.memory_text}\n{_(entry.description)}"
         )
         if save:
             self.settings.selected_model_id = entry.id
             self.settings.last_used_model_id = entry.id
             self.settings.save()
-            self._log(f"Выбрана модель: {entry.name}")
-            self._toast(f"Модель для работы: {entry.name}")
+            self._log(_("Model selected: {name}").format(name=entry.display_name))
+            self._toast(_("Model for the job: {name}").format(name=entry.display_name))
         self._update_work_button()
 
     def on_download_model(self, entry: ModelEntry) -> None:
-        log.debug("Запрошена установка модели: %s (source=%s)", entry.id, entry.source)
+        log.debug("Model install requested: %s (source=%s)", entry.id, entry.source)
         if self.download_worker is not None and self.download_worker.isRunning():
-            QMessageBox.information(self, "Идёт загрузка", "Дождись окончания текущего скачивания.")
+            QMessageBox.information(self, _("Download in progress"), _("Wait for the current download to finish."))
             return
 
         self.catalog.refresh_installed()
@@ -996,8 +1001,9 @@ class MainWindow(QMainWindow):
             return
 
         dialog = ProgressDialog(
-            f"Скачивание: {entry.name}",
-            f"{entry.size_text} · {entry.engine_label}\nИсточник: {entry.source}",
+            _("Downloading: {name}").format(name=entry.display_name),
+            _("{size} · {engine}\nSource: {source}").format(
+                size=entry.size_text, engine=_(entry.engine_label), source=entry.source),
             parent=self,
         )
         worker = ModelDownloadWorker(entry, root=self.catalog.root, parent=self)
@@ -1007,8 +1013,8 @@ class MainWindow(QMainWindow):
 
         worker.progress.connect(dialog.set_fraction)
         worker.progress.connect(lambda fraction, status: card.update_progress(fraction, status) if card else None)
-        # ВАЖНО: сигнал несёт (доля, текст); слоту статуса нужен именно текст,
-        # иначе QLabel.setText(float) ронял приложение на каждом тике прогресса
+        # IMPORTANT: the signal carries (fraction, text); the status slot needs
+        # the text, otherwise QLabel.setText(float) crashed the app on every tick
         worker.progress.connect(lambda fraction, status: dialog.set_status(status))
         worker.outputLine.connect(dialog.append_log)
         dialog.cancelRequested.connect(worker.cancel)
@@ -1022,20 +1028,20 @@ class MainWindow(QMainWindow):
     def _on_download_finished(self, ok: bool, message: str, entry, dialog: ProgressDialog, card) -> None:
         if card is not None:
             card.set_downloading(False)
-        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.finish(_("Done") if ok else _("Stopped"))
         self.catalog.refresh_installed()
         self.models_panel.rebuild()
-        self._restore_selected_model()   # внутри пересобирается и комбо моделей
+        self._restore_selected_model()   # rebuilds the model combo too
 
         if ok and entry is not None:
             self._log(message)
             fresh = self.catalog.get(entry.id) or entry
             self._select_model(fresh)
-            QMessageBox.information(self, "Модель установлена", message + "\n\nМодель выбрана — можно работать.")
+            QMessageBox.information(self, _("Model installed"), message + _("\n\nThe model is selected — ready to work."))
         else:
-            self._log(f"Скачивание не завершилось: {message}")
-            if message and not message.startswith("Скачивание отменено"):
-                QMessageBox.warning(self, "Не удалось скачать модель", message)
+            self._log(_("Download did not finish: {msg}").format(msg=message))
+            if message and not dialog.cancelled:
+                QMessageBox.warning(self, _("Failed to download the model"), message)
         dialog.accept()
         self.download_worker = None
         self.download_dialog = None
@@ -1045,9 +1051,10 @@ class MainWindow(QMainWindow):
         free = paths.free_space(self.catalog.models_root)
         if needed and free is not None and free < needed * 2:
             answer = QMessageBox.question(
-                self, "Мало места на диске",
-                f"Модель занимает {paths.human_size(needed)}, а свободно {paths.human_size(free)}.\n"
-                "Нужно примерно вдвое больше (временно хранится .part-файл).\n\nПродолжить?",
+                self, _("Low disk space"),
+                _("The model takes {need}, but only {free} is available.\n"
+                  "About twice as much is needed (a .part file is kept temporarily).\n\nContinue?").format(
+                    need=paths.human_size(needed), free=paths.human_size(free)),
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_no(),
             )
@@ -1057,15 +1064,16 @@ class MainWindow(QMainWindow):
     def on_delete_model(self, entry: ModelEntry) -> None:
         if self._working:
             QMessageBox.information(
-                self, "Идёт распознавание",
-                "Нельзя удалять модель во время работы — сначала нажми «ОТМЕНИТЬ» "
-                "и дождись остановки.",
+                self, _("Recognition in progress"),
+                _("A model cannot be deleted while working — press CANCEL first "
+                  "and wait for it to stop."),
             )
             return
         answer = QMessageBox.question(
-            self, "Удалить модель",
-            f"Удалить «{entry.name}» с диска?\n\nПапка: {entry.install_dir}\n"
-            f"Освободится: {paths.human_size(entry.installed_size_bytes or entry.size_bytes)}",
+            self, _("Delete the model"),
+            _("Delete \"{name}\" from disk?\n\nFolder: {dir}\nFrees: {size}").format(
+                name=entry.display_name, dir=entry.install_dir,
+                size=paths.human_size(entry.installed_size_bytes or entry.size_bytes)),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_no(),
         )
@@ -1077,13 +1085,13 @@ class MainWindow(QMainWindow):
         from ..core.downloader import uninstall_model
 
         if uninstall_model(entry, root=self.catalog.root):
-            log.debug("Модель удалена с диска: %s (%s)", entry.id, entry.install_dir)
-            self._log(f"Модель удалена: {entry.name}")
+            log.debug("Model deleted from disk: %s (%s)", entry.id, entry.install_dir)
+            self._log(_("Model deleted: {name}").format(name=entry.display_name))
         else:
             QMessageBox.warning(
-                self, "Не удалось удалить",
-                "Папка модели лежит вне models/ или занята другим процессом.\n"
-                f"Удали вручную: {entry.install_dir}",
+                self, _("Delete failed"),
+                _("The model folder is outside models/ or busy with another process.\n"
+                  "Delete it manually: {dir}").format(dir=entry.install_dir),
             )
         self.catalog.refresh_installed()
         self.models_panel.rebuild()
@@ -1103,14 +1111,14 @@ class MainWindow(QMainWindow):
         self.catalog.add_custom_entry(entry)
         self.models_panel.rebuild()
         self.models_panel.set_hardware(self.hardware)
-        self._log(f"Добавлена своя модель: {entry.name} ({entry.engine_label})")
+        self._log(_("Custom model added: {name} ({engine})").format(name=entry.display_name, engine=_(entry.engine_label)))
         self.on_download_model(entry)
 
     def on_refresh_catalog(self) -> None:
         if self.catalog_worker is not None and self.catalog_worker.isRunning():
             return
         self.models_panel.refresh_button.setEnabled(False)
-        self.models_panel.refresh_button.setText("⟳ Проверяю…")
+        self.models_panel.refresh_button.setText(_("⟳ Checking…"))
         worker = CatalogRefreshWorker(self)
         worker.finishedWith.connect(self._on_catalog_refreshed)
         self.catalog_worker = worker
@@ -1118,7 +1126,7 @@ class MainWindow(QMainWindow):
 
     def _on_catalog_refreshed(self, ok: bool, message: str) -> None:
         self.models_panel.refresh_button.setEnabled(True)
-        self.models_panel.refresh_button.setText("⟳ Обновить каталог")
+        self.models_panel.refresh_button.setText(_("⟳ Refresh catalog"))
         if ok:
             self.catalog = ModelCatalog()
             self.models_panel.catalog = self.catalog
@@ -1129,20 +1137,20 @@ class MainWindow(QMainWindow):
     def _unload_model(self) -> None:
         if self._working:
             QMessageBox.information(
-                self, "Идёт распознавание",
-                "Модель сейчас используется — выгрузить можно после завершения работы.",
+                self, _("Recognition in progress"),
+                _("The model is in use — it can be unloaded after the job finishes."),
             )
             return
-        log.debug("Выгрузка модели из памяти по запросу пользователя")
+        log.debug("Unloading the model from memory on user request")
         registry.unload()
-        self._log("Модель выгружена из оперативной памяти")
+        self._log(_("Model unloaded from memory"))
         self._sync_runtime_actions()
 
     def _sync_runtime_actions(self) -> None:
-        """Держит «состояние зависимые» пункты меню честными.
+        """Keep state-dependent menu items honest.
 
-        «Выгрузить модель из памяти» имеет смысл только когда модель реально
-        загружена в память (или идёт работа — тогда выгружать нельзя).
+        "Unload the model from memory" only makes sense while a model is
+        actually loaded (and not while a job is running).
         """
         action = getattr(self, "unload_action", None)
         if action is None:
@@ -1155,37 +1163,36 @@ class MainWindow(QMainWindow):
         self.models_panel.search.setFocus()
 
     # ================================================================== #
-    #  Работа
+    #  Work
     # ================================================================== #
     def _update_work_button(self) -> None:
         files_ready = self.file_list.count() > 0
         model_ready = self.selected_model is not None and self.selected_model.installed
         if self._working:
-            # на время работы «РАБОТАТЬ» скрыта, видна «ОТМЕНИТЬ»
+            # while working, RUN is hidden and CANCEL is visible
             self.work_button.setEnabled(False)
             return
         self.work_button.setEnabled(files_ready and model_ready)
         if not files_ready:
-            self.work_button.setText("Добавь файлы")
+            self.work_button.setText(_("Add files"))
         elif not model_ready:
-            self.work_button.setText("Выбери модель")
+            self.work_button.setText(_("Select a model"))
         else:
             count = self.file_list.count()
-            word = paths.plural_ru(count, "файл", "файла", "файлов")
-            self.work_button.setText(f"РАБОТАТЬ · {count} {word}")
+            self.work_button.setText(_("RUN · {}").format(tn("{} file", "{} files", count).format(count)))
 
     def _set_working(self, working: bool) -> None:
-        """Переключает интерфейс между состояниями «ожидание» и «работа».
+        """Switch the interface between "waiting" and "working".
 
-        «РАБОТАТЬ» на время работы ЗАМЕНЯЕТСЯ кнопкой «ОТМЕНИТЬ» (и наоборот):
-        одна и та же позиция, интуитивное поведение.
+        While working, RUN is REPLACED by CANCEL (and vice versa): the same
+        spot, intuitive behavior.
         """
         self._working = working
         self.work_button.setVisible(not working)
         self.cancel_button.setVisible(working)
         if working:
             self.cancel_button.setEnabled(True)
-            self.cancel_button.setText("ОТМЕНИТЬ")
+            self.cancel_button.setText(_("CANCEL"))
         self._update_work_button()
         self._sync_runtime_actions()
 
@@ -1194,15 +1201,15 @@ class MainWindow(QMainWindow):
             return
         files = self.file_list.files()
         if not files:
-            QMessageBox.information(self, "Нет файлов", "Сначала добавь аудио или видео.")
+            QMessageBox.information(self, _("No files"), _("Add audio or video first."))
             return
         entry = self.selected_model
         if entry is None or not entry.installed:
             QMessageBox.information(
-                self, "Модель не выбрана",
-                "Скачай и выбери модель в правой панели — без неё распознавать нечем.\n"
-                "В карточках моделей указаны размер, потребление памяти, языки,\n"
-                "оценки точности и скорости — выбери под своё железо.",
+                self, _("No model selected"),
+                _("Download and select a model in the right panel — there is nothing to recognize with.\n"
+                  "Model cards show size, memory usage, languages, accuracy and speed\n"
+                  "ratings — pick one that fits your hardware."),
             )
             self._focus_models()
             return
@@ -1212,21 +1219,22 @@ class MainWindow(QMainWindow):
 
         if not engine_available(entry.engine):
             packages = missing_engine_packages(entry.engine)
-            size_text = engine_install_size(entry.engine)
+            size_text = _(engine_install_size(entry.engine)) if engine_install_size(entry.engine) else ""
             answer = QMessageBox.question(
-                self, "Нужны дополнительные компоненты",
-                f"Модель «{entry.name}» работает на движке «{entry.engine_label}».\n"
-                "Его библиотеки установятся в папку программы (.venv) — системный\n"
-                "Python не затрагивается, это разовая операция.\n\n"
-                + (f"Объём скачивания: {size_text}\n" if size_text else "")
-                + f"Пакеты: {', '.join(packages)}\n\nУстановить сейчас?",
+                self, _("Extra components needed"),
+                _("The model \"{name}\" runs on the \"{engine}\" engine.\n"
+                  "Its libraries will be installed into the program folder — the system\n"
+                  "Python is not affected; this is a one-time operation.\n\n").format(
+                    name=entry.display_name, engine=_(entry.engine_label))
+                + (_("Download size: {size}\n").format(size=size_text) if size_text else "")
+                + _("Packages: {list}\n\nInstall now?").format(list=", ".join(packages)),
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_yes(),
             )
             if answer != compat.message_box_yes():
                 return
             self._pending_job = True
-            self.install_packages_interactive(packages, f"Движок {entry.engine}")
+            self.install_packages_interactive(packages, _("Engine {engine}").format(engine=entry.engine))
             return
 
         output_dir = self.current_output_dir()
@@ -1236,7 +1244,7 @@ class MainWindow(QMainWindow):
             probe_file.write_text("ok", encoding="utf-8")
             probe_file.unlink(missing_ok=True)
         except OSError as exc:
-            QMessageBox.critical(self, "Папка недоступна", f"Не удалось писать в {output_dir}:\n{exc}")
+            QMessageBox.critical(self, _("Folder unavailable"), _("Failed to write into {dir}:\n{exc}").format(dir=output_dir, exc=exc))
             return
 
         self._collect_settings()
@@ -1249,11 +1257,11 @@ class MainWindow(QMainWindow):
         if self.timestamps_check.isChecked() and options.formats == ["txt"]:
             options.formats = ["txt-time"]
         log.debug(
-            "on_work: файлы=%s | модель=%s (engine=%s, dir=%s) | output=%s | язык=%s | "
+            "on_work: files=%s | model=%s (engine=%s, dir=%s) | output=%s | language=%s | "
             "beam=%s vad=%s clean=%s paragraphs=%s timestamps=%s words=%s batched=%s batch=%s | "
             "device=%s compute=%s threads=%s gpu_index=%s parallel=%s overwrite=%s",
             [str(f) for f in files], entry.id, entry.engine, entry.install_dir,
-            options.output_dir, options.language or "авто",
+            options.output_dir, options.language or "auto",
             options.beam_size, options.use_vad, options.suppress_hallucinations,
             options.paragraphs, self.settings.add_timestamps_to_txt,
             options.word_timestamps, options.batched, options.batch_size,
@@ -1268,10 +1276,10 @@ class MainWindow(QMainWindow):
         self._job_done_files = 0
         self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(0)
-        self.overall_label.setText(f"Обрабатываю {len(files)} файл(ов) моделью «{entry.name}»")
+        self.overall_label.setText(_("Processing {n} file(s) with \"{name}\"").format(n=len(files), name=entry.display_name))
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
-        self._set_working(True)   # ДО start(): без гонки «кнопка не погасла»
+        self._set_working(True)   # BEFORE start(): avoids the "button stayed lit" race
         self.results_button.setEnabled(False)
 
         worker = TranscribeWorker(files, options, self.settings, self)
@@ -1285,19 +1293,19 @@ class MainWindow(QMainWindow):
         worker.engineMissing.connect(self._on_engine_missing)
         self.worker = worker
         worker.start()
-        self._log(
-            f"Старт: {len(files)} файл(ов), модель {entry.name} ({entry.engine_label}), "
-            f"язык={self.settings.language or 'авто'}, формат={self.settings.output_format}"
-        )
+        self._log(_("Start: {n} file(s), model {name} ({engine}), language={lang}, format={fmt}").format(
+            n=len(files), name=entry.display_name, engine=_(entry.engine_label),
+            lang=self.settings.language or _("auto"), fmt=self.settings.output_format,
+        ))
 
-    # ---------------- сигналы воркера ---------------------------------- #
+    # ---------------- worker signals ------------------------------------ #
     def _on_overall_progress(self, done: int, total: int) -> None:
         self._job_total_files = max(1, total)
         self._job_done_files = max(0, min(done, total))
         self.overall_progress.setRange(0, 1000)
         self.overall_progress.setValue(int(self._job_done_files / self._job_total_files * 1000))
         if total > 1:
-            self.overall_label.setText(f"Файл {min(done + 1, total)} из {total}")
+            self.overall_label.setText(_("File {cur} of {total}").format(cur=min(done + 1, total), total=total))
 
     def _on_file_progress(self, index: int, fraction: float, stage: str) -> None:
         if fraction < 0:
@@ -1306,14 +1314,14 @@ class MainWindow(QMainWindow):
             fraction = max(0.0, min(1.0, fraction))
             self.file_progress.setRange(0, 1000)
             self.file_progress.setValue(int(fraction * 1000))
-            # общий бар: доля готовых файлов + прогресс текущего — чтобы на
-            # ОДНОМ файле проценты шли плавно, а не стояли на нуле всю лекцию
+            # overall bar: share of finished files + progress of the current one,
+            # so a SINGLE file shows smooth percentages instead of standing at zero
             overall = (self._job_done_files + fraction) / max(1, self._job_total_files)
             self.overall_progress.setValue(max(0, min(1000, int(overall * 1000))))
         try:
             name = Path(self.file_list.files()[index]).name
         except IndexError:
-            name = f"файл {index + 1}"
+            name = _("file {n}").format(n=index + 1)
         self.file_label.setText(f"{name} · {stage}")
 
     def _on_segment_ready(self, index: int, text: str, start: float, end: float) -> None:
@@ -1333,7 +1341,7 @@ class MainWindow(QMainWindow):
         self.results_button.setEnabled(bool(self.results))
 
     def _on_job_finished(self, ok: int, fail: int, seconds: float) -> None:
-        log.debug("Задача завершена: ok=%d fail=%d seconds=%.1f", ok, fail, seconds)
+        log.debug("Job finished: ok=%d fail=%d seconds=%.1f", ok, fail, seconds)
         cancelled = self.worker is not None and self.worker.cancelled
         engine_missing = bool(getattr(self.worker, "engine_missing", False))
         total = self._job_total_files
@@ -1343,19 +1351,20 @@ class MainWindow(QMainWindow):
         speed = (audio / seconds) if seconds > 0 else 0.0
 
         if engine_missing:
-            self.overall_label.setText(
-                "Распознавание отложено: движку не хватает компонентов — "
-                "установи их в появившемся окне, задача продолжится сама."
-            )
+            self.overall_label.setText(_(
+                "Recognition postponed: the engine lacks components — install them in "
+                "the window that appeared and the job will continue by itself."
+            ))
             self.file_label.setText("")
             self._log(self.overall_label.text())
             self._finish_worker()
             return
 
         self.overall_label.setText(
-            ("Отменено" if cancelled else "Готово") + f": {ok} из {total}"
-            + (f" · {fail} с ошибкой" if fail else "")
-            + f" · {words} слов · {speed:.1f}× реального времени · {seconds:.0f} с"
+            (_("Cancelled") if cancelled else _("Done")) + _(": {ok} of {total}").format(ok=ok, total=total)
+            + (_(" · {fail} failed").format(fail=fail) if fail else "")
+            + _(" · {words} words · {speed:.1f}× realtime · {t:.0f} s").format(
+                words=words, speed=speed, t=seconds)
         )
         self.file_label.setText(", ".join(path.name for path in produced[:3]) + (" …" if len(produced) > 3 else ""))
         self._log(self.overall_label.text())
@@ -1366,18 +1375,19 @@ class MainWindow(QMainWindow):
             failed = [result for result in self.results.values() if not result.ok]
             details = "\n".join(f"• {Path(result.source).name}: {result.error}" for result in failed[:12])
             QMessageBox.warning(
-                self, "Часть файлов не обработана",
-                f"{fail} из {total} файлов завершились ошибкой:\n\n{details}",
+                self, _("Some files were not processed"),
+                _("{fail} of {total} files finished with an error:\n\n{details}").format(
+                    fail=fail, total=total, details=details),
             )
         elif ok:
             self.results_button.setEnabled(True)
             if self.settings.open_output_folder_when_done and produced and not cancelled:
                 open_in_file_manager(produced[0])
-            self._toast(f"Распознано файлов: {ok}")
+            self._toast(_("Files recognized: {n}").format(n=ok))
             self._maybe_offer_gpu_boost()
 
     def _finish_worker(self) -> None:
-        """Возвращает интерфейс в ожидание и убирает завершённый воркер."""
+        """Return the interface to the waiting state and drop the finished worker."""
         self._set_working(False)
         self.file_progress.setRange(0, 1000)
         self.file_progress.setValue(0)
@@ -1387,27 +1397,27 @@ class MainWindow(QMainWindow):
 
     def _on_job_failed(self, message: str) -> None:
         self._finish_worker()
-        self.overall_label.setText("Ошибка")
+        self.overall_label.setText(_("Error"))
         self.file_label.setText(message.splitlines()[0] if message else "")
-        self._log("ОШИБКА: " + message.replace("\n", " | "))
-        QMessageBox.critical(self, "Ошибка при распознавании", message)
+        self._log(_("ERROR: ") + message.replace("\n", " | "))
+        QMessageBox.critical(self, _("Recognition error"), message)
 
     def _on_engine_missing(self, engine: str, packages) -> None:
         self._finish_worker()
         from ..asr.base import engine_install_size
 
-        size_text = engine_install_size(engine)
+        size_text = _(engine_install_size(engine)) if engine_install_size(engine) else ""
         answer = QMessageBox.question(
-            self, "Нужны дополнительные компоненты",
-            f"Для этой модели нужен движок «{engine}».\n"
-            + (f"Объём скачивания: {size_text}\n" if size_text else "")
-            + f"Установить {', '.join(packages)} в .venv проекта?",
+            self, _("Extra components needed"),
+            _("This model needs the \"{engine}\" engine.\n").format(engine=engine)
+            + (_("Download size: {size}\n").format(size=size_text) if size_text else "")
+            + _("Install {list} into the project environment?").format(list=", ".join(packages)),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_yes(),
         )
         if answer == compat.message_box_yes():
             self._pending_job = True
-            self.install_packages_interactive(list(packages or []), f"Движок {engine}")
+            self.install_packages_interactive(list(packages or []), _("Engine {engine}").format(engine=engine))
 
     def on_cancel(self) -> None:
         if self.worker is None or not self.worker.isRunning():
@@ -1415,17 +1425,17 @@ class MainWindow(QMainWindow):
             return
         self.worker.cancel()
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Останавливаю…")
-        self.file_label.setText("Останавливаю… (дожидаемся текущего сегмента)")
-        self._log("Запрошена отмена")
+        self.cancel_button.setText(_("Stopping…"))
+        self.file_label.setText(_("Stopping… (waiting for the current segment)"))
+        self._log(_("Cancellation requested"))
 
     # ================================================================== #
-    #  GPU-ускорение torch-моделей (кнопка-статус + разовое предложение)
+    #  GPU acceleration for torch models (status button + one-time offer)
     # ================================================================== #
     def _start_torch_probe(self) -> None:
-        """Асинхронно узнаёт, стоит ли torch и видит ли он CUDA (subprocess)."""
+        """Asynchronously check whether torch is installed and sees CUDA (subprocess)."""
         if not self.hardware.get("has_nvidia"):
-            return    # нет карты NVIDIA — зонд не нужен, кнопка уже серая
+            return    # no NVIDIA card — no probe needed, the button is already gray
         if self.torch_probe is not None and self.torch_probe.isRunning():
             return
         probe = TorchCudaProbeWorker(self)
@@ -1434,7 +1444,7 @@ class MainWindow(QMainWindow):
         probe.start()
 
     def _on_torch_probed(self, installed: bool, cuda: bool, detail: str) -> None:
-        log.debug("Зонд PyTorch: installed=%s cuda=%s detail=%r", installed, cuda, detail)
+        log.debug("PyTorch probe: installed=%s cuda=%s detail=%r", installed, cuda, detail)
         self.gpu_state = {"probed": True, "installed": installed, "cuda": cuda, "detail": detail}
         probe, self.torch_probe = self.torch_probe, None
         if probe is not None:
@@ -1442,14 +1452,14 @@ class MainWindow(QMainWindow):
         self._refresh_gpu_button()
         if installed:
             log.info(
-                "PyTorch в .venv: %s, CUDA %s (%s)",
-                "установлен" if installed else "нет",
-                "доступна" if cuda else "НЕ доступна",
+                _("PyTorch in the environment: %s, CUDA %s (%s)"),
+                _("installed") if installed else _("absent"),
+                _("available") if cuda else _("NOT available"),
                 detail or "—",
             )
 
     def _refresh_gpu_button(self) -> None:
-        """Текст/доступность кнопки GPU = честное текущее состояние ускорения."""
+        """GPU button text/availability = the honest current acceleration state."""
         button = getattr(self, "gpu_button", None)
         if button is None:
             return
@@ -1459,58 +1469,63 @@ class MainWindow(QMainWindow):
         state = self.gpu_state
 
         if not hardware:
-            button.setText("Определяю железо…")
+            button.setText(_("Detecting hardware…"))
             button.setEnabled(False)
             return
 
         if not hardware.get("has_nvidia"):
-            button.setText("GPU-ускорение недоступно: нет видеокарты NVIDIA")
-            button.setToolTip(
-                "Все движки будут работать на процессоре.\n"
-                "Для максимально быстрого CPU-распознавания выбирай модели с int8/q5_0\n"
-                "(faster-whisper / whisper.cpp) — их характеристики видны в каталоге справа."
-            )
+            button.setText(_("GPU acceleration unavailable: no NVIDIA graphics card"))
+            button.setToolTip(_(
+                "All engines will run on the CPU.\n"
+                "For the fastest CPU recognition pick int8/q5_0 models\n"
+                "(faster-whisper / whisper.cpp) — their specs are in the catalog on the right."
+            ))
             button.setEnabled(False)
             return
 
         if not state.get("probed"):
-            button.setText(f"Проверяю PyTorch для {gpu_name}…")
+            button.setText(_("Checking PyTorch for {gpu}…").format(gpu=gpu_name))
             button.setEnabled(False)
             return
 
         if state.get("cuda"):
-            button.setText(f"✓ GPU используется: PyTorch CUDA ({state.get('detail') or gpu_name})")
-            button.setToolTip(
-                f"{gpu_name}" + (f" · {vram / 1024:.1f} ГБ VRAM" if vram else "") + "\n"
-                "CUDA-сборка PyTorch на месте: GigaAM / Qwen3-ASR / HF-модели\n"
-                "считают энкодер на видеокарте, а декодирование — параллельно на CPU.\n"
-                "Ставить больше нечего — кнопка неактивна.\n\n"
-                "(Для Whisper-моделей faster-whisper CUDA настраивается отдельно:\n"
-                "Сервис → Настройки → вкладка «Движки».)"
-            )
+            button.setText(_("✓ GPU in use: PyTorch CUDA ({detail})").format(
+                detail=state.get("detail") or gpu_name))
+            button.setToolTip(_(
+                "{gpu}{vram}\n"
+                "The CUDA build of PyTorch is in place: GigaAM / Qwen3-ASR / HF models\n"
+                "compute the encoder on the graphics card while decoding runs on the CPU.\n"
+                "Nothing left to install — the button is inactive.\n\n"
+                "(For faster-whisper Whisper models CUDA is configured separately:\n"
+                "Tools → Settings → \"Engines\" tab.)"
+            ).format(
+                gpu=gpu_name,
+                vram=_(" · {:.1f} GB VRAM").format(vram / 1024) if vram else "",
+            ))
             button.setEnabled(False)
             return
 
-        # NVIDIA есть, а torch CPU-сборка (или ещё не установлен) — можно ускорить
+        # NVIDIA exists but torch is a CPU build (or not installed) — can accelerate
         if state.get("installed"):
-            text = f"⚡ Ускорить на GPU: PyTorch сейчас без CUDA ({state.get('detail') or 'cpu'})"
+            text = _("⚡ Accelerate on GPU: PyTorch currently has no CUDA ({detail})").format(
+                detail=state.get("detail") or "cpu")
         else:
-            text = "⚡ Ускорить на GPU: поставить PyTorch с CUDA (~2.5–3 ГБ)"
+            text = _("⚡ Accelerate on GPU: install PyTorch with CUDA (~2.5–3 GB)")
         button.setText(text)
-        button.setToolTip(
-            f"Видеокарта {gpu_name}" + (f" ({vram / 1024:.1f} ГБ VRAM) " if vram else " ") +
-            "простаивает: в .venv стоит CPU-сборка PyTorch.\n"
-            "Клик установит CUDA-сборку (torch+torchaudio, разово ~2.5–3 ГБ) —\n"
-            "torch-модели (GigaAM, Qwen3-ASR, любые HF) ускорятся ориентировочно в 1.5–2 раза:\n"
-            "энкодер перейдёт на видеокарту, декодирование останется на процессоре.\n\n"
-            "Установка идёт строго в .venv проекта; нужен интернет."
-        )
+        button.setToolTip(_(
+            "The {gpu} graphics card{vram}is idle: the environment has a CPU build of PyTorch.\n"
+            "Clicking installs the CUDA build (torch+torchaudio, once, ~2.5–3 GB) —\n"
+            "torch models (GigaAM, Qwen3-ASR, any HF) speed up roughly 1.5–2×:\n"
+            "the encoder moves to the GPU, decoding stays on the CPU.\n\n"
+            "The installation goes strictly into the project environment; internet required."
+        ).format(gpu=gpu_name,
+                 vram=_(" ({:.1f} GB VRAM) ").format(vram / 1024) if vram else " "))
         button.setEnabled(True)
 
     def _install_torch_cuda(self) -> None:
-        """Ставит CUDA-сборку torch в .venv (с удалением CPU-сборки)."""
+        """Install the CUDA build of torch into the environment (removing the CPU build)."""
         if self.package_worker is not None and self.package_worker.isRunning():
-            QMessageBox.information(self, "Уже идёт установка", "Дождись завершения предыдущей установки.")
+            QMessageBox.information(self, _("Installation already running"), _("Wait for the previous installation to finish."))
             return
         hardware = self.hardware or {}
         gpu_name = str(hardware.get("gpu_name") or "NVIDIA")
@@ -1521,23 +1536,23 @@ class MainWindow(QMainWindow):
         try:
             major = int(driver.split(".")[0])
             if 0 < major < TORCH_CUDA_MIN_DRIVER_MAJOR:
-                driver_note = (
-                    f"\n\n⚠ Драйвер NVIDIA {driver} старее {TORCH_CUDA_MIN_DRIVER_MAJOR} — "
-                    "CUDA-сборка может не заработать. Сначала обнови драйвер (nvidia.com)."
-                )
+                driver_note = _("\n\n⚠ NVIDIA driver {driver} is older than {min} — "
+                                "the CUDA build may not work. Update the driver first (nvidia.com)."
+                                ).format(driver=driver, min=TORCH_CUDA_MIN_DRIVER_MAJOR)
         except (ValueError, IndexError):
             pass
 
         answer = QMessageBox.question(
-            self, "Ускорение на видеокарте",
-            f"Видеокарта: {gpu_name}" + (f" · {vram / 1024:.1f} ГБ VRAM" if vram else "") +
-            (f" · драйвер {driver}" if driver else "") + "\n\n"
-            "Сейчас torch-модели (GigaAM, Qwen3-ASR, HF) считаются на процессоре.\n"
-            "Установить CUDA-сборку PyTorch в .venv проекта?\n\n"
-            "• скачается ~2.5–3 ГБ (разово, при следующих запусках — ничего);\n"
-            "• энкодер перейдёт на GPU: ориентировочно в 1.5–2 раза быстрее;\n"
-            "• системный Python не затрагивается." + driver_note + "\n\n"
-            "Установить сейчас?",
+            self, _("GPU acceleration"),
+            _("Graphics card: {gpu}").format(gpu=gpu_name)
+            + (_(" · {:.1f} GB VRAM").format(vram / 1024) if vram else "")
+            + (_(" · driver {driver}").format(driver=driver) if driver else "") + "\n\n"
+            + _("Currently torch models (GigaAM, Qwen3-ASR, HF) compute on the CPU.\n"
+                "Install the CUDA build of PyTorch into the project environment?\n\n"
+                "• ~2.5–3 GB will be downloaded (once; later runs download nothing);\n"
+                "• the encoder moves to the GPU: roughly 1.5–2× faster;\n"
+                "• the system Python is not affected.")
+            + driver_note + "\n\n" + _("Install now?"),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_yes(),
         )
@@ -1547,16 +1562,16 @@ class MainWindow(QMainWindow):
         self._last_install_torch_cuda = True
         self.install_packages_interactive(
             ["--index-url", TORCH_CUDA_INDEX_URL, "torch>=2.6", "torchaudio>=2.6"],
-            "PyTorch CUDA (GPU-ускорение)",
+            _("PyTorch CUDA (GPU acceleration)"),
             pre_uninstall=["torch", "torchaudio"],
         )
 
     def _maybe_offer_gpu_boost(self) -> None:
-        """Разовое предложение «сейчас / позже / не предлагать» после CPU-прогона
-        torch-модели на машине с видеокартой NVIDIA."""
+        """One-time "now / later / never" offer after a CPU run of a torch model
+        on a machine with an NVIDIA card."""
         try:
             if self._last_job_engine not in TORCH_ENGINE_NAMES:
-                return   # задача шла не на torch-движке — предложение не к месту
+                return   # the job ran on a non-torch engine — the offer is off-topic
             if self.settings.gpu_boost_offered:
                 return
             if not self.hardware.get("has_nvidia"):
@@ -1564,8 +1579,8 @@ class MainWindow(QMainWindow):
             state = self.gpu_state
             if not state.get("probed") or state.get("cuda"):
                 return
-            # Linux: pip-torch по умолчанию уже идёт с CUDA; CPU-сборка там —
-            # редкость, и предложение только запутает. macOS: CUDA не существует.
+            # Linux: pip torch already ships with CUDA by default; a CPU build
+            # there is rare and the offer would only confuse. macOS: no CUDA.
             if os.name != "nt":
                 return
 
@@ -1573,44 +1588,44 @@ class MainWindow(QMainWindow):
             self.settings.save()
 
             box = QMessageBox(self)
-            box.setWindowTitle("Доступно GPU-ускорение")
+            box.setWindowTitle(_("GPU acceleration available"))
             box.setIcon(QMessageBox.Icon.Information)
             gpu_name = str(self.hardware.get("gpu_name") or "NVIDIA")
-            box.setText(
-                f"Задача выполнена на процессоре, хотя у тебя есть видеокарта {gpu_name}:\n"
-                "PyTorch в .venv установлен без CUDA.\n\n"
-                "Установка CUDA-сборки (~2.5–3 ГБ, разово) ускорит GigaAM /\n"
-                "Qwen3-ASR / HF-модели ориентировочно в 1.5–2 раза.\n\n"
-                "Поставить сейчас? (потом можно в любой момент — кнопкой\n"
-                "«⚡ Ускорить на GPU» в блоке «3 · Работа»)"
-            )
-            now = box.addButton("Поставить сейчас", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
-            box.addButton("Не предлагать", QMessageBox.ButtonRole.DestructiveRole)
+            box.setText(_(
+                "The job ran on the CPU even though you have a {gpu} graphics card:\n"
+                "PyTorch in the environment is installed without CUDA.\n\n"
+                "Installing the CUDA build (~2.5–3 GB, once) speeds up GigaAM /\n"
+                "Qwen3-ASR / HF models roughly 1.5–2×.\n\n"
+                "Install now? (possible at any time later — via the\n"
+                "\"⚡ Accelerate on GPU\" button in block \"3 · Work\")"
+            ).format(gpu=gpu_name))
+            now = box.addButton(_("Install now"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(_("Later"), QMessageBox.ButtonRole.RejectRole)
+            box.addButton(_("Do not offer again"), QMessageBox.ButtonRole.DestructiveRole)
             box.exec()
             if box.clickedButton() is now:
                 self._install_torch_cuda()
-        except Exception as exc:  # noqa: BLE001 - предложение не должно ронять финал задачи
-            log.debug("Не удалось предложить GPU-ускорение: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - the offer must not crash the job finale
+            log.debug("Failed to offer GPU acceleration: %s", exc)
 
     # ================================================================== #
-    #  Установка пакетов (движки, CUDA, ремонт окружения)
+    #  Package installation (engines, CUDA, environment repair)
     # ================================================================== #
     @staticmethod
     def _with_cuda_index(packages: List[str], hardware: Optional[dict]) -> List[str]:
-        """Добавляет CUDA-индекс PyTorch, если ставится torch на Windows+NVIDIA.
+        """Add the PyTorch CUDA index when installing torch on Windows+NVIDIA.
 
-        На Linux pip и так ставит torch с CUDA, на macOS CUDA нет — поэтому
-        только Windows. Явный --index-url в списке не перебиваем.
+        On Linux pip installs CUDA torch anyway; macOS has no CUDA — hence
+        Windows only. An explicit --index-url in the list is not overridden.
 
-        ВАЖНО: --index-url ПОЛНОСТЬЮ заменяет PyPI. Для списка только из
-        torch-пакетов это то, что нужно (берём CUDA-сборку). Но движки
-        ставятся смешанным списком (torch + transformers + hydra-core + …),
-        и на индексе PyTorch остальных пакетов просто нет — установка падала
-        с «No matching distribution». Поэтому для смешанных списков индекс
-        PyTorch добавляется как ДОПОЛНИТЕЛЬНЫЙ (--extra-index-url): pip/uv
-        сами возьмут torch/torchaudio в CUDA-сборке (версия с суффиксом
-        +cu126 старше чистой по PEP 440), а остальное — с PyPI.
+        IMPORTANT: --index-url FULLY replaces PyPI. For a torch-only list that
+        is what we want (take the CUDA build). But engines install a mixed
+        list (torch + transformers + hydra-core + …) which the PyTorch index
+        does not have — the install would die with "No matching distribution".
+        So for mixed lists the PyTorch index is added as an EXTRA one
+        (--extra-index-url): pip/uv pick torch/torchaudio in the CUDA build
+        (the +cu126 version sorts above the plain one per PEP 440) and the
+        rest from PyPI.
         """
         packages = list(packages)
         if not (os.name == "nt" and (hardware or {}).get("has_nvidia")):
@@ -1631,27 +1646,27 @@ class MainWindow(QMainWindow):
         if not packages:
             return
         if self.package_worker is not None and self.package_worker.isRunning():
-            QMessageBox.information(self, "Уже идёт установка", "Дождись завершения предыдущей установки.")
+            QMessageBox.information(self, _("Installation already running"), _("Wait for the previous installation to finish."))
             return
 
-        # Windows: pip по умолчанию ставит CPU-сборку torch. Если есть карта
-        # NVIDIA и в списке есть torch — сразу берём CUDA-индекс PyTorch,
-        # чтобы движки «из коробки» использовали видеокарту.
+        # Windows: pip installs the CPU build of torch by default. With an
+        # NVIDIA card and torch in the list, take the PyTorch CUDA index right
+        # away so engines use the GPU out of the box.
         before = list(packages)
         packages = self._with_cuda_index(packages, self.hardware)
         if packages != before:
-            self._log("Есть GPU NVIDIA — torch ставится сразу в CUDA-сборке")
+            self._log(_("NVIDIA GPU present — torch is installed in the CUDA build right away"))
 
         size_note = ""
         if any(pkg.lower().startswith("torch") for pkg in packages):
-            size_note = (
-                "\nОбъём большой из-за PyTorch: ~120–200 МБ (CPU-сборка) — это разовая "
-                "загрузка, при следующих запусках ничего не качается."
+            size_note = _(
+                "\nThe size is large because of PyTorch: ~120–200 MB (CPU build) — a one-time "
+                "download; later runs download nothing."
             )
         dialog = ProgressDialog(
-            title or "Установка компонентов",
-            "Устанавливаем строго в .venv проекта — системный Python не трогаем.\n"
-            "Пакеты: " + ", ".join(packages) + size_note,
+            title or _("Installing components"),
+            _("Installing strictly into the project environment — the system Python is not touched.\n")
+            + _("Packages: ") + ", ".join(packages) + size_note,
             parent=self,
         )
         worker = PackageInstaller(packages, title, self, pre_uninstall=pre_uninstall)
@@ -1667,7 +1682,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_packages_installed(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
-        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.finish(_("Done") if ok else _("Stopped"))
         self._log(message)
         registry.hardware(refresh=True)
         self.hardware = registry.hardware()
@@ -1677,24 +1692,24 @@ class MainWindow(QMainWindow):
         self._last_install_torch_cuda = False
 
         if not ok:
-            QMessageBox.warning(self, "Установка не завершилась", message + self._install_hint(message))
+            QMessageBox.warning(self, _("Installation did not finish"), message + self._install_hint(message))
         elif was_torch_cuda:
-            # перепроверяем состояние torch (зондом в subprocess) и подсказываем
-            # про перезапуск: если torch уже был импортирован в этой сессии,
-            # процесс продолжит видеть старую (CPU) сборку до перезапуска
+            # re-probe the torch state (subprocess) and hint about a restart:
+            # if torch was already imported in this session, the process keeps
+            # seeing the old (CPU) build until restarted
             self.gpu_state = {"probed": False, "installed": False, "cuda": False, "detail": ""}
             self._refresh_gpu_button()
             self._start_torch_probe()
             restart_note = ""
             if "torch" in sys.modules:
-                restart_note = (
-                    "\n\nВажно: в этой сессии torch уже загружен — перезапусти программу,\n"
-                    "чтобы новая CUDA-сборка подхватилась."
+                restart_note = _(
+                    "\n\nImportant: torch is already loaded in this session — restart the app\n"
+                    "so the new CUDA build is picked up."
                 )
             QMessageBox.information(
-                self, "PyTorch CUDA установлен",
-                "CUDA-сборка PyTorch установлена в .venv.\n"
-                "Состояние кнопки «⚡ Ускорить на GPU» обновится после проверки." + restart_note,
+                self, _("PyTorch CUDA installed"),
+                _("The CUDA build of PyTorch is installed into the project environment.\n"
+                  "The \"⚡ Accelerate on GPU\" button updates after the check.") + restart_note,
             )
         elif getattr(self, "_pending_job", False):
             self._pending_job = False
@@ -1705,63 +1720,64 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _install_hint(message: str) -> str:
-        """Человеческая подсказка к типичным причинам падения pip."""
+        """Human hint for the typical pip failure reasons."""
         low = (message or "").lower()
         if any(marker in low for marker in (
             "failed to build", "build wheel", "cmake", "winerror 2",
             "microsoft visual c++", "no compiler",
         )):
-            return (
-                "\n\nПохоже, pip не нашёл готовое колесо одного из пакетов под твой Python "
-                "и попытался собрать его из исходников (для этого нужны компилятор и CMake, "
-                "которых обычно нет).\n"
-                "Что делать:\n"
-                "  1) обнови LocalASR до последней версии — пины зависимостей ослаблены, "
-                "ставятся готовые колёса;\n"
-                "  2) если не помогло — поставь Python 3.11–3.13 и запусти программу им "
-                "(под экзотически новый Python колёса выходят не сразу)."
+            return _(
+                "\n\nIt looks like pip found no prebuilt wheel for one of the packages for your "
+                "Python and tried to build it from source (which needs a compiler and CMake, "
+                "usually absent).\n"
+                "What to do:\n"
+                "  1) update LocalASR to the latest version — dependency pins are relaxed, "
+                "prebuilt wheels install;\n"
+                "  2) if that does not help, install Python 3.11–3.13 and run the app with it "
+                "(wheels for exotic new Pythons are not published immediately)."
             )
         if "could not find a version" in low or "no matching distribution" in low:
-            return (
-                "\n\nОдин из пакетов не находится в PyPI под твою версию Python. "
-                "Попробуй Python 3.11–3.13 или проверь, что есть доступ в интернет без прокси."
+            return _(
+                "\n\nOne of the packages cannot be found in PyPI for your Python version. "
+                "Try Python 3.11–3.13 or check that the internet works without a proxy."
             )
         return ""
 
     def on_diagnostics(self) -> None:
-        """Сервис → Диагностика и восстановление (файлы, папки, .venv)."""
+        """Tools → Diagnostics & recovery (files, folders, environment)."""
         DiagnosticsDialog(self).exec()
-        # после ремонта окружения железо/движки могли измениться
+        # hardware/engines may have changed after a repair
         registry.hardware(refresh=True)
         self.hardware = registry.hardware()
         self.models_panel.set_hardware(self.hardware)
         self._refresh_gpu_button()
 
     def _check_integrity(self) -> None:
-        """Тихая проверка файлов программы при старте.
+        """Silent program-file check at startup.
 
-        Ничего не ломает: если пользователь удалил файлы проекта — сообщаем
-        и предлагаем восстановить их с GitHub (одной кнопкой).
+        Breaks nothing: if the user deleted project files, report and offer
+        to restore them from GitHub (one click).
         """
         try:
             from ..core import integrity
 
             missing = integrity.missing_project_files()
         except Exception as exc:  # noqa: BLE001
-            log.debug("Проверка целостности не выполнена: %s", exc)
+            log.debug("Integrity check failed: %s", exc)
             return
         if not missing:
             return
-        log.warning("Отсутствуют файлы программы: %s", ", ".join(missing[:10]))
+        log.warning(_("Program files are missing: %s"), ", ".join(missing[:10]))
         listing = "\n".join("  • " + name for name in missing[:12])
         if len(missing) > 12:
-            listing += f"\n  … и ещё {len(missing) - 12}"
+            listing += _("\n  … and {n} more").format(n=len(missing) - 12)
         answer = QMessageBox.question(
-            self, "Отсутствуют файлы программы",
-            f"В папке программы не хватает {len(missing)} файл(ов):\n{listing}\n\n"
-            "Программа продолжит работу, но может быть неполноценной.\n"
-            "Скачать недостающие файлы заново из репозитория проекта?\n"
-            "(нужен интернет; вес — считаные килобайты, данные не затрагиваются)",
+            self, _("Program files are missing"),
+            _("The program folder lacks {n} file(s):\n{listing}\n\n"
+              "The app will keep working but may be incomplete.\n"
+              "Re-download the missing files from the project repository?\n"
+              "(internet required; a few kilobytes, user data is not affected)").format(
+                n=len(missing), listing=listing),
             compat.message_box_yes() | compat.message_box_no(),
             compat.message_box_yes(),
         )
@@ -1772,8 +1788,8 @@ class MainWindow(QMainWindow):
         if self.restore_worker is not None and self.restore_worker.isRunning():
             return
         dialog = ProgressDialog(
-            "Восстановление файлов программы",
-            f"Скачиваем {len(missing)} файл(ов) из репозитория проекта…",
+            _("Restoring program files"),
+            _("Downloading {n} file(s) from the project repository…").format(n=len(missing)),
             parent=self,
         )
         worker = FileRestoreWorker(missing, self)
@@ -1787,16 +1803,16 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_restore_finished(self, ok: bool, message: str, dialog: ProgressDialog) -> None:
-        dialog.finish("Готово" if ok else "Остановлено")
+        dialog.finish(_("Done") if ok else _("Stopped"))
         dialog.accept()
         worker, self.restore_worker = self.restore_worker, None
         if worker is not None:
             worker.deleteLater()
         self._log(message)
         if ok:
-            self._toast("Файлы программы восстановлены")
+            self._toast(_("Program files restored"))
         else:
-            QMessageBox.warning(self, "Восстановление", message)
+            QMessageBox.warning(self, _("Recovery"), message)
 
     def on_open_bootstrap_log(self) -> None:
         log_file = paths.logs_dir() / "bootstrap.log"
@@ -1804,28 +1820,28 @@ class MainWindow(QMainWindow):
         target = log_file if log_file.is_file() else error_log
         if not target.is_file():
             QMessageBox.information(
-                self, "Логи",
-                "Лога запуска нет — и это хорошая новость.\n\n"
-                "bootstrap.log ведётся только во время подготовки окружения и\n"
-                "автоматически удаляется при успешном запуске программы.\n"
-                "Он остаётся на диске, только если запуск завершился ошибкой.",
+                self, _("Logs"),
+                _("There is no startup log — and that is good news.\n\n"
+                  "bootstrap.log is written only while the environment is prepared and\n"
+                  "is deleted automatically on a successful start.\n"
+                  "It stays on disk only if the launch ended with an error."),
             )
             return
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            QMessageBox.warning(self, "Логи", f"Не удалось прочитать: {exc}")
+            QMessageBox.warning(self, _("Logs"), _("Failed to read: {exc}").format(exc=exc))
             return
-        dialog = ProgressDialog(f"Лог: {target.name}", str(target), self)
+        dialog = ProgressDialog(_("Log: {name}").format(name=target.name), str(target), self)
         dialog.set_fraction(1.0)
         dialog.set_status(f"{target}")
         dialog.append_log(text[-60000:])
-        dialog.finish("Только чтение")
-        dialog.cancel_button.setText("Закрыть")
+        dialog.finish(_("Read only"))
+        dialog.cancel_button.setText(_("Close"))
         dialog.exec()
 
     # ================================================================== #
-    #  Прочее
+    #  Misc
     # ================================================================== #
     def on_open_settings(self) -> None:
         self._collect_settings()
@@ -1835,18 +1851,18 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == compat.dialog_accepted():
             self._apply_settings_to_ui()
-            log.debug("Настройки применены из диалога: %s", self.settings.to_dict())
-            self._log("Настройки сохранены")
+            log.debug("Settings applied from the dialog: %s", self.settings.to_dict())
+            self._log(_("Settings saved"))
 
     def _reset_settings_to_defaults(self) -> None:
-        """Вызывается из диалога настроек после сброса: применяем дефолты к UI.
+        """Called from the settings dialog after a reset: apply defaults to the UI.
 
-        К этому моменту `self.settings` уже сброшен в стандартные значения и
-        сохранён на диск. Осталось привести интерфейс в соответствие и вернуть
-        окну/фильтрам исходный вид.
+        By this moment `self.settings` is already reset and saved. All that
+        remains is bringing the interface and the window/filters back to the
+        original look.
         """
         self._apply_settings_to_ui()
-        # геометрия окна — к стандартной
+        # window geometry — back to default
         self.settings.window_geometry = ""
         self.settings.window_state = ""
         self.settings.splitter_sizes = []
@@ -1856,23 +1872,23 @@ class MainWindow(QMainWindow):
             self.showNormal()
             self.resize(1280, 800)
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось сбросить геометрию: %s", exc)
+            log.debug("Failed to reset geometry: %s", exc)
         self.settings.save()
-        # фильтры каталога — к стандартным
+        # catalog filters — back to defaults
         try:
             self.models_panel.reset_filters_to_defaults()
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось сбросить фильтры: %s", exc)
-        # файловый лог — к стандартному состоянию (по умолчанию выключен)
+            log.debug("Failed to reset filters: %s", exc)
+        # file log — back to the default state (off)
         try:
             from .. import logutils
 
             logutils.set_file_logging(bool(self.settings.file_logging))
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось применить состояние логирования: %s", exc)
+            log.debug("Failed to apply the logging state: %s", exc)
         self._update_output_hint()
-        self._log("Настройки сброшены к стандартным")
-        self._toast("Настройки сброшены к стандартным")
+        self._log(_("Settings reset to defaults"))
+        self._toast(_("Settings reset to defaults"))
 
     def on_show_hardware(self) -> None:
         hardware = registry.hardware(refresh=True)
@@ -1890,26 +1906,27 @@ class MainWindow(QMainWindow):
 
     def on_about(self) -> None:
         QMessageBox.about(
-            self, f"О {APP_NAME}",
-            f"<h3>{APP_NAME} {APP_VERSION}</h3>"
-            "<p>Локальное распознавание речи: аудио и видео → текст, субтитры, JSON.</p>"
-            "<p>Движки: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi), "
-            "Qwen3-ASR и GigaAM (torch), а также универсальный hf-transformers "
-            "для любых ASR-моделей Hugging Face.<br>"
-            "GUI: PySide6. Всё устанавливается в <code>.venv</code> внутри папки проекта.</p>"
-            f"<p>Python: {sys.version.split()[0]}<br>Интерпретатор: {sys.executable}<br>"
-            f"Проект: {paths.ROOT_DIR}</p>",
+            self, _("About {app}").format(app=APP_NAME),
+            _("<h3>{app} {version}</h3>"
+              "<p>Local speech recognition: audio and video → text, subtitles, JSON.</p>"
+              "<p>Engines: faster-whisper (CTranslate2), whisper.cpp (GGML), Vosk (Kaldi), "
+              "Qwen3-ASR and GigaAM (torch), plus the generic hf-transformers "
+              "for any Hugging Face ASR model.<br>"
+              "GUI: PySide6. Everything is installed inside the project folder.</p>"
+              "<p>Python: {py}<br>Interpreter: {exe}<br>"
+              "Project: {root}</p>").format(
+                app=APP_NAME, version=APP_VERSION,
+                py=sys.version.split()[0], exe=sys.executable, root=paths.ROOT_DIR),
         )
 
-    # ---------------- служебное ---------------------------------------- #
+    # ---------------- service ------------------------------------------- #
     def _collect_settings(self) -> None:
         self.settings.language = self.language_combo.currentData() or ""
-        # результат всегда в txt: отдельной настройки формата больше нет
+        # the result is always txt: there is no separate format setting anymore
         self.settings.output_format = "txt"
-        # ВАЖНО: значение по умолчанию («outputs/ внутри проекта») НЕ
-        # сохраняется абсолютным путём — иначе после переноса папки проекта
-        # результаты продолжали бы уезжать по СТАРОМУ пути (баг «создал
-        # LocalASR/outputs на рабочем столе»). Пустая строка = «по умолчанию».
+        # IMPORTANT: the default value ("outputs/ inside the project") is NOT
+        # saved as an absolute path — otherwise moving the project folder would
+        # keep sending results to the OLD path. Empty string = "default".
         output_text = self.output_edit.text().strip()
         default_text = str(paths.outputs_dir())
         if not output_text or os.path.normcase(output_text) == os.path.normcase(default_text):
@@ -1942,21 +1959,21 @@ class MainWindow(QMainWindow):
         beam = int(self.settings.beam_size or 5)
         index = self.beam_combo.findData(beam)
         if index < 0:
-            # значение из «Все настройки…» (например 7) не теряем — добавляем пункт
+            # do not lose a value set via "All settings…" (e.g. 7) — add an item
             self.beam_combo.addItem(f"beam {beam}", beam)
             index = self.beam_combo.count() - 1
         self.beam_combo.setCurrentIndex(index)
         self.batched_check.setChecked(bool(self.settings.batched))
         self.hotwords_edit.setText(self.settings.hotwords)
         self.prompt_edit.setText(self.settings.initial_prompt)
-        self.open_folder_check.setChecked(bool(self.settings.open_output_folder_when_done))
-        # состояние панели «Расширенные настройки»
+        self.open_folder_check.setChecked(self.settings.open_output_folder_when_done)
+        # state of the "Advanced options" panel
         self.advanced_toggle.blockSignals(True)
         self.advanced_toggle.setChecked(bool(self.settings.advanced_open))
         self.advanced_toggle.blockSignals(False)
         self.advanced_frame.setVisible(bool(self.settings.advanced_open))
         self.advanced_toggle.setText(
-            "▾ Расширенные настройки" if self.settings.advanced_open else "▸ Расширенные настройки"
+            _("▾ Advanced options") if self.settings.advanced_open else _("▸ Advanced options")
         )
         self._update_output_hint()
 
@@ -1966,29 +1983,28 @@ class MainWindow(QMainWindow):
 
     def _toggle_advanced(self, checked: bool) -> None:
         self.advanced_frame.setVisible(checked)
-        self.advanced_toggle.setText("▾ Расширенные настройки" if checked else "▸ Расширенные настройки")
+        self.advanced_toggle.setText(_("▾ Advanced options") if checked else _("▸ Advanced options"))
         self.settings.advanced_open = bool(checked)
         self.settings.save()
 
     def _update_output_hint(self) -> None:
         output_dir = self.current_output_dir()
         fmt = "txt-time" if self.timestamps_check.isChecked() else "txt"
-        sample = paths.sanitize_stem("лекция 1.mp4")
+        sample = paths.sanitize_stem(_("lecture 1.mp4"))
         suffix = paths.output_suffix(fmt)
         sample_name = f"{sample} {paths.datetime_stamp()}{suffix}"
-        note = (
-            "(имя оригинала + дата и время — результаты разных запусков\n"
-            "никогда не перетираются)"
+        note = _(
+            "(original name + date and time — results of different runs\n"
+            "never overwrite each other)"
         )
         try:
             outside = paths.ROOT_DIR.resolve() not in output_dir.resolve().parents
         except OSError:
             outside = False
         if outside:
-            note = "⚠ папка ВНЕ проекта — проверь, что выбрал её намеренно.\n" + note
-        self.output_hint.setText(
-            f"Результат: {paths.short_path(output_dir, 46)} / «{sample_name}» {note}"
-        )
+            note = _("⚠ the folder is OUTSIDE the project — make sure you chose it deliberately.\n") + note
+        self.output_hint.setText(_("Result: {path} / \"{name}\" {note}").format(
+            path=paths.short_path(output_dir, 46), name=sample_name, note=note))
 
     def _log(self, message: str) -> None:
         text = message.strip()
@@ -2006,20 +2022,20 @@ class MainWindow(QMainWindow):
     def _toast(self, message: str) -> None:
         self.statusBar().showMessage(message, 6000)
 
-    # ---------------- drag&drop окна ----------------------------------- #
+    # ---------------- window drag&drop ---------------------------------- #
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
         urls = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
-        log.debug("Drag&drop: %d объект(ов): %s", len(urls), "; ".join(urls[:6]))
+        log.debug("Drag&drop: %d object(s): %s", len(urls), "; ".join(urls[:6]))
         if urls:
             added = self.file_list.add_paths(urls)
-            self._log(f"Перетаскиванием добавлено: {added}")
+            self._log(_("Added by drag&drop: {n}").format(n=added))
             event.acceptProposedAction()
 
-    # ---------------- геометрия/закрытие -------------------------------- #
+    # ---------------- geometry/closing ----------------------------------- #
     def _restore_geometry(self) -> None:
         try:
             if self.settings.window_geometry:
@@ -2030,10 +2046,10 @@ class MainWindow(QMainWindow):
                 self.splitter.setSizes([int(v) for v in self.settings.splitter_sizes])
             self.log_dock.setVisible(bool(self.settings.show_log_panel))
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось восстановить геометрию окна: %s", exc)
+            log.debug("Failed to restore window geometry: %s", exc)
 
     def _save_geometry_now(self) -> None:
-        """Пишет текущую геометрию/состояние окна в настройки (атомарно)."""
+        """Write the current window geometry/state to settings (atomically)."""
         try:
             self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
             self.settings.window_state = bytes(self.saveState().toBase64()).decode("ascii")
@@ -2041,18 +2057,18 @@ class MainWindow(QMainWindow):
             self.settings.show_log_panel = self.log_dock.isVisible()
             self.settings.save()
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось сохранить геометрию: %s", exc)
+            log.debug("Failed to save geometry: %s", exc)
 
     def _schedule_geometry_save(self) -> None:
-        """Дебаунс: окно можно двигать непрерывно — сохраним один раз через паузу.
+        """Debounce: the window can be moved continuously — save once after a pause.
 
-        Благодаря этому любое изменение (размер, позиция, свернутое/развёрнутое
-        состояние, панели) переживает даже аварийное завершение программы.
+        Any change (size, position, minimized/maximized state, panels) thus
+        survives even an abnormal termination.
         """
         try:
             self._geo_timer.start()
         except RuntimeError:
-            pass    # окно уже удалено — сохранять некуда
+            pass    # the window is already deleted — nowhere to save
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -2063,7 +2079,7 @@ class MainWindow(QMainWindow):
         self._schedule_geometry_save()
 
     def changeEvent(self, event) -> None:  # noqa: N802
-        # смена состояния окна (свернуто/развёрнуто/обычное)
+        # window state change (minimized/maximized/normal)
         super().changeEvent(event)
         try:
             from PySide6.QtCore import QEvent
@@ -2076,8 +2092,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
-                self, "Идёт обработка",
-                "Распознавание ещё не закончилось. Остановить и выйти?",
+                self, _("Processing in progress"),
+                _("Recognition has not finished yet. Stop and exit?"),
                 compat.message_box_yes() | compat.message_box_no(),
                 compat.message_box_no(),
             )
@@ -2085,12 +2101,12 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
-        # Все фоновые потоки останавливаются ГАРАНТИРОВАННО (cancel → wait →
-        # terminate). Иначе Qt на выходе пишет «QThread: Destroyed while thread
-        # is still running», а сетевые ретраи/pip могут пережить окно.
+        # All background threads are stopped GUARANTEED (cancel → wait →
+        # terminate). Otherwise Qt logs "QThread: Destroyed while thread is
+        # still running" on exit, and network retries/pip may outlive the window.
         from .workers import stop_worker
 
-        log.debug("closeEvent: останавливаю фоновые потоки")
+        log.debug("closeEvent: stopping background threads")
         stop_worker(self.worker, 6000, "TranscribeWorker")
         for name, worker in (
             ("download", self.download_worker),
@@ -2106,12 +2122,12 @@ class MainWindow(QMainWindow):
 
         detach_qt_sink(self.log_handler)
         registry.unload()
-        log.debug("closeEvent: завершение корректно")
+        log.debug("closeEvent: finished cleanly")
         event.accept()
 
 
 # --------------------------------------------------------------------------- #
-#  Таблица результатов
+#  Results table
 # --------------------------------------------------------------------------- #
 
 
@@ -2119,17 +2135,18 @@ class ResultsDialog(QDialog):
     def __init__(self, results: dict, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.results = results
-        self.setWindowTitle("Результаты")
+        self.setWindowTitle(_("Results"))
         self.setModal(True)
         self.resize(920, 520)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 14)
         root.setSpacing(10)
-        root.addWidget(make_label("Что получилось", "H2"))
+        root.addWidget(make_label(_("What came out"), "H2"))
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Файл", "Статус", "Результат", "Слов", "Скорость", "Время"])
+        self.table.setHorizontalHeaderLabels(
+            [_("File name"), _("Status"), _("Result"), _("Words"), _("Speed"), _("Time")])
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, compat.header_stretch_mode())
@@ -2144,7 +2161,7 @@ class ResultsDialog(QDialog):
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(Path(result.source).name))
-            status = QTableWidgetItem("✓ готово" if result.ok else "✗ ошибка")
+            status = QTableWidgetItem(_("✓ done") if result.ok else _("✗ error"))
             status.setForeground(compat.COLOR_GREEN if result.ok else compat.COLOR_RED)
             self.table.setItem(row, 1, status)
             outputs = QTableWidgetItem(", ".join(p.name for p in result.outputs) or (result.error or "—"))
@@ -2152,7 +2169,7 @@ class ResultsDialog(QDialog):
             self.table.setItem(row, 2, outputs)
             self.table.setItem(row, 3, QTableWidgetItem(str(result.words)))
             self.table.setItem(row, 4, QTableWidgetItem(f"{result.speed_x:.1f}×"))
-            self.table.setItem(row, 5, QTableWidgetItem(f"{result.elapsed_seconds:.0f} с"))
+            self.table.setItem(row, 5, QTableWidgetItem(_("{:.0f} s").format(result.elapsed_seconds)))
             if result.ok and result.outputs:
                 self.table.item(row, 2).setData(compat.ROLE_USER, str(result.outputs[0]))
 
@@ -2160,15 +2177,15 @@ class ResultsDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        open_button = QPushButton("Открыть файл")
+        open_button = QPushButton(_("Open file"))
         open_button.setObjectName("Primary")
         open_button.clicked.connect(self._open_current)
         buttons.addWidget(open_button)
-        folder_button = QPushButton("Открыть папку")
+        folder_button = QPushButton(_("Open folder"))
         folder_button.setObjectName("Ghost")
         folder_button.clicked.connect(self._open_folder)
         buttons.addWidget(folder_button)
-        close_button = QPushButton("Закрыть")
+        close_button = QPushButton(_("Close"))
         close_button.setObjectName("Ghost")
         close_button.clicked.connect(self.accept)
         buttons.addWidget(close_button)
@@ -2187,7 +2204,7 @@ class ResultsDialog(QDialog):
     def _open_current(self) -> None:
         path = self._current_path()
         if path is None:
-            QMessageBox.information(self, "Результаты", "Выбери строку с готовым файлом.")
+            QMessageBox.information(self, _("Results"), _("Select a row with a finished file."))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 

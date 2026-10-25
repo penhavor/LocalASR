@@ -1,8 +1,8 @@
-"""Движок faster-whisper (CTranslate2).
+"""faster-whisper engine (CTranslate2).
 
-Это основной движок LocalASR: в ~4 раза быстрее оригинального openai/whisper,
-поддерживает int8-квантование, Silero VAD, hotwords и пакетный (batched)
-декодинг на GPU. Работает и на CPU, и на CUDA — без PyTorch.
+The primary LocalASR engine: ~4x faster than openai/whisper, with int8
+quantization, Silero VAD, hotwords and batched GPU decoding. Runs on CPU
+and CUDA without PyTorch.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..constants import ENGINE_FASTER_WHISPER
 from ..core.postprocess import Segment, Word
+from ..i18n import _
 from ..logutils import get_logger
 from .base import (
     ASREngine,
@@ -26,8 +27,8 @@ from .base import (
 
 log = get_logger("asr.faster-whisper")
 
-# Параметры Silero VAD, подобранные под лекции: длинные паузы между блоками,
-# но короткие — внутри фразы (иначе текст «слипается» и плывут таймкоды).
+# Silero VAD parameters tuned for lectures: long pauses between blocks,
+# short ones inside a phrase (otherwise text merges and timecodes drift).
 VAD_DEFAULTS: Dict[str, Any] = {
     "threshold": 0.5,
     "min_silence_duration_ms": 400,
@@ -37,10 +38,8 @@ VAD_DEFAULTS: Dict[str, Any] = {
 
 
 def _supported_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Отсекает параметры, которых нет в данной версии библиотеки.
-
-    Именно из-за «неожиданного ключевого аргумента» обычно и падают такие
-    обёртки при обновлении faster-whisper — здесь это исключено.
+    """Drop kwargs the installed library version does not accept — the usual
+    cause of wrapper crashes after a faster-whisper update.
     """
     try:
         params = inspect.signature(func).parameters
@@ -63,7 +62,7 @@ class FasterWhisperEngine(ASREngine):
 
         path = model.resolved_path
         if not path.exists():
-            raise EngineError(f"Папка модели не найдена: {path}")
+            raise EngineError(_("Model folder not found: {path}").format(path=path))
 
         device, compute_type = self._resolve_device(model, hardware)
         threads = int(hardware.get("cpu_threads") or 0)
@@ -85,7 +84,7 @@ class FasterWhisperEngine(ASREngine):
             pass
 
         log.info(
-            "Загружаю модель %s (device=%s, compute=%s, threads=%s)",
+            _("Loading model %s (device=%s, compute=%s, threads=%s)"),
             model.name, kwargs["device"], kwargs["compute_type"], kwargs["cpu_threads"],
         )
         started = time.time()
@@ -96,28 +95,29 @@ class FasterWhisperEngine(ASREngine):
             hint = ""
             low = message.lower()
             if "cudnn" in low or "cublas" in low or "cuda" in low:
-                hint = (
-                    "\n\nПохоже на проблему с CUDA: нужны cuBLAS 12 и cuDNN 9.\n"
-                    "Вариант 1: Сервис → Диагностика и восстановление → установить "
-                    "CUDA-библиотеки (программа сама предложит это при выборе GPU).\n"
-                    "Вариант 2 (Windows): скачать DLL из "
+                hint = _(
+                    "\n\nLooks like a CUDA problem: cuBLAS 12 and cuDNN 9 are required.\n"
+                    "Option 1: Tools → Diagnostics & recovery → install the CUDA "
+                    "libraries (the app also offers this when a GPU is selected).\n"
+                    "Option 2 (Windows): download the DLLs from "
                     "https://github.com/Purfview/whisper-standalone-win/releases/tag/libs "
-                    "и положить в .venv\\Lib\\site-packages.\n"
-                    "Вариант 3: Настройки → Устройство → CPU (работает всегда)."
+                    "and put them into the environment's Lib\\site-packages.\n"
+                    "Option 3: Settings → Device → CPU (always works)."
                 )
             elif "memory" in low or "memoryerror" in low or "out of memory" in low:
-                hint = "\n\nНе хватает памяти: выбери модель поменьше или включи compute_type=int8."
+                hint = _("\n\nNot enough memory: pick a smaller model or enable compute_type=int8.")
             elif "does not support" in low or "unsupported" in low:
-                hint = (
-                    "\n\nМодель не поддерживает выбранный compute_type. "
-                    "Поставь в настройках «compute_type: auto» или default."
+                hint = _(
+                    "\n\nThe model does not support the selected compute_type. "
+                    "Set \"compute_type: auto\" or default in Settings."
                 )
-            raise EngineError(f"Не удалось загрузить модель «{model.name}»: {message}{hint}") from exc
+            raise EngineError(_("Failed to load model \"{name}\": {message}{hint}").format(
+                name=model.name, message=message, hint=hint)) from exc
 
         self.loaded_model_id = model.model_id
         self.device = str(getattr(self._model, "device", kwargs["device"]))
         self.compute_type = str(getattr(self._model, "compute_type", kwargs["compute_type"]))
-        log.info("Модель загружена за %.1f с", time.time() - started)
+        log.info(_("Model loaded in %.1f s"), time.time() - started)
 
     # ------------------------------------------------------------------ #
     def _resolve_device(self, model: ModelRef, hardware: Dict[str, Any]) -> tuple[str, str]:
@@ -130,7 +130,7 @@ class FasterWhisperEngine(ASREngine):
             device = "cpu"
         elif device_pref == "cuda":
             if not cuda_ok:
-                log.warning("CUDA запрошена, но недоступна — переключаюсь на CPU")
+                log.warning(_("CUDA requested but unavailable — switching to CPU"))
                 device = "cpu"
             else:
                 device = "cuda"
@@ -144,9 +144,9 @@ class FasterWhisperEngine(ASREngine):
         else:
             compute = "int8"
 
-        # int8 на очень старых CPU без AVX может не поддерживаться
+        # int8 may be unsupported on very old CPUs without AVX
         if device == "cpu" and compute in ("int8", "int8_float16") and not _cpu_supports_int8():
-            log.warning("CPU без поддержки int8 — переключаюсь на default")
+            log.warning(_("CPU without int8 support — switching to default"))
             compute = "default"
         return device, compute
 
@@ -195,7 +195,7 @@ class FasterWhisperEngine(ASREngine):
             "log_prob_threshold": -1.0,
             "no_speech_threshold": 0.6,
             "compression_ratio_threshold": 2.4,
-            # защита от «петель» и галлюцинаций (поддерживается в 1.1+)
+            # loop/hallucination guard (supported since 1.1+)
             "repetition_penalty": float(options.get("repetition_penalty", 1.08)),
             "no_repeat_ngram_size": int(options.get("no_repeat_ngram_size", 3)),
         }
@@ -209,7 +209,7 @@ class FasterWhisperEngine(ASREngine):
             )
 
         log.debug(
-            "faster-whisper: язык=%s task=%s beam=%s vad=%s words=%s batched=%s batch=%s "
+            "faster-whisper: language=%s task=%s beam=%s vad=%s words=%s batched=%s batch=%s "
             "prompt=%r hotwords=%r",
             language, task, common["beam_size"], use_vad, word_timestamps,
             use_batched, batch_size, bool(options.get("initial_prompt")), bool(options.get("hotwords")),
@@ -227,16 +227,16 @@ class FasterWhisperEngine(ASREngine):
                 pipeline = BatchedInferencePipeline(model=model)
                 kwargs = _supported_kwargs(pipeline.transcribe, dict(common, batch_size=batch_size))
                 segments_iter, info = pipeline.transcribe(audio, **kwargs)
-                log.info("Режим: batched (batch_size=%s)", kwargs.get("batch_size"))
+                log.info(_("Mode: batched (batch_size=%s)"), kwargs.get("batch_size"))
             except TypeError as exc:
-                log.warning("Batched-режим недоступен (%s) — переключаюсь на последовательный", exc)
-                result.warnings.append("batched-режим недоступен, использован последовательный")
+                log.warning(_("Batched mode unavailable (%s) — switching to sequential"), exc)
+                result.warnings.append(_("batched mode unavailable, sequential used"))
                 pipeline = None
             except EngineError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                log.warning("Сбой batched-режима: %s — пробую последовательный", exc)
-                result.warnings.append(f"batched-режим упал ({exc}), использован последовательный")
+                log.warning(_("Batched mode failed: %s — trying sequential"), exc)
+                result.warnings.append(_("batched mode failed ({exc}), sequential used").format(exc=exc))
                 pipeline = None
 
         if segments_iter is None:
@@ -244,8 +244,8 @@ class FasterWhisperEngine(ASREngine):
             try:
                 segments_iter, info = model.transcribe(audio, **kwargs)
             except TypeError as exc:
-                # совсем старая версия библиотеки — убираем «новые» параметры
-                log.warning("transcribe() не принял часть аргументов: %s — повторяю с минимумом", exc)
+                # a very old library version — drop the "new" parameters
+                log.warning(_("transcribe() rejected some arguments: %s — retrying with a minimal set"), exc)
                 minimal = {
                     key: common[key]
                     for key in ("language", "task", "beam_size", "best_of", "temperature",
@@ -254,9 +254,9 @@ class FasterWhisperEngine(ASREngine):
                 }
                 segments_iter, info = model.transcribe(audio, **_supported_kwargs(model.transcribe, minimal))
             except Exception as exc:  # noqa: BLE001
-                raise EngineError(f"Ошибка распознавания: {exc}") from exc
+                raise EngineError(_("Recognition error: {exc}").format(exc=exc)) from exc
 
-        # --- итерация по сегментам --------------------------------------- #
+        # --- segment iteration --------------------------------------------- #
         processed_audio = float(getattr(info, "duration_after_vad", 0) or 0) or duration
         total_audio = float(getattr(info, "duration", 0) or duration)
         result.language = str(getattr(info, "language", "") or (language or ""))
@@ -267,7 +267,7 @@ class FasterWhisperEngine(ASREngine):
         try:
             for raw in segments_iter:
                 if cancel is not None and cancel():
-                    result.warnings.append("Прервано пользователем")
+                    result.warnings.append(_("Interrupted by user"))
                     break
 
                 segment = Segment(
@@ -306,16 +306,19 @@ class FasterWhisperEngine(ASREngine):
                         eta = (total_audio - segment.end) / speed if speed > 0 else 0.0
                         progress(
                             fraction,
-                            f"{int(segment.end // 60):02d}:{int(segment.end % 60):02d} / "
-                            f"{int(total_audio // 60):02d}:{int(total_audio % 60):02d}"
-                            f" · {speed:.1f}× · осталось ~{int(eta // 60)}:{int(eta % 60):02d}",
+                            _("{pos} / {total} · {speed:.1f}× · ~{eta} left").format(
+                                pos=f"{int(segment.end // 60):02d}:{int(segment.end % 60):02d}",
+                                total=f"{int(total_audio // 60):02d}:{int(total_audio % 60):02d}",
+                                speed=speed,
+                                eta=f"{int(eta // 60)}:{int(eta % 60):02d}",
+                            ),
                         )
         except Exception as exc:  # noqa: BLE001
             if result.segments:
-                result.warnings.append(f"Распознавание прервано ошибкой: {exc}")
-                log.warning("Генератор сегментов упал после %d сегментов: %s", len(result.segments), exc)
+                result.warnings.append(_("Recognition interrupted by an error: {exc}").format(exc=exc))
+                log.warning(_("Segment generator failed after %d segments: %s"), len(result.segments), exc)
             else:
-                raise EngineError(f"Ошибка распознавания: {exc}") from exc
+                raise EngineError(_("Recognition error: {exc}").format(exc=exc)) from exc
         finally:
             if pipeline is not None:
                 try:
@@ -326,7 +329,7 @@ class FasterWhisperEngine(ASREngine):
         result.elapsed_seconds = time.time() - started
         result.processed_duration = processed_audio
         log.info(
-            "Готово: %d сегментов, язык=%s, %.1f× реального времени за %.1f с",
+            _("Done: %d segments, language=%s, %.1f× realtime in %.1f s"),
             len(result.segments), result.language, result.speed_x, result.elapsed_seconds,
         )
         return result
@@ -346,7 +349,7 @@ class FasterWhisperEngine(ASREngine):
 
 
 def _cpu_supports_int8() -> bool:
-    """Проверяет поддержку AVX (нужна для int8-ядер CTranslate2)."""
+    """Check AVX support (needed by CTranslate2 int8 kernels)."""
     try:
         import ctranslate2  # type: ignore
 
@@ -359,5 +362,5 @@ def _cpu_supports_int8() -> bool:
 
     if platform.machine().lower() in ("arm64", "aarch64"):
         return True
-    # x86-64 без AVX сегодня встречается редко — разрешаем, движок сам откатится
+    # x86-64 without AVX is rare today — allow it, the engine falls back itself
     return True

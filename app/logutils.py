@@ -1,18 +1,16 @@
-"""Логирование: консоль + «живая» лента в GUI + подробный файл на каждый запуск.
+"""Logging: console + live GUI feed + optional verbose per-launch file.
 
-Файловый лог ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН (чтобы не засорять logs/). Включается:
-  * галочкой «Сервис → Настройки → Журнал и диагностика» (сразу, без перезапуска);
-  * переменной окружения LOCALASR_LOG=1 (для разработчика/тестов);
-  * полем file_logging=true в settings.json.
+The file log is OFF by default (keeps logs/ clean). It is enabled via:
+  * Settings -> Logging & diagnostics (applies immediately, no restart);
+  * the LOCALASR_LOG=1 environment variable (for developers/tests);
+  * file_logging=true in settings.json.
 
-Когда включён — каждый запуск (каждое включение) создаёт НОВЫЙ файл
-`logs/localasr_ГГГГ-ММ-ДД_ЧЧ-ММ-СС.log` c исчерпывающей информацией уровня
-DEBUG: параметры запуска, железо, все сетевые запросы, стадии обработки,
-тайминги, полные стектрейсы. Старые логи автоматически подчищаются
-(хранится не более LOG_KEEP_FILES штук).
+When enabled, each launch creates a NEW logs/localasr_<date_time>.log with
+DEBUG-level detail (startup options, hardware, network, stages, timings,
+full tracebacks). Old files are pruned (LOG_KEEP_FILES kept).
 
-Важно: модуль не импортирует PySide6, поэтому его можно использовать и в CLI,
-и в воркерах. GUI подписывается на записи через `attach_qt_sink`.
+The module does not import PySide6, so CLI and workers can use it too;
+the GUI subscribes via attach_qt_sink.
 """
 
 from __future__ import annotations
@@ -28,27 +26,24 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from . import paths
+from .i18n import _
 
 LOGGER_NAME = "localasr"
-LOG_KEEP_FILES = 30            # сколько последних файл-логов хранить
+LOG_KEEP_FILES = 30
 _configured = False
 
-# --- состояние файлового лога (включается/выключается на лету) ------------- #
+# --- file log state (toggled at runtime) -------------------------------------- #
 _file_handler: Optional[logging.FileHandler] = None
 _file_path: Optional[Path] = None
 _file_lock = threading.RLock()
 
-#: библиотеки, чью болтовню мы приглушаем до WARNING
+#: third-party loggers silenced down to WARNING
 _NOISY_LIBS = (
     "faster_whisper", "ctranslate2", "pywhispercpp", "vosk", "urllib3", "av",
     "transformers", "torch", "torchaudio", "huggingface_hub", "filelock",
     "requests", "PIL", "matplotlib", "asyncio", "numba", "onnxruntime",
 )
 
-
-# --------------------------------------------------------------------------- #
-#  Форматы
-# --------------------------------------------------------------------------- #
 
 def _console_formatter() -> logging.Formatter:
     return logging.Formatter(
@@ -58,8 +53,6 @@ def _console_formatter() -> logging.Formatter:
 
 
 def _file_formatter() -> logging.Formatter:
-    # полный формат для файла: дата+время, поток и место вызова — чтобы любой
-    # баг можно было воспроизвести по логу без догадок
     return logging.Formatter(
         "%(asctime)s.%(msecs)03d | %(levelname)-7s | %(name)s | [%(threadName)s] | "
         "%(filename)s:%(lineno)d | %(message)s",
@@ -67,26 +60,20 @@ def _file_formatter() -> logging.Formatter:
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Базовая настройка (консоль + перехват исключений)
-# --------------------------------------------------------------------------- #
-
-
 def setup_logging(level: int = logging.INFO, root: Optional[Path] = None) -> logging.Logger:
-    """Настраивает корневой логгер приложения (идемпотентно).
+    """Configure the application root logger (idempotent).
 
-    Файловый лог здесь НЕ создаётся: он включается отдельно
-    (`configure_file_logging`) — по умолчанию выключен.
+    The file log is NOT created here; see configure_file_logging().
     """
     global _configured
     logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(logging.DEBUG)      # файл хочет DEBUG; хендлеры сами фильтруют
+    logger.setLevel(logging.DEBUG)      # the file wants DEBUG; handlers filter
     logger.propagate = False
 
     if _configured:
         return logger
 
-    # --- консоль, если она есть (pythonw -> sys.stdout is None) ------------
+    # console, if any (pythonw -> sys.stdout is None)
     stream = sys.stderr if sys.stderr is not None else None
     if stream is not None and os.environ.get("LOCALASR_QUIET") != "1":
         try:
@@ -97,10 +84,7 @@ def setup_logging(level: int = logging.INFO, root: Optional[Path] = None) -> log
         except (OSError, ValueError):
             pass
 
-    # --- перехват «чужих» библиотек (faster-whisper любит кричать) ---------
-    # Уровень WARNING: их сообщения не spam-ят консоль/журнал GUI, но когда
-    # файловый лог включён, он ставится и на root-логгер — предупреждения
-    # библиотек тоже попадут в файл (см. enable_file_logging).
+    # silence chatty third-party libraries (warnings still reach the file log)
     logging.getLogger().setLevel(logging.WARNING)
     for noisy in _NOISY_LIBS:
         lib_logger = logging.getLogger(noisy)
@@ -108,12 +92,11 @@ def setup_logging(level: int = logging.INFO, root: Optional[Path] = None) -> log
         lib_logger.propagate = True
         lib_logger.setLevel(logging.WARNING)
 
-    # критические исключения пишем в лог до того, как приложение упадёт
     def _excepthook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc, tb)
             return
-        logger.critical("Необработанное исключение", exc_info=(exc_type, exc, tb))
+        logger.critical(_("Unhandled exception"), exc_info=(exc_type, exc, tb))
         sys.__excepthook__(exc_type, exc, tb)
 
     try:
@@ -121,13 +104,12 @@ def setup_logging(level: int = logging.INFO, root: Optional[Path] = None) -> log
     except (AttributeError, TypeError):
         pass
 
-    # потоки тоже могут падать молча — перехватываем и их
     try:
         def _thread_excepthook(args):
             if issubclass(args.exc_type, SystemExit):
                 return
             logger.critical(
-                "Необработанное исключение в потоке %s", args.thread.name if args.thread else "?",
+                _("Unhandled exception in thread %s"), args.thread.name if args.thread else "?",
                 exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
             )
 
@@ -148,32 +130,32 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
 
 
 # --------------------------------------------------------------------------- #
-#  Файловый лог: включение/выключение на лету
+#  File log: toggle at runtime
 # --------------------------------------------------------------------------- #
 
 
 def _session_header() -> List[str]:
-    """Шапка запуска: всё, что нужно знать для воспроизведения бага."""
-    from .constants import APP_NAME, APP_VERSION  # локальный импорт: constants лёгок
+    """Startup header: everything needed to reproduce a bug."""
+    from .constants import APP_NAME, APP_VERSION
 
     lines = [
         "=" * 88,
-        f"{APP_NAME} {APP_VERSION} — сессия логирования начата",
-        f"  время      : {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"{APP_NAME} {APP_VERSION} — " + _("logging session started"),
+        f"  {_('time')}      : {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"  python     : {sys.version.splitlines()[0]} ({platform.python_implementation()})",
-        f"  платформа  : {platform.platform()}",
-        f"  процесс    : PID {os.getpid()}",
-        f"  исполняемый: {sys.executable}",
+        f"  {_('platform')}  : {platform.platform()}",
+        f"  {_('process')}    : PID {os.getpid()}",
+        f"  {_('executable')}: {sys.executable}",
         f"  cwd        : {os.getcwd()}",
         f"  argv       : {' '.join(sys.argv) or '—'}",
-        f"  проект     : {paths.ROOT_DIR}",
+        f"  {_('project')}     : {paths.ROOT_DIR}",
         "=" * 88,
     ]
     return lines
 
 
 def current_log_file() -> Optional[Path]:
-    """Путь к активному файл-логу (None — файловое логирование выключено)."""
+    """Path of the active file log (None when file logging is off)."""
     with _file_lock:
         return _file_path
 
@@ -184,7 +166,7 @@ def file_logging_enabled() -> bool:
 
 
 def _prune_old_logs(log_dir: Path) -> int:
-    """Оставляет LOG_KEEP_FILES свежайших лог-файлов, старые удаляет."""
+    """Keep the LOG_KEEP_FILES newest log files, delete older ones."""
     try:
         logs = sorted(
             log_dir.glob("localasr_*.log"),
@@ -204,11 +186,10 @@ def _prune_old_logs(log_dir: Path) -> int:
 
 
 def enable_file_logging(root: Optional[Path] = None, context: Optional[Dict[str, str]] = None) -> Optional[Path]:
-    """Создаёт НОВЫЙ файл лога (имя = дата/время включения) и подключает его.
+    """Create a NEW log file (named by enable time) and attach it.
 
-    Можно вызывать в любой момент работы программы — перезапуск не нужен.
-    Повторный вызов без disable не создаёт второй файл (идемпотентно).
-    Возвращает путь к файлу или None, если создать не удалось.
+    Safe to call at any moment; idempotent while enabled.
+    Returns the file path or None on failure.
     """
     global _file_handler, _file_path
     with _file_lock:
@@ -218,15 +199,14 @@ def enable_file_logging(root: Optional[Path] = None, context: Optional[Dict[str,
             log_dir = paths.logs_dir(root)
             stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
             path = log_dir / f"localasr_{stamp}.log"
-            # два запуска в одну секунду (скрипты/тесты) — не склеиваем в один
-            # файл: добавляем счётчик, у каждого запуска свой лог
+            # two launches in one second (scripts/tests) get separate files
             counter = 2
             while path.exists():
                 path = log_dir / f"localasr_{stamp}_{counter}.log"
                 counter += 1
             handler = logging.FileHandler(path, mode="a", encoding="utf-8")
         except OSError as exc:
-            get_logger().warning("Не удалось создать файловый лог: %s", exc)
+            get_logger().warning(_("Failed to create the file log: %s"), exc)
             return None
 
         handler.setFormatter(_file_formatter())
@@ -234,7 +214,7 @@ def enable_file_logging(root: Optional[Path] = None, context: Optional[Dict[str,
 
         logger = logging.getLogger(LOGGER_NAME)
         logger.addHandler(handler)
-        # предупреждения сторонних библиотек — тоже в файл (root-логгер)
+        # third-party warnings go to the file too (root logger)
         root_logger = logging.getLogger()
         root_logger.addHandler(handler)
 
@@ -245,19 +225,20 @@ def enable_file_logging(root: Optional[Path] = None, context: Optional[Dict[str,
             for line in _session_header():
                 logger.debug(line)
             for key, value in (context or {}).items():
-                logger.debug("контекст: %s = %s", key, value)
+                logger.debug(_("context: %s = %s"), key, value)
         except Exception:  # noqa: BLE001
             pass
 
         removed = _prune_old_logs(log_dir)
         logger.info(
-            "Файловый лог включён: %s%s", path, f" (удалено старых: {removed})" if removed else ""
+            _("File log enabled: %s%s"), path,
+            _(" (removed old: {})").format(removed) if removed else "",
         )
         return path
 
 
 def disable_file_logging(final_note: bool = True) -> None:
-    """Отключает файловый лог (файл остаётся на диске)."""
+    """Detach the file log (the file itself stays on disk)."""
     global _file_handler, _file_path
     with _file_lock:
         handler, _file_handler = _file_handler, None
@@ -266,7 +247,7 @@ def disable_file_logging(final_note: bool = True) -> None:
             return
         try:
             if final_note:
-                logging.getLogger(LOGGER_NAME).info("Файловый лог выключен (%s)", path)
+                logging.getLogger(LOGGER_NAME).info(_("File log disabled (%s)"), path)
             logging.getLogger(LOGGER_NAME).removeHandler(handler)
             logging.getLogger().removeHandler(handler)
             handler.flush()
@@ -276,7 +257,7 @@ def disable_file_logging(final_note: bool = True) -> None:
 
 
 def set_file_logging(enabled: bool, root: Optional[Path] = None) -> Optional[Path]:
-    """Включает/выключает файловый лог на лету. Возвращает путь (или None)."""
+    """Toggle the file log at runtime. Returns its path (or None)."""
     if enabled:
         return enable_file_logging(root)
     disable_file_logging()
@@ -288,9 +269,9 @@ def configure_file_logging(
     root: Optional[Path] = None,
     context: Optional[Dict[str, str]] = None,
 ) -> Optional[Path]:
-    """Применяет политику логирования при старте приложения.
+    """Apply the logging policy at startup.
 
-    Приоритет: LOCALASR_LOG (0/1) → settings.file_logging → False (по умолчанию).
+    Priority: LOCALASR_LOG (0/1) -> settings.file_logging -> False.
     """
     env = os.environ.get("LOCALASR_LOG", "").strip().lower()
     if env in ("1", "true", "yes", "on"):
@@ -305,7 +286,7 @@ def configure_file_logging(
 
 
 def list_log_files(root: Optional[Path] = None) -> List[Path]:
-    """Все лог-файлы приложения в logs/ (новые первыми)."""
+    """All application log files in logs/ (newest first)."""
     try:
         log_dir = paths.logs_dir(root)
         return sorted(log_dir.glob("localasr_*.log"), key=lambda p: p.name, reverse=True)
@@ -317,12 +298,12 @@ atexit.register(disable_file_logging, final_note=False)
 
 
 # --------------------------------------------------------------------------- #
-#  Мост в GUI
+#  GUI bridge
 # --------------------------------------------------------------------------- #
 
 
 class QtLogBridge(logging.Handler):
-    """Пересылает записи лога в Qt-сигнал (безопасно для потоков)."""
+    """Forwards log records to a Qt signal (thread-safe)."""
 
     def __init__(self, emit_callable: Callable[[str, str], None], level: int = logging.INFO) -> None:
         super().__init__(level)
@@ -337,7 +318,7 @@ class QtLogBridge(logging.Handler):
         try:
             self._emit(record.levelname, message)
         except RuntimeError:
-            # виджет уже удалён — отцепляемся
+            # the widget is gone — detach
             try:
                 logging.getLogger(LOGGER_NAME).removeHandler(self)
             except Exception:  # noqa: BLE001
