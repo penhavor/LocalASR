@@ -11,7 +11,11 @@
   * the disabled "Unload the model from memory" item is inactive and the
     theme contains the QMenu::item:disabled style (gray look);
   * the "Keep a verbose log file" toggle in settings creates the log
-    IMMEDIATELY (no restart) and stops writing when unchecked.
+    IMMEDIATELY (no restart) and stops writing when unchecked;
+  * resetting settings while the ACTIVE interface language differs from the
+    post-reset one offers a restart (and does not when they are equal);
+  * the result-format combo (txt/srt/vtt/json/md) drives settings, the
+    output hint and the "Timecodes in .txt" availability.
 
 Run:  cd <project root> && QT_QPA_PLATFORM=offscreen python tests/test_ui_behaviors.py
 """
@@ -269,11 +273,162 @@ def test_settings_dialog_logging_toggle() -> None:
         dialog.close()
 
 
+def test_reset_language_offers_restart() -> None:
+    print("== reset settings: interface language changes -> restart is offered ==")
+    import os as _os
+
+    from app import i18n as i18n_mod
+    from app.settings import Settings
+    from app.ui import compat, dialogs as dialogs_mod
+
+    # remember the environment so detect_system_language() is deterministic
+    env_backup = {var: _os.environ.get(var) for var in ("LANGUAGE", "LC_ALL", "LC_CTYPE", "LANG")}
+    _os.environ["LANGUAGE"] = "ru"
+    for var in ("LC_ALL", "LC_CTYPE", "LANG"):
+        _os.environ.pop(var, None)
+
+    real_message_box = dialogs_mod.QMessageBox
+    asked: list[str] = []
+    restarts: list[bool] = []
+
+    class FakeMessageBox:
+        """Records every question and always answers YES."""
+
+        @staticmethod
+        def question(parent, title, text, *args, **kwargs):
+            asked.append(str(title))
+            return compat.message_box_yes()
+
+        def __getattr__(self, name):   # everything else -> the real class
+            return getattr(real_message_box, name)
+
+    original_restart = dialogs_mod.SettingsDialog._restart_application
+    dialogs_mod.SettingsDialog._restart_application = lambda self: restarts.append(True)
+    dialogs_mod.QMessageBox = FakeMessageBox
+    try:
+        # --- case A: active language EN, system RU, no explicit preference ---
+        # (e.g. the user had chosen English explicitly; the reset returns the
+        #  preference to AUTO -> the system Russian must be offered a restart)
+        i18n_mod.init("en")
+        with tempfile.TemporaryDirectory() as td:
+            settings = Settings.load(Path(td))
+            settings.ui_language = "en"
+            dialog = dialogs_mod.SettingsDialog(settings, {}, None)
+            dialog._reset_defaults()
+            app.processEvents()   # fire the scheduled restart
+            check(settings.ui_language == "", "reset returned ui_language to AUTO")
+            check(len(asked) >= 2 and asked[-1] == i18n_mod.t("Interface language"),
+                  f"the restart question was asked: {asked}")
+            check(restarts == [True], "restart was requested after YES")
+            dialog.close()
+
+        # --- case B: active language already equals the post-reset language ---
+        asked.clear()
+        restarts.clear()
+        i18n_mod.init("ru")
+        with tempfile.TemporaryDirectory() as td:
+            settings = Settings.load(Path(td))
+            settings.ui_language = ""
+            dialog = dialogs_mod.SettingsDialog(settings, {}, None)
+            dialog._reset_defaults()
+            app.processEvents()
+            check(len(asked) == 1, f"only the reset confirmation, no restart offer: {asked}")
+            check(restarts == [], "no restart when the language does not change")
+            dialog.close()
+
+        # --- case C: the user declines the restart -> no restart, no crash -----
+        asked.clear()
+        restarts.clear()
+
+        class NoMessageBox(FakeMessageBox):
+            @staticmethod
+            def question(parent, title, text, *args, **kwargs):
+                asked.append(str(title))
+                # first question (the reset confirmation) — YES,
+                # second (restart) — NO
+                return compat.message_box_yes() if len(asked) == 1 else compat.message_box_no()
+
+        dialogs_mod.QMessageBox = NoMessageBox
+        i18n_mod.init("en")
+        with tempfile.TemporaryDirectory() as td:
+            settings = Settings.load(Path(td))
+            settings.ui_language = "en"
+            dialog = dialogs_mod.SettingsDialog(settings, {}, None)
+            dialog._reset_defaults()
+            app.processEvents()
+            check(len(asked) == 2 and restarts == [], "NO answer -> the app is not restarted")
+            dialog.close()
+    finally:
+        dialogs_mod.QMessageBox = real_message_box
+        dialogs_mod.SettingsDialog._restart_application = original_restart
+        for var, value in env_backup.items():
+            if value is None:
+                _os.environ.pop(var, None)
+            else:
+                _os.environ[var] = value
+        i18n_mod.init("ru")   # the stable language of this test module
+
+
+def test_result_format_combo() -> None:
+    print("== result format combo (txt/srt/vtt/json/md) ==")
+    from app.settings import Settings
+    from app.ui.main_window import MainWindow
+
+    check(MainWindow._ui_format("txt-time") == "txt", "txt-time maps to the TXT combo item")
+    check(MainWindow._ui_format("srt") == "srt", "known formats pass through")
+    check(MainWindow._ui_format("garbage") == "txt", "unknown formats fall back to txt")
+    check(MainWindow._ui_format("") == "txt", "empty falls back to txt")
+
+    with tempfile.TemporaryDirectory() as td:
+        settings = Settings.load(Path(td))
+        win = MainWindow(settings=settings)
+        try:
+            # default state
+            check(win.format_combo.currentData() == "txt", "default format is txt")
+            check(win.timestamps_check.isEnabled(), "timecodes are enabled for txt")
+
+            # switching to srt: settings, hint and the timecodes box follow
+            index = win.format_combo.findData("srt")
+            win.format_combo.setCurrentIndex(index)
+            app.processEvents()
+            check(settings.output_format == "srt", "settings.output_format follows the combo")
+            check(not win.timestamps_check.isEnabled(), "timecodes are disabled for srt")
+            check(".srt" in win.output_hint.text(), f"the hint shows the .srt name: {win.output_hint.text()[:80]}")
+
+            # vtt / json / md round-trip through _collect_settings
+            for fmt in ("vtt", "json", "md"):
+                win.format_combo.setCurrentIndex(win.format_combo.findData(fmt))
+                app.processEvents()
+                check(settings.output_format == fmt, f"format {fmt} is saved")
+
+            # back to txt + timecodes checked -> the job upgrades to txt-time
+            win.format_combo.setCurrentIndex(win.format_combo.findData("txt"))
+            app.processEvents()
+            check(settings.output_format == "txt" and win.timestamps_check.isEnabled(),
+                  "txt restores the timecodes checkbox")
+            win.timestamps_check.setChecked(True)
+            app.processEvents()
+            check(settings.add_timestamps_to_txt is True, "the timecode flag is saved")
+            check(".txt" in win.output_hint.text(), "the hint is back to .txt")
+
+            # a settings.json with "txt-time" (CLI compatibility) normalizes:
+            # combo=txt + the timecodes box checked
+            settings.output_format = "txt-time"
+            win._apply_settings_to_ui()
+            app.processEvents()
+            check(win.format_combo.currentData() == "txt", "txt-time shows as TXT in the combo")
+            check(win.timestamps_check.isChecked(), "txt-time turns the timecodes box on")
+        finally:
+            win.close()
+
+
 def main() -> int:
     test_wheel_guard()
     test_filters_collapse()
     test_window_tweaks()
     test_settings_dialog_logging_toggle()
+    test_reset_language_offers_restart()
+    test_result_format_combo()
     print()
     if failures:
         print(f"FAILED: {len(failures)}")

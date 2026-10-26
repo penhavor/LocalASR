@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 APP_NAME = "LocalASR"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # --- project folders --------------------------------------------------------
 MODELS_DIRNAME = "models"
@@ -18,6 +18,14 @@ REPO_URL = "https://github.com/penhavor/LocalASR"
 REPO_RAW_BASE = "https://raw.githubusercontent.com/penhavor/LocalASR/main"
 CATALOG_REMOTE_URL = f"{REPO_RAW_BASE}/resources/models_catalog.json"
 CATALOG_CACHE_TTL_HOURS = 24
+
+# --- self-update (app/core/updater.py) --------------------------------------
+GITHUB_OWNER = "penhavor"
+GITHUB_REPO = "LocalASR"
+GITHUB_API_BASE = "https://api.github.com"
+#: short timeout: the startup check must not hang on a flaky connection
+UPDATE_HTTP_TIMEOUT = 10
+CHANGELOG_FILENAME = "CHANGELOG.md"
 
 SETTINGS_FILENAME = "settings.json"
 

@@ -438,13 +438,38 @@ class SettingsDialog(QDialog):
         )
         if answer != compat.message_box_yes():
             return
+        language_before = i18n.current_language()
         self.settings.reset_to_defaults()
         if self._on_reset_defaults is not None:
             try:
                 self._on_reset_defaults()
             except Exception:  # noqa: BLE001
                 pass
+        # A reset returns ui_language to AUTO ("follow the system"). When the
+        # ACTIVE language differs from the post-reset one (e.g. an explicit
+        # English on a Russian system — or vice versa), the interface would
+        # silently stay in the old language until a manual restart. Offer the
+        # restart right away, exactly like the Save path does.
+        new_pref = (self.settings.ui_language or "").strip().lower()
+        new_language = new_pref if new_pref in i18n.SUPPORTED else i18n.detect_system_language()
+        language_changed = new_language != language_before
         self.done(0)   # not accept(): stale widget values must not be saved
+        if language_changed:
+            names = dict((value, label) for label, value in i18n.language_choices())
+            question = QMessageBox.question(
+                self.parentWidget() or self, _("Interface language"),
+                _("Settings were reset to defaults.\n"
+                  "The interface language is now \"{new}\", but the running window "
+                  "still shows \"{old}\".\n\n"
+                  "Restart the application now to apply the language?").format(
+                    new=names.get(new_language, new_language),
+                    old=names.get(language_before, language_before)),
+                compat.message_box_yes() | compat.message_box_no(),
+                compat.message_box_yes(),
+            )
+            if question == compat.message_box_yes():
+                self._restart_requested = True
+                QTimer.singleShot(0, self._restart_application)
 
     # -- helpers ------------------------------------------------------------------ #
     @staticmethod

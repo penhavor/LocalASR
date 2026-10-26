@@ -211,6 +211,11 @@ def download_file(
     file is re-downloaded, not saved. Retry pauses listen to cancellation.
     """
     requests = _requests()
+    # IMPORTANT: go through session() — it pins Accept-Encoding: identity.
+    # With the default "gzip" the server may compress TEXT files, and the
+    # Content-Length check below would compare the compressed header with the
+    # decompressed body ("got 4743 of 2029 bytes") and retry forever.
+    sess = session()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
@@ -226,7 +231,7 @@ def download_file(
     while True:
         attempt += 1
         try:
-            with requests.get(url, stream=True, timeout=timeout, headers=headers, allow_redirects=True) as resp:
+            with sess.get(url, stream=True, timeout=timeout, headers=headers, allow_redirects=True) as resp:
                 if existing and resp.status_code == 416:
                     # the file is already fully downloaded
                     existing = 0

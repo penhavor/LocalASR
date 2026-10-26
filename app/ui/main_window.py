@@ -11,6 +11,7 @@ from typing import List, Optional
 from PySide6.QtCore import QByteArray, QUrl, QTimer, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -76,6 +77,8 @@ from .workers import (
     PackageInstaller,
     TorchCudaProbeWorker,
     TranscribeWorker,
+    UpdateApplyWorker,
+    UpdateCheckWorker,
 )
 
 log = get_logger("ui")
@@ -161,6 +164,9 @@ class MainWindow(QMainWindow):
         self.package_dialog: Optional[ProgressDialog] = None
         self.catalog_worker: Optional[CatalogRefreshWorker] = None
         self.restore_worker: Optional[FileRestoreWorker] = None
+        self.update_worker: Optional[UpdateCheckWorker] = None
+        self.update_apply_worker: Optional[UpdateApplyWorker] = None
+        self.update_dialog: Optional[ProgressDialog] = None
         self.log_handler = None
 
         self.results: dict[int, FileResult] = {}
@@ -349,7 +355,7 @@ class MainWindow(QMainWindow):
 
         save_label = make_label(_("Where to save"), "Dim")
         save_label.setToolTip(_(
-            "Folder for the resulting .txt files (file name = original name).\n"
+            "Folder for the result files (file name = original name).\n"
             "Default: outputs/ inside the project folder."
         ))
         grid.addWidget(save_label, 1, 0)
@@ -373,6 +379,31 @@ class MainWindow(QMainWindow):
         reset_output.clicked.connect(self._reset_output_dir)
         save_row.addWidget(reset_output)
         grid.addLayout(save_row, 1, 1, 1, 3)
+
+        format_label = make_label(_("Result format"), "Dim")
+        format_label.setToolTip(_(
+            "Extension and structure of the result file:\n"
+            "  TXT — plain text (notes, summaries);\n"
+            "  SRT / VTT — subtitles for players and the web;\n"
+            "  JSON — segments with timecodes (for further processing);\n"
+            "  Markdown — text with an information header."
+        ))
+        grid.addWidget(format_label, 2, 0)
+        self.format_combo = QComboBox()
+        for value, title in (
+            ("txt", _("TXT — plain text")),
+            ("srt", _("SRT — subtitles")),
+            ("vtt", _("VTT — subtitles for the web")),
+            ("json", _("JSON — segments with timecodes")),
+            ("md", _("Markdown — text with a header")),
+        ):
+            self.format_combo.addItem(title, value)
+        self.format_combo.setToolTip(format_label.toolTip())
+        self.format_combo.setCursor(compat.CURSOR_POINTING_HAND)
+        format_index = self.format_combo.findData(self._ui_format(self.settings.output_format))
+        self.format_combo.setCurrentIndex(format_index if format_index >= 0 else 0)
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        grid.addWidget(self.format_combo, 2, 1, 1, 3)
 
         options_layout.addLayout(grid)
 
@@ -411,11 +442,15 @@ class MainWindow(QMainWindow):
         toggles.addWidget(self.paragraph_check)
 
         self.timestamps_check = QCheckBox(_("Timecodes in .txt"))
-        self.timestamps_check.setChecked(self.settings.add_timestamps_to_txt)
+        self.timestamps_check.setChecked(
+            bool(self.settings.add_timestamps_to_txt) or self.settings.output_format == "txt-time"
+        )
         self.timestamps_check.setToolTip(_(
             "Adds [00:12:34]-style timestamps before phrases in the .txt — handy for\n"
-            "finding a place in the recording. The result is still a plain .txt file."
+            "finding a place in the recording. The result is still a plain .txt file.\n"
+            "Applies only to the TXT format (disabled for the other formats)."
         ))
+        self.timestamps_check.setEnabled(self._ui_format(self.settings.output_format) == "txt")
         self.timestamps_check.toggled.connect(self._on_settings_changed)
         toggles.addWidget(self.timestamps_check)
 
@@ -768,6 +803,11 @@ class MainWindow(QMainWindow):
         ))
         self._add_action(help_menu, _("README (GitHub)"), lambda: QDesktopServices.openUrl(QUrl(REPO_URL)),
                          tip=_("Open the project page with documentation in the browser"))
+        self._add_action(help_menu, _("Check for updates…"), lambda: self.on_check_updates(manual=True),
+                         tip=_("Compare the installed version with the latest release on GitHub.\n"
+                             "Only the changed program files are downloaded; models, settings\n"
+                             "and results are not touched. Runs automatically on startup\n"
+                             "(silently — when there is no internet or no new version)."))
         self._add_action(help_menu, _("Report an issue"),
                          lambda: QDesktopServices.openUrl(QUrl(f"{REPO_URL}/issues/new")),
                          tip=_("Open the GitHub new-issue form (an account is needed)"))
@@ -841,6 +881,15 @@ class MainWindow(QMainWindow):
         self._restore_selected_model()
         self._update_output_hint()
         QTimer.singleShot(400, self._check_integrity)
+        # Automatic update check a little later: the window is already visible,
+        # and a missing internet connection ends the check silently.
+        # Skipped in quiet/test mode (LOCALASR_QUIET) and when explicitly
+        # disabled via LOCALASR_NO_UPDATE_CHECK=1.
+        if (
+            os.environ.get("LOCALASR_QUIET") != "1"
+            and os.environ.get("LOCALASR_NO_UPDATE_CHECK") != "1"
+        ):
+            QTimer.singleShot(2500, lambda: self.on_check_updates(manual=False))
 
     def _restore_selected_model(self) -> None:
         self.rebuild_model_combo()
@@ -1133,6 +1182,213 @@ class MainWindow(QMainWindow):
             self.models_panel.rebuild()
             self._restore_selected_model()
         self._log(message)
+
+    # ================================================================== #
+    #  Self-update (Help → Check for updates… + a silent check on startup)
+    # ================================================================== #
+    def on_check_updates(self, manual: bool = True, force: bool = False) -> None:
+        """Start the version check in the background (GitHub API).
+
+        manual=True  — user pressed the menu item: EVERY outcome is reported
+                       (up to date / no internet / error).
+        manual=False — startup auto-check: silent unless an update is found.
+        force=True   — repair mode: audit the installation against its own
+                       release tree even when no newer version exists.
+        """
+        if self.update_worker is not None and self.update_worker.isRunning():
+            if manual:
+                self._toast(_("The update check is already running…"))
+            return
+        if self.update_apply_worker is not None and self.update_apply_worker.isRunning():
+            if manual:
+                QMessageBox.information(
+                    self, _("Update"), _("The update is already in progress."))
+            return
+        if manual:
+            self._toast(_("Checking for updates…"))
+            log.debug("Manual update check started (current version %s, force=%s)",
+                      APP_VERSION, force)
+        worker = UpdateCheckWorker(manual=manual, force=force, parent=self)
+        worker.finishedWith.connect(self._on_update_checked)
+        self.update_worker = worker
+        worker.start()
+
+    def _on_update_checked(self, info) -> None:
+        worker, self.update_worker = self.update_worker, None
+        if worker is not None:
+            worker.deleteLater()
+
+        if not info.ok:
+            # no internet / GitHub unreachable / API error
+            if info.manual:
+                log.info("Update check: %s", info.error)
+                QMessageBox.warning(
+                    self, _("Update check"),
+                    info.error or _("GitHub is unavailable. Check your internet connection."),
+                )
+            else:
+                # the automatic startup check stays SILENT without internet
+                log.debug("Automatic update check skipped: %s", info.error)
+            return
+
+        if not info.update_available:
+            if info.manual:
+                if info.repair:
+                    text = _("All program files match version {version} — nothing to restore.").format(
+                        version=info.latest_version or info.current_version)
+                else:
+                    # shows BOTH versions: a local build may be NEWER than the
+                    # hub (unpublished release) — the user must see why nothing
+                    # is offered instead of a bare "you are up to date"
+                    text = _("No updates: the latest version on GitHub is {latest}, you have {version}.").format(
+                        latest=info.latest_version or "—", version=info.current_version)
+                self._log(text)
+                QMessageBox.information(self, _("Update check"), text)
+            else:
+                log.debug("Automatic update check: up to date (%s)", info.current_version)
+            return
+
+        self._offer_update(info)
+
+    def _offer_update(self, info) -> None:
+        """Yes/No prompt: a newer version exists — update now?
+
+        Before asking, the dialog explains HOW BIG the update is (major or
+        minor, how many files are added/changed/removed, whether dependencies
+        will be re-installed) so the user understands what they agree to.
+        """
+        from ..core import updater
+
+        size_text = paths.human_size(info.total_bytes) if info.total_bytes else "—"
+        added_n = len(info.added)
+        changed_n = len(info.download) - added_n
+        if updater.classify_update(info) == "major":
+            kind = _("Major update: replaces most of the program files.")
+        else:
+            kind = _("Minor update: touches only a part of the program files.")
+        details = _("To be added: {add}, changed: {chg}, removed: {del_} ({size}).").format(
+            add=added_n, chg=changed_n, del_=len(info.delete), size=size_text)
+        deps = _(
+            "\n⚠ This update also refreshes the dependencies: at the next start "
+            "the program will install new libraries (internet needed)."
+        ) if info.deps_changed else ""
+        data = _("Your models, settings, results and logs are not touched in any case.")
+        notes = (info.release_notes or "").strip()
+        if len(notes) > 400:
+            notes = notes[:400].rstrip() + "…"
+        notes_block = ("\n\n" + _("What's new:") + "\n" + notes) if notes and not info.repair else ""
+        self._log(_("A new version is available: {ver} (installed: {cur})").format(
+            ver=info.latest_version, cur=info.current_version))
+        if info.repair:
+            prompt = _(
+                "Some program files do not match version {ver} — probably after "
+                "an interrupted update.\n\n"
+                "{details}{deps}\n"
+                "{data}\n"
+                "Only the mismatched files will be downloaded.{notes}\n\n"
+                "Restore them now?"
+            ).format(ver=info.latest_version or info.tag, details=details, deps=deps,
+                     data=data, notes=notes_block)
+        else:
+            prompt = _(
+                "A new version of {app} is available: {ver} (installed: {cur}).\n\n"
+                "{kind}\n"
+                "{details}{deps}\n"
+                "{data}\n"
+                "Only the changed files will be downloaded.{notes}\n\n"
+                "Update now?"
+            ).format(app=APP_NAME, ver=info.latest_version, cur=info.current_version,
+                     kind=kind, details=details, deps=deps, data=data, notes=notes_block)
+        answer = QMessageBox.question(
+            self, _("Update available"), prompt,
+            compat.message_box_yes() | compat.message_box_no(),
+            compat.message_box_yes(),
+        )
+        if answer == compat.message_box_yes():
+            self._start_update_apply(info)
+
+    def _start_update_apply(self, info) -> None:
+        if self.update_apply_worker is not None and self.update_apply_worker.isRunning():
+            return
+        dialog = ProgressDialog(
+            _("Updating {app}").format(app=APP_NAME),
+            _("Downloading only the changed files of version {ver}…\n"
+              "User data (models, settings, results, logs) is not affected.").format(
+                ver=info.latest_version or info.tag),
+            parent=self,
+        )
+        worker = UpdateApplyWorker(info, self)
+        worker.progress.connect(dialog.set_fraction)
+        worker.progress.connect(lambda fraction, status: dialog.set_status(status))
+        worker.outputLine.connect(dialog.append_log)
+        dialog.cancelRequested.connect(worker.cancel)
+        worker.finishedWith.connect(
+            lambda ok, message: self._on_update_applied(ok, message, info, dialog))
+        self.update_dialog = dialog
+        self.update_apply_worker = worker
+        worker.start()
+        dialog.exec()
+
+    def _on_update_applied(self, ok: bool, message: str, info, dialog: ProgressDialog) -> None:
+        dialog.finish(_("Done") if ok else _("Stopped"))
+        dialog.accept()
+        worker, self.update_apply_worker = self.update_apply_worker, None
+        reason = getattr(worker, "reason", "") if worker is not None else ""
+        if worker is not None:
+            worker.deleteLater()
+        self.update_dialog = None
+        self._log(message)
+
+        if not ok:
+            QMessageBox.warning(self, _("Update"), message)
+            if reason in ("verify", "failed"):
+                # something is missing/broken on disk — offer to finish the job
+                retry = QMessageBox.question(
+                    self, _("Update"),
+                    _("Re-run the update check now to download what is missing?"),
+                    compat.message_box_yes() | compat.message_box_no(),
+                    compat.message_box_yes(),
+                )
+                if retry == compat.message_box_yes():
+                    # force=True: audit against the release tree even though the
+                    # version already looks current (partial-update aftermath)
+                    QTimer.singleShot(0, lambda: self.on_check_updates(manual=True, force=True))
+            return
+
+        # files on disk are new AND verified, but the RUNNING process still
+        # holds the old code in memory — a restart activates the new version.
+        # The verified-success message is shown INSIDE the restart question so
+        # the user always sees one of the two outcomes (success / failure).
+        question_text = (
+            message + "\n\n" + _("Restart the application now to run the new version?")
+        )
+        if info.deps_changed:
+            question_text += _(
+                "\n\nThe update also refreshed the dependency list — the program "
+                "will prepare them automatically at startup."
+            )
+        answer = QMessageBox.question(
+            self, _("Update finished"), question_text,
+            compat.message_box_yes() | compat.message_box_no(),
+            compat.message_box_yes(),
+        )
+        if answer == compat.message_box_yes():
+            from ..core.relaunch import restart_app
+
+            # a dependency change needs the bootstrap env repair on the way
+            entry = "launcher/main.py" if info.deps_changed else None
+            if restart_app(entry):
+                app = QApplication.instance()
+                if app is not None:
+                    app.quit()
+            else:
+                QMessageBox.information(
+                    self, _("Update finished"),
+                    _("Automatic restart failed. Please close the application "
+                      "and start it again to run the new version."),
+                )
+        else:
+            self._toast(_("The new version will take effect after a restart"))
 
     def _unload_model(self) -> None:
         if self._working:
@@ -1920,10 +2176,23 @@ class MainWindow(QMainWindow):
         )
 
     # ---------------- service ------------------------------------------- #
+    @staticmethod
+    def _ui_format(fmt: str) -> str:
+        """settings.output_format -> a value of the format combo.
+
+        "txt-time" is not a separate combo item: it means TXT + the checked
+        "Timecodes in .txt" box (kept for settings.json/CLI compatibility).
+        """
+        fmt = (fmt or "txt").strip().lower()
+        if fmt == "txt-time":
+            return "txt"
+        return fmt if fmt in ("txt", "srt", "vtt", "json", "md") else "txt"
+
     def _collect_settings(self) -> None:
         self.settings.language = self.language_combo.currentData() or ""
-        # the result is always txt: there is no separate format setting anymore
-        self.settings.output_format = "txt"
+        # result format: the combo in the "2 · How to recognize" block;
+        # "Timecodes in .txt" upgrades txt to txt-time at the start of the job
+        self.settings.output_format = self._ui_format(self.format_combo.currentData() or "txt")
         # IMPORTANT: the default value ("outputs/ inside the project") is NOT
         # saved as an absolute path — otherwise moving the project folder would
         # keep sending results to the OLD path. Empty string = "default".
@@ -1950,10 +2219,17 @@ class MainWindow(QMainWindow):
         index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(index if index >= 0 else 1)
         self.output_edit.setText(self.settings.output_dir or str(paths.outputs_dir()))
+        fmt = self._ui_format(self.settings.output_format)
+        format_index = self.format_combo.findData(fmt)
+        self.format_combo.setCurrentIndex(format_index if format_index >= 0 else 0)
         self.vad_check.setChecked(self.settings.use_vad)
         self.clean_check.setChecked(self.settings.suppress_hallucinations)
         self.paragraph_check.setChecked(self.settings.paragraphs)
-        self.timestamps_check.setChecked(self.settings.add_timestamps_to_txt)
+        # "txt-time" in the settings means TXT + timecodes (CLI compatibility)
+        self.timestamps_check.setChecked(
+            bool(self.settings.add_timestamps_to_txt) or self.settings.output_format == "txt-time"
+        )
+        self.timestamps_check.setEnabled(fmt == "txt")
         self.wordts_check.setChecked(self.settings.word_timestamps)
         self.translate_check.setChecked(self.settings.translate_to_english)
         beam = int(self.settings.beam_size or 5)
@@ -1981,6 +2257,12 @@ class MainWindow(QMainWindow):
         self._collect_settings()
         self._update_output_hint()
 
+    def _on_format_changed(self, *_args) -> None:
+        # timecodes only make sense in a plain .txt — disable the box otherwise
+        fmt = self.format_combo.currentData() or "txt"
+        self.timestamps_check.setEnabled(fmt == "txt")
+        self._on_settings_changed()
+
     def _toggle_advanced(self, checked: bool) -> None:
         self.advanced_frame.setVisible(checked)
         self.advanced_toggle.setText(_("▾ Advanced options") if checked else _("▸ Advanced options"))
@@ -1989,7 +2271,9 @@ class MainWindow(QMainWindow):
 
     def _update_output_hint(self) -> None:
         output_dir = self.current_output_dir()
-        fmt = "txt-time" if self.timestamps_check.isChecked() else "txt"
+        fmt = self.format_combo.currentData() or "txt"
+        if fmt == "txt" and self.timestamps_check.isChecked():
+            fmt = "txt-time"
         sample = paths.sanitize_stem(_("lecture 1.mp4"))
         suffix = paths.output_suffix(fmt)
         sample_name = f"{sample} {paths.datetime_stamp()}{suffix}"
@@ -2114,6 +2398,8 @@ class MainWindow(QMainWindow):
             ("restore", self.restore_worker),
             ("catalog", self.catalog_worker),
             ("torch_probe", self.torch_probe),
+            ("update_check", self.update_worker),
+            ("update_apply", self.update_apply_worker),
         ):
             stop_worker(worker, 4000, name)
 

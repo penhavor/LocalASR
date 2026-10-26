@@ -347,6 +347,129 @@ class CatalogRefreshWorker(QThread):
 
 
 # --------------------------------------------------------------------------- #
+#  Self-update (GitHub releases + differential file sync)
+# --------------------------------------------------------------------------- #
+
+
+class UpdateCheckWorker(QThread):
+    """Check GitHub for a newer version (see core/updater.py). Never raises:
+    every outcome (offline, error, up-to-date, update available) arrives as an
+    UpdateInfo object through finishedWith."""
+
+    finishedWith = Signal(object)   # updater.UpdateInfo
+
+    def __init__(self, manual: bool = False, force: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.manual = bool(manual)
+        self.force = bool(force)
+
+    def run(self) -> None:  # noqa: D102
+        from ..core import updater
+
+        try:
+            info = updater.check_for_update(manual=self.manual, force=self.force)
+        except Exception as exc:  # noqa: BLE001 - double safety net
+            info = updater.UpdateInfo(manual=self.manual)
+            info.error = _("Unexpected error while checking for updates: {exc}").format(
+                exc=f"{type(exc).__name__}: {exc}"
+            )
+        self.finishedWith.emit(info)
+
+
+class UpdateApplyWorker(QThread):
+    """Download ONLY the changed files of the new version and remove the
+    files deleted upstream. User data (models/, settings/, outputs/, logs/,
+    environments) is never touched — see core/updater.py."""
+
+    progress = Signal(float, str)
+    outputLine = Signal(str)
+    finishedWith = Signal(bool, str)
+
+    def __init__(self, info, parent=None) -> None:
+        super().__init__(parent)
+        self.info = info
+        self._cancel = False
+        #: why the update did not finish: "" | "cancelled" | "failed" | "verify"
+        self.reason = ""
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:  # noqa: D102
+        from ..core import updater
+
+        def report(fraction: float, status: str) -> None:
+            self.progress.emit(fraction, status)
+            self.outputLine.emit(status)
+
+        try:
+            updated, deleted, failed, cancelled = updater.apply_update(
+                self.info,
+                progress=report,
+                cancel=lambda: self._cancel,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Update failed: %s\n%s", exc, traceback.format_exc())
+            self.reason = "failed"
+            self.finishedWith.emit(False, _("The update failed: {exc}").format(exc=exc))
+            return
+
+        if cancelled:
+            self.reason = "cancelled"
+            self.finishedWith.emit(False, _(
+                "The update was cancelled.\n"
+                "Already downloaded files were kept; run the check again later "
+                "to finish the update."
+            ))
+            return
+        if failed:
+            self.reason = "failed"
+            listing = "\n".join("  • " + item for item in failed[:8])
+            if len(failed) > 8:
+                listing += _("\n  … and {n} more").format(n=len(failed) - 8)
+            self.finishedWith.emit(False, _(
+                "Updated: {ok}, failed: {fail}.\n{listing}\n\n"
+                "The update can be repeated — only the remaining files will be downloaded."
+            ).format(ok=len(updated), fail=len(failed), listing=listing))
+            return
+
+        # ---- post-update audit: every file must match the release tree ---- #
+        self.progress.emit(1.0, _("Verifying files…"))
+        try:
+            bad, not_deleted = updater.verify_update(self.info)
+        except Exception as exc:  # noqa: BLE001 - a broken audit is not fatal
+            log.warning("Post-update verification failed: %s", exc)
+            bad, not_deleted = [], []
+        if bad or not_deleted:
+            self.reason = "verify"
+            listing = "\n".join("  • " + item for item in (bad + not_deleted)[:8])
+            if len(bad) + len(not_deleted) > 8:
+                listing += _("\n  … and {n} more").format(n=len(bad) + len(not_deleted) - 8)
+            self.finishedWith.emit(False, _(
+                "The update did NOT finish completely: {n} of {total} file(s) do not "
+                "match version {ver}:\n{listing}\n\n"
+                "The usual reason is an internet drop while downloading. "
+                "The files that did download are intact.\n"
+                "Run the update check again — only the missing pieces will be fetched."
+            ).format(
+                n=len(bad) + len(not_deleted), total=max(1, len(self.info.tree)),
+                ver=self.info.latest_version or self.info.tag, listing=listing,
+            ))
+            return
+
+        deld = ""
+        if deleted:
+            deld = _("\nRemoved obsolete files: {n}.").format(n=len(deleted))
+        self.finishedWith.emit(True, _(
+            "Update to {version} finished successfully: "
+            "all program files ({n}) match the release.{deld}"
+        ).format(
+            version=self.info.latest_version or self.info.tag,
+            n=len(self.info.tree), deld=deld,
+        ))
+
+
+# --------------------------------------------------------------------------- #
 #  Integrity diagnostics (project files + environment audit)
 # --------------------------------------------------------------------------- #
 

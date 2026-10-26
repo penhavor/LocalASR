@@ -24,12 +24,23 @@ def _gui_python() -> str:
     return str(exe)
 
 
-def restart_app() -> bool:
-    """Spawn a detached copy of the app; the caller should exit right after."""
+def restart_app(entry_rel: Optional[str] = None) -> bool:
+    """Spawn a detached copy of the app; the caller should exit right after.
+
+    entry_rel: optional project-relative entry point (e.g. "launcher/main.py"
+    to route the restart through bootstrap — needed after an update that
+    changed requirements/base.txt so the environment gets re-installed).
+    """
     root = paths.ROOT_DIR
-    entry = root / "launcher" / "run_app.py"
-    if not entry.is_file():
-        entry = root / "launcher" / "main.py"
+    entry: Optional[Path] = None
+    if entry_rel:
+        candidate = root / Path(entry_rel)
+        if candidate.is_file():
+            entry = candidate
+    if entry is None:
+        entry = root / "launcher" / "run_app.py"
+        if not entry.is_file():
+            entry = root / "launcher" / "main.py"
     env = os.environ.copy()
     env["LOCALASR_ROOT"] = str(root)
     env["PYTHONIOENCODING"] = "utf-8"
